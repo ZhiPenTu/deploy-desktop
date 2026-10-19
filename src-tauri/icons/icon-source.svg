@@ -1,0 +1,26 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0.1" y1="0" x2="0.9" y2="1">
+      <stop offset="0" stop-color="#4F74FF"/>
+      <stop offset="0.55" stop-color="#2F4FE0"/>
+      <stop offset="1" stop-color="#12237F"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.2" cy="0.1" r="0.95">
+      <stop offset="0" stop-color="#BBD0FF" stop-opacity="0.5"/>
+      <stop offset="1" stop-color="#BBD0FF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="amber" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFE08A"/>
+      <stop offset="1" stop-color="#FFAE18"/>
+    </linearGradient>
+  </defs>
+  <rect x="84" y="84" width="856" height="856" rx="196" fill="url(#bg)"/>
+  <rect x="84" y="84" width="856" height="856" rx="196" fill="url(#glow)"/>
+  <rect x="466" y="196" width="92" height="296" rx="46" fill="url(#amber)"/>
+  <path d="M 352 412 L 512 572 L 672 412" fill="none" stroke="url(#amber)" stroke-width="132" stroke-linecap="round" stroke-linejoin="round"/>
+  <g fill="#FFFFFF">
+    <rect x="302" y="604" width="420" height="64" rx="32"/>
+    <rect x="332" y="692" width="360" height="64" rx="32" opacity="0.72"/>
+    <rect x="362" y="780" width="300" height="64" rx="32" opacity="0.46"/>
+  </g>
+</svg>
