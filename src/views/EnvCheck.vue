@@ -253,7 +253,7 @@ onMounted(fetchEnv);
 .metric-box .sub {
   font-size: 10px;
   line-height: 1.45;
-  color: #64748b;
+  color: var(--text-muted);
 }
 
 .section-card {

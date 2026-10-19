@@ -19,20 +19,12 @@
         <span class="version-value">{{ currentVersion }}</span>
       </div>
 
-      <label class="field-label" for="update-endpoint">更新源地址</label>
-      <el-input
-        id="update-endpoint"
-        v-model="endpoint"
-        placeholder="https://github.com/<owner>/<repo>/releases/latest/download/latest.json"
-        clearable
-        :disabled="busy"
-        @keyup.enter="checkNow"
-      />
-      <el-checkbox v-model="allowInsecure" :disabled="busy" @change="saveSettings">
-        允许 HTTP 更新源（内网镜像）
-      </el-checkbox>
+      <div class="version-row">
+        <span class="version-label">更新来源</span>
+        <span class="source-value">GitHub Releases</span>
+      </div>
       <p class="field-hint">
-        填写 latest.json 的完整地址。检查与下载均在本机完成，地址会保存在本机偏好设置中。内网镜像使用 HTTP 时才需要勾选上方选项。
+        自动从 GitHub Releases 获取最新版本，检查与下载均在本机完成，无需手动配置更新源。
       </p>
 
       <el-alert
@@ -93,16 +85,13 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue';
+import { computed, ref } from 'vue';
 import { Channel, invoke } from '@tauri-apps/api/core';
-import { ElMessage } from 'element-plus';
 import { Download } from '@element-plus/icons-vue';
 
 const currentVersion = __APP_VERSION__;
 
 const visible = ref(false);
-const endpoint = ref('');
-const allowInsecure = ref(false);
 const checking = ref(false);
 const installing = ref(false);
 const updateInfo = ref(null);
@@ -137,6 +126,7 @@ const formatDate = (value) => {
 
 const openDialog = () => {
   visible.value = true;
+  checkNow();
 };
 
 const resetState = () => {
@@ -151,29 +141,9 @@ const resetState = () => {
   progressText.value = '';
 };
 
-const saveSettings = async () => {
-  try {
-    await invoke('save_update_settings', {
-      settings: { endpoint: endpoint.value.trim(), allowInsecure: allowInsecure.value },
-    });
-  } catch (error) {
-    ElMessage.warning(`更新设置保存失败：${error}`);
-  }
-};
-
 const checkNow = async () => {
-  const url = endpoint.value.trim();
-  if (!url) {
-    ElMessage.warning('请填写更新源地址');
+  if (busy.value) {
     return;
-  }
-
-  try {
-    await invoke('save_update_settings', {
-      settings: { endpoint: url, allowInsecure: allowInsecure.value },
-    });
-  } catch (error) {
-    ElMessage.warning(`更新源地址保存失败：${error}`);
   }
   checking.value = true;
   status.value = '';
@@ -183,10 +153,7 @@ const checkNow = async () => {
   totalBytes.value = 0;
 
   try {
-    const info = await invoke('check_app_update', {
-      endpoint: url,
-      allowInsecure: allowInsecure.value,
-    });
+    const info = await invoke('check_app_update', {});
     if (info) {
       updateInfo.value = info;
       status.value = 'available';
@@ -235,16 +202,6 @@ const installNow = async () => {
     errorMessage.value = String(error);
   }
 };
-
-onMounted(async () => {
-  try {
-    const settings = await invoke('get_update_settings');
-    endpoint.value = settings.endpoint || '';
-    allowInsecure.value = Boolean(settings.allowInsecure);
-  } catch {
-    endpoint.value = '';
-  }
-});
 </script>
 
 <style scoped>
@@ -261,7 +218,7 @@ onMounted(async () => {
   padding: 10px 14px;
   border: 1px solid var(--border-color);
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.025);
+  background: var(--panel-subtle);
 }
 
 .version-label {
@@ -276,11 +233,10 @@ onMounted(async () => {
   font-family: "SFMono-Regular", Menlo, Consolas, monospace;
 }
 
-.field-label {
-  margin-top: 4px;
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-secondary);
+.source-value {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-main);
 }
 
 .field-hint {
@@ -292,9 +248,9 @@ onMounted(async () => {
 
 .update-card {
   padding: 12px 14px;
-  border: 1px solid rgba(79, 140, 255, 0.28);
+  border: 1px solid #c3d3fa;
   border-radius: 10px;
-  background: rgba(79, 140, 255, 0.08);
+  background: var(--primary-soft);
 }
 
 .update-head {

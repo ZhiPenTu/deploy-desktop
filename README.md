@@ -15,7 +15,29 @@
 - 镜像清单：按 `deploy.desktop/v1` 清单从镜像仓库拉取指定 digest 的镜像
 - 离线导出：拉取后执行 `docker save`，生成可拷贝到内网机器的 tar 包
 - 集群监控与日志诊断
-- 检查更新：按需检查更新源，下载安装后自动重启应用
+- 检查更新：按需从 GitHub Releases 检查最新版本，下载安装后自动重启应用
+- 制品中心：从云效流水线或直链获取交付包，校验 MD5 与包结构后作为部署输入
+
+## MCP 服务
+
+仓库内置独立的 stdio MCP 服务 `mcp-server/`，可让 Codex、Claude、Cursor 等支持 MCP 的客户端直接完成仓库配置、镜像拉取、离线包管理、部署与远程更新，无需打开桌面 UI。
+
+```bash
+npm --prefix mcp-server install
+npm run mcp                 # 直接启动 stdio 服务
+npm run test:mcp            # 运行 MCP 单元测试
+```
+
+客户端配置示例（Codex `~/.codex/config.toml`）：
+
+```toml
+[mcp_servers.deploy-desktop]
+command = "node"
+args = ["/absolute/path/to/deploy-desktop/mcp-server/index.mjs"]
+env = { DEPLOY_DESKTOP_ROOT = "/absolute/path/to/deploy-desktop" }
+```
+
+MCP 服务提供 39 个工具，覆盖 SSH 主机、镜像仓库、`deploy.desktop/v1` 清单、镜像拉取/导出/导入、离线包上传、一键离线部署、Compose 运维、数据库导入和远程增量更新。配置默认保存在 `~/.deploy-desktop/mcp.json`，仓库密码通过环境变量或单次调用传入，不写入磁盘。完整工具列表、环境变量、常用流程与安全边界见 [mcp-server/README.md](mcp-server/README.md)。
 
 ## 快速开始
 
@@ -83,7 +105,15 @@ docker buildx imagetools inspect registry.cn-hangzhou.aliyuncs.com/your-namespac
 
 ## 项目配置
 
-根目录的 `profile.json` 是前后端共用的部署配置：
+仓库内的 `profile.example.json` 只保留通用示例，不包含任何真实产品拓扑。桌面端启动时优先读取应用配置目录下的 `profile.json`，不存在时使用内置示例：
+
+| 平台 | 配置文件位置 |
+| --- | --- |
+| macOS | `~/Library/Application Support/com.deploydesktop.app/profile.json` |
+| Windows | `%APPDATA%\com.deploydesktop.app\profile.json` |
+| Linux | `~/.config/com.deploydesktop.app/profile.json` |
+
+字段说明：
 
 - `containerPrefix`：容器名前缀，实际容器名为 `<prefix>-<serviceKey>`
 - `containers`：服务键、显示名、端口、协议与说明
@@ -91,12 +121,24 @@ docker buildx imagetools inspect registry.cn-hangzhou.aliyuncs.com/your-namespac
 - `images`：离线镜像包文件名与镜像引用
 - `installDir` / `deployDir` / `bundleDir`：默认部署路径
 - `backendArtifact`：后端 Fat Jar 在部署目录中的文件名
+- `components`：更新时各组件对应的 Compose 服务键，未声明时回退到旧默认值
 
-修改 `profile.json` 后重新构建即可适配其他 Compose 项目。默认 profile 是一个可直接运行的参考配置。
+真实环境把 `profile.example.json` 复制到上表位置并改为自己的拓扑即可，不需要重新编译，也不会污染开源仓库。
+
+## 制品中心
+
+「制品中心」从云效流水线或直接下载地址获取交付包，校验 MD5 与包结构后解包到本地，并用「设为当前部署包」交给部署向导与服务更新使用。
+
+- 云效个人访问令牌只写入系统钥匙串，不落配置文件、不写日志。
+- 交付包布局、校验规则、目录位置与流水线侧打包要求见 [docs/artifact-source.md](docs/artifact-source.md)。
 
 ## 应用更新
 
-顶部“检查更新”按钮按需读取更新源地址，只在点击时检查，不会在启动时联网。地址与是否允许 HTTP 都保存在本机偏好设置中，不会上传。更新源应返回 Tauri updater 的 `latest.json`：
+顶部“检查更新”按钮按需读取本仓库 GitHub Releases 的最新 `latest.json`，只在点击时检查，不会在启动时联网，也不需要在应用内配置更新源：
+
+`https://github.com/ZhiPenTu/deploy-desktop/releases/latest/download/latest.json`
+
+该文件由 Tauri updater 读取，格式如下：
 
 ```json
 {
@@ -112,7 +154,7 @@ docker buildx imagetools inspect registry.cn-hangzhou.aliyuncs.com/your-namespac
 }
 ```
 
-默认只接受 HTTPS 更新源。若更新镜像部署在内网、只能使用 HTTP，需在对话框中勾选“允许 HTTP 更新源（内网镜像）”后再检查。无论使用哪种协议，更新包都必须通过公钥签名校验，未签名的包不会被安装。
+更新包必须通过公钥签名校验，未签名的包不会被安装。
 
 发布前生成签名密钥，并把公钥写入 `src-tauri/tauri.conf.json` 的 `plugins.updater.pubkey`：
 
@@ -129,11 +171,12 @@ npx tauri build --bundles app,dmg \
   --config '{"bundle":{"createUpdaterArtifacts":true}}'
 ```
 
-macOS 的更新产物是 `deploy-desktop.app.tar.gz` 与 `.sig`；Windows 对应 NSIS/MSI，Linux 对应 AppImage/DEB。GitHub Actions 发布流程已配置为自动生成并上传 `latest.json`，需要在仓库 Secrets 中设置 `TAURI_SIGNING_PRIVATE_KEY` 与 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。私钥只保存在本地或 CI Secrets 中，不得提交到仓库。
+macOS 的更新产物是 `deploy-desktop.app.tar.gz` 与 `.sig`；Windows 对应 NSIS/MSI，Linux 对应 AppImage/DEB。推送 `v*` 标签并发布 GitHub Release 后，GitHub Actions 会自动生成并上传 `latest.json` 与各平台更新产物。需要在仓库 Secrets 中设置 `TAURI_SIGNING_PRIVATE_KEY` 与 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。私钥只保存在本地或 CI Secrets 中，不得提交到仓库。
 
 ## 安全说明
 
-- 仓库密码只存在于内存，不持久化、不写日志。
+- 仓库密码、云效个人访问令牌只存在于内存或系统钥匙串，不写入配置文件、不写日志。
+- 交付包下载仅允许 HTTPS；云效来源限制阿里云域名，解包前拒绝绝对路径、`..` 与符号链接。
 - 清单必须使用 `sha256` digest 固定镜像版本，不接受仅 tag 的引用。
 - 清单来源支持 HTTP(S) 与本地文件，最大 5 MB；生产环境建议使用 HTTPS。
 - 部署与更新通过 SSH 公钥执行，应用不会保存 SSH 私钥。
@@ -146,8 +189,9 @@ macOS 的更新产物是 `deploy-desktop.app.tar.gz` 与 `.sig`；Windows 对应
 ```text
 src/                 Vue 前端
 src-tauri/           Tauri / Rust 桌面端
-  src/commands/      环境检测、Docker、SSH、清单、更新等命令
-profile.json         前后端共用的部署配置
+  src/commands/      环境检测、Docker、SSH、清单、制品源、更新等命令
+mcp-server/          stdio MCP 服务（Node.js，工具实现与测试）
+profile.example.json 通用示例部署配置（真实拓扑放在用户配置目录）
 examples/            清单示例
 docs/                文档
 scripts/             UI 文本检查等脚本

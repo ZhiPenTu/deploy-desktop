@@ -1,6 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import profile from "../../profile.json";
+import profile from "../../profile.example.json";
 
 const MOCK_PORTS = profile.containers
   .filter((container) => container.port)
@@ -306,6 +306,13 @@ export async function runRemoteDeployAction(host, port, user, keyPath = null, mo
   return await invoke("run_remote_deploy_action", { host, port, user, keyPath, mode, targetService, deployDir });
 }
 
+export async function inspectBundleLayout(bundleDir) {
+  if (!isTauri()) {
+    return { mode: 'unknown', version: '', images: [], hasCompose: false };
+  }
+  return await invoke('inspect_bundle_layout', { bundleDir });
+}
+
 export async function inspectRemoteDeployment(host, port, user, keyPath, installDir) {
   if (!isTauri()) {
     return {
@@ -367,6 +374,27 @@ export async function updateRemoteDeployment(host, port, user, keyPath, bundleDi
     components,
     backup,
     dryRun
+  });
+}
+
+export async function installBundle(mode, host, port, user, keyPath, bundleDir, installDir) {
+  if (!isTauri()) {
+    return {
+      success: true,
+      install_dir: installDir,
+      deploy_dir: `${installDir}/deploy`,
+      uploaded: [`${installDir}/backend-java/server/target/app-server.jar`],
+      output: "模拟分发完成：交付包已复制到部署目录。"
+    };
+  }
+  return await invoke("install_bundle", {
+    mode,
+    host,
+    port,
+    user,
+    keyPath,
+    bundleDir,
+    installDir
   });
 }
 

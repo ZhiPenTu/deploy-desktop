@@ -1,6 +1,6 @@
 {
   "name": "deploy-desktop",
-  "version": "0.1.2",
+  "version": "0.2.3",
   "private": true,
   "type": "module",
   "scripts": {
@@ -10,7 +10,9 @@
     "prebuild": "npm run check:ui-text",
     "build": "vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "mcp": "node mcp-server/index.mjs",
+    "test:mcp": "npm --prefix mcp-server test"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",

@@ -247,7 +247,7 @@ fn scan_images_dir(input: &Path, images_dir: &Path) -> Result<ImageBundleScan, S
             let name = entry.file_name().to_string_lossy().to_string();
             total_bytes += metadata.len();
             files.push(ImageFileInfo {
-                image_ref: image_ref_for(&name),
+                image_ref: image_ref_for(images_dir, &name),
                 name,
                 size_bytes: metadata.len(),
                 modified_ms: metadata
@@ -278,7 +278,48 @@ fn scan_images_dir(input: &Path, images_dir: &Path) -> Result<ImageBundleScan, S
     })
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct ImageManifestEntry {
+    pub file: String,
+    #[serde(default)]
+    pub images: Vec<String>,
+}
+
+/// 读取交付包自带的镜像清单 images/images.json。
+///
+/// 清单由流水线生成，描述「哪个镜像包文件包含哪些镜像」，交付包的版本与镜像标签
+/// 因此天然对齐，不再依赖本地 profile 手工维护 images 列表。
+fn load_image_manifest(images_dir: &Path) -> Vec<ImageManifestEntry> {
+    #[derive(Deserialize)]
+    struct Manifest {
+        #[serde(default)]
+        files: Vec<ImageManifestEntry>,
+    }
+
+    let path = images_dir.join("images.json");
+    let Ok(text) = fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    serde_json::from_str::<Manifest>(&text)
+        .map(|manifest| manifest.files)
+        .unwrap_or_default()
+}
+
 fn expectations_for(images_dir: &Path) -> Vec<ImageExpectation> {
+    let manifest = load_image_manifest(images_dir);
+    if manifest.iter().any(|entry| !entry.images.is_empty()) {
+        return manifest
+            .iter()
+            .flat_map(|entry| {
+                entry.images.iter().map(move |image_ref| ImageExpectation {
+                    file_name: entry.file.clone(),
+                    image_ref: image_ref.clone(),
+                    file_present: images_dir.join(&entry.file).is_file(),
+                })
+            })
+            .collect();
+    }
+
     super::profile::deployment_profile()
         .images
         .iter()
@@ -290,7 +331,14 @@ fn expectations_for(images_dir: &Path) -> Vec<ImageExpectation> {
         .collect()
 }
 
-fn image_ref_for(file_name: &str) -> Option<String> {
+fn image_ref_for(images_dir: &Path, file_name: &str) -> Option<String> {
+    if let Some(entry) = load_image_manifest(images_dir)
+        .into_iter()
+        .find(|entry| entry.file == file_name && !entry.images.is_empty())
+    {
+        return Some(entry.images.join("、"));
+    }
+
     super::profile::deployment_profile()
         .images
         .iter()
@@ -394,7 +442,7 @@ fi
                             .parse::<u64>()
                             .map(|secs| secs.saturating_mul(1000))
                             .unwrap_or(0),
-                        image_ref: image_ref_for(parts[0]),
+                        image_ref: image_ref_for(Path::new(&images_dir), parts[0]),
                     });
                 }
             }
@@ -410,13 +458,11 @@ fi
     files.sort_by(|a, b| a.name.cmp(&b.name));
     let total_bytes = files.iter().map(|file| file.size_bytes).sum();
 
-    let expectations = super::profile::deployment_profile()
-        .images
-        .iter()
-        .map(|image| ImageExpectation {
-            file_name: image.file.clone(),
-            image_ref: image.image_ref.clone(),
-            file_present: files.iter().any(|file| file.name == image.file),
+    let expectations = expectations_for(Path::new(&images_dir))
+        .into_iter()
+        .map(|expectation| ImageExpectation {
+            file_present: files.iter().any(|file| file.name == expectation.file_name),
+            ..expectation
         })
         .collect();
 
@@ -743,6 +789,38 @@ fn import_images_blocking(
     Ok(loaded)
 }
 
+/// 服务更新时使用：上传镜像包到目标机并逐个 docker load。
+///
+/// 复用镜像包管理的上传与导入实现，保证进度事件、失败提示与镜像包管理页一致。
+#[allow(clippy::too_many_arguments)]
+pub fn push_images_blocking(
+    window: &tauri::Window,
+    host: &str,
+    port: u16,
+    user: &str,
+    key_path: Option<String>,
+    local_bundle_dir: &str,
+    remote_bundle_dir: &str,
+    files: Vec<String>,
+    overwrite: bool,
+) -> Result<Vec<String>, String> {
+    if files.is_empty() {
+        return Err("交付包 images/ 下没有可上传的镜像包".to_string());
+    }
+    upload_images_blocking(
+        window,
+        host,
+        port,
+        user,
+        key_path.clone(),
+        local_bundle_dir,
+        remote_bundle_dir,
+        files.clone(),
+        overwrite,
+    )?;
+    import_images_blocking(window, host, port, user, key_path, remote_bundle_dir, files)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_progress(
     window: &tauri::Window,
@@ -766,4 +844,56 @@ fn emit_progress(
             finished,
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_images_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "deploy-desktop-images-{name}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn manifest_maps_one_archive_to_multiple_images() {
+        let dir = temp_images_dir("manifest");
+        fs::write(dir.join("app-stack.tar.gz"), b"x").unwrap();
+        fs::write(
+            dir.join("images.json"),
+            r#"{"schemaVersion":1,"tag":"1","files":[{"file":"app-stack.tar.gz","images":["demo/backend:1","demo/gateway:1"]}]}"#,
+        )
+        .unwrap();
+
+        let expectations = expectations_for(&dir);
+        assert_eq!(expectations.len(), 2);
+        assert!(expectations.iter().all(|item| item.file_present));
+        assert_eq!(
+            image_ref_for(&dir, "app-stack.tar.gz").as_deref(),
+            Some("demo/backend:1、demo/gateway:1")
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scans_archive_from_manifest_and_marks_absent_files() {
+        let dir = temp_images_dir("absent");
+        fs::write(
+            dir.join("images.json"),
+            r#"{"schemaVersion":1,"tag":"2","files":[{"file":"missing.tar.gz","images":["demo/frontend:2"]}]}"#,
+        )
+        .unwrap();
+
+        let expectations = expectations_for(&dir);
+        assert_eq!(expectations.len(), 1);
+        assert!(!expectations[0].file_present);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

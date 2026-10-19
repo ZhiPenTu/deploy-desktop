@@ -248,14 +248,15 @@ const props = defineProps({
 });
 
 const isRemote = computed(() => props.connection.mode === 'remote');
+const mediaRoot = computed(() => props.connection.mediaDir || props.connection.bundleDir);
 const localDir = ref(
   props.connection.mode === 'remote'
     ? readSavedLocalDir()
-    : props.connection.bundleDir
+    : mediaRoot.value
 );
 const localScan = ref(null);
 const remote = ref(null);
-const remoteDir = ref(props.connection.bundleDir);
+const remoteDir = ref(mediaRoot.value);
 const selectedRemoteFiles = ref([]);
 const progress = ref([]);
 const resultLog = ref('');
@@ -268,7 +269,7 @@ let unlistenProgress = null;
 
 const busy = computed(() => scanning.value || inspecting.value || uploading.value || importing.value);
 const remoteImagesDir = computed(() =>
-  `${props.connection.bundleDir.replace(/\/+$/, '')}/images`
+  `${String(mediaRoot.value || '').replace(/\/+$/, '')}/images`
 );
 
 const remoteRows = computed(() => {
@@ -449,7 +450,7 @@ const inspectRemote = async () => {
       props.connection.remotePort,
       props.connection.remoteUser,
       props.connection.remoteKey || null,
-      props.connection.bundleDir
+      mediaRoot.value
     );
     remoteDir.value = remote.value.images_dir;
     selectedRemoteFiles.value = [];
@@ -500,7 +501,7 @@ const handleUpload = async (overwrite) => {
       props.connection.remoteUser,
       props.connection.remoteKey || null,
       localDir.value.trim(),
-      props.connection.bundleDir,
+      mediaRoot.value,
       files,
       overwrite
     );
@@ -527,7 +528,7 @@ const applyImport = async (files) => {
       props.connection.remotePort,
       props.connection.remoteUser,
       props.connection.remoteKey || null,
-      props.connection.bundleDir,
+      mediaRoot.value,
       files
     );
     resultLog.value = loaded.join('\n');
@@ -592,7 +593,7 @@ const handleDelete = async () => {
       props.connection.remotePort,
       props.connection.remoteUser,
       props.connection.remoteKey || null,
-      props.connection.bundleDir,
+      mediaRoot.value,
       files
     );
     resultTitle.value = '删除完成';
@@ -694,7 +695,7 @@ onUnmounted(() => {
   font-size: 11px;
   padding: 2px 8px;
   border-radius: 6px;
-  color: #8ab6ff;
+  color: var(--primary-color);
   background: rgba(66, 133, 244, 0.08);
   font-family: "SFMono-Regular", Menlo, Consolas, monospace;
   overflow-wrap: anywhere;
@@ -706,7 +707,7 @@ onUnmounted(() => {
 }
 
 .image-table :deep(code) {
-  color: #8ab6ff;
+  color: var(--primary-color);
   font-size: 11px;
   font-family: "SFMono-Regular", Menlo, Consolas, monospace;
 }
@@ -717,12 +718,12 @@ onUnmounted(() => {
 }
 
 .state-ok {
-  color: #7ee0a8;
+  color: var(--success-color);
   font-size: 12px;
 }
 
 .state-warn {
-  color: #f2c46d;
+  color: var(--warning-color);
   font-size: 12px;
 }
 
@@ -742,7 +743,7 @@ onUnmounted(() => {
   font-size: 11px;
   padding: 3px 8px;
   border-radius: 999px;
-  color: #f2c46d;
+  color: var(--warning-color);
   background: rgba(242, 196, 109, 0.1);
   border: 1px solid rgba(242, 196, 109, 0.22);
 }

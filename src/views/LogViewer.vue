@@ -67,7 +67,7 @@ import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue';
 import { ElMessage } from 'element-plus';
 import { CopyDocument, Refresh, Search } from '@element-plus/icons-vue';
 import { getServiceLogs, getRemoteServiceLogs } from '../api/tauri.js';
-import { defaultContainer, serviceOptions } from '../config/cluster.js';
+import { getDefaultContainer, serviceOptions } from '../config/cluster.js';
 
 const props = defineProps({
   connection: {
@@ -76,7 +76,7 @@ const props = defineProps({
   },
   initialContainer: {
     type: String,
-    default: defaultContainer
+    default: ''
   }
 });
 
@@ -84,7 +84,7 @@ const isRemote = computed(() => props.connection.mode === 'remote');
 
 const containerOptions = serviceOptions();
 
-const selectedContainer = ref(props.initialContainer);
+const selectedContainer = ref(props.initialContainer || getDefaultContainer());
 const tailLines = ref(300);
 const searchKeyword = ref('');
 const rawLogs = ref('');

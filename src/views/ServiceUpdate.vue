@@ -115,19 +115,30 @@
     <div v-if="isRemote" class="card-surface update-card">
       <div class="card-title-bar">
         <h3>更新内容</h3>
-        <span class="hint">更新包目录需包含 app/ 与 deploy/</span>
+        <span class="hint">更新包目录需包含 images/ + deploy/（镜像模式）或 app/ + deploy/（文件模式）</span>
       </div>
 
       <el-form label-width="110px">
         <el-form-item label="更新包目录">
           <el-input v-model="bundleDir" placeholder="/tmp/deploy-offline-bundle" />
           <div class="field-hint">
-            请填写包含 app/、deploy/、database/ 的离线更新目录。
+            请填写制品中心下载的交付包目录。镜像模式交付包只含 images/ 与 deploy/，勾选「镜像」即可完成升级。
+          </div>
+          <div v-if="bundleMode !== 'unknown'" class="field-hint">
+            已识别为{{ bundleMode === 'image' ? '镜像模式' : '文件模式' }}交付包
+            <template v-if="bundleVersion">，版本 {{ bundleVersion }}</template>
+            <template v-if="bundleMode === 'image' && bundleImages.length">
+              ，包含 {{ bundleImages.length }} 个镜像包
+            </template>
           </div>
         </el-form-item>
 
         <el-form-item label="更新组件">
           <el-checkbox-group v-model="selectedComponents" class="component-grid">
+            <el-checkbox value="image" border>
+              <span class="component-title">镜像</span>
+              <span class="component-desc">上传镜像包并 docker load，随后按新镜像重建服务</span>
+            </el-checkbox>
             <el-checkbox value="backend" border>
               <span class="component-title">后端服务</span>
               <span class="component-desc">替换 server.jar，重启 backend-java / backend-java-b</span>
@@ -230,10 +241,11 @@
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { Refresh, UploadFilled } from '@element-plus/icons-vue';
 import {
+  inspectBundleLayout,
   inspectRemoteDeployment,
   onRemoteUpdateProgress,
   updateRemoteDeployment
@@ -254,12 +266,49 @@ const updating = ref(false);
 const preflighting = ref(false);
 const lastDryRun = ref(false);
 const deployment = ref(null);
-const bundleDir = ref('/tmp/deploy-offline-bundle');
+const bundleDir = ref(props.connection.bundleDir || '');
 const selectedComponents = ref(['backend', 'gateway', 'frontend']);
+const bundleMode = ref('unknown');
+const bundleVersion = ref('');
+const bundleImages = ref([]);
+
+watch(
+  bundleDir,
+  async (value) => {
+    const dir = String(value || '').trim();
+    if (!dir) {
+      bundleMode.value = 'unknown';
+      return;
+    }
+    try {
+      const layout = await inspectBundleLayout(dir);
+      bundleMode.value = layout.mode || 'unknown';
+      bundleVersion.value = layout.version || '';
+      bundleImages.value = layout.images || [];
+      if (layout.mode === 'image') {
+        selectedComponents.value = ['image', 'config'];
+      } else if (layout.mode === 'file') {
+        selectedComponents.value = ['backend', 'gateway', 'frontend'];
+      }
+    } catch {
+      bundleMode.value = 'unknown';
+    }
+  },
+  { immediate: true }
+);
 const backup = ref(true);
 const progress = ref([]);
 const result = ref(null);
 let unlistenProgress = null;
+
+watch(
+  () => props.connection.bundleDir,
+  (value) => {
+    if (value) {
+      bundleDir.value = value;
+    }
+  }
+);
 
 const componentNames = {
   backend: '后端服务',
@@ -485,7 +534,7 @@ onUnmounted(() => {
   padding: 12px 14px;
   border: 1px solid var(--border-color);
   border-radius: var(--radius-sm);
-  background: rgba(255, 255, 255, 0.018);
+  background: var(--panel-subtle);
 }
 
 .artifact-row {
@@ -518,7 +567,7 @@ onUnmounted(() => {
   font-size: 11px;
   padding: 3px 8px;
   border-radius: 999px;
-  color: #f2c46d;
+  color: var(--warning-color);
   background: rgba(242, 196, 109, 0.1);
   border: 1px solid rgba(242, 196, 109, 0.22);
 }
@@ -620,7 +669,7 @@ onUnmounted(() => {
 }
 
 .progress-row:nth-child(odd) {
-  background: rgba(255, 255, 255, 0.018);
+  background: var(--panel-subtle);
 }
 
 .progress-dot {
@@ -637,7 +686,7 @@ onUnmounted(() => {
 
 .progress-row.error .progress-dot,
 .progress-row.skipped .progress-dot {
-  background: #7a8699;
+  background: var(--text-muted);
 }
 
 .progress-copy {
@@ -685,14 +734,14 @@ onUnmounted(() => {
 }
 
 .result-line code {
-  color: #8ab6ff;
+  color: var(--primary-color);
   font-family: "SFMono-Regular", Menlo, Consolas, monospace;
 }
 
 .result-error {
   font-size: 12px;
   line-height: 1.6;
-  color: #ff8d8d;
+  color: var(--danger-color);
   white-space: pre-wrap;
 }
 

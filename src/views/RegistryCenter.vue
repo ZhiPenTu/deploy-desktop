@@ -3,7 +3,7 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">镜像仓库</h2>
-        <p class="page-subtitle">按清单从镜像仓库拉取镜像，并可直接导出为离线 tar 包</p>
+        <p class="page-subtitle">可选高级能力：按清单从镜像仓库拉取镜像；标准交付走制品中心与镜像包管理</p>
       </div>
       <div class="header-actions">
         <el-tag v-if="isRemote" type="primary" effect="plain">
@@ -19,7 +19,7 @@
 
     <el-alert
       :title="isRemote ? '远程模式在目标机执行 docker login 与 docker pull' : '本地模式在当前机器执行 docker login 与 docker pull'"
-      description="仓库凭据仅保存在本次运行的内存中，关闭应用后不会保留。镜像清单必须使用 sha256 摘要固定版本。"
+      description="标准离线交付无需配置镜像仓库。仅在需要从远端仓库补充镜像时使用；凭据只保存在本次运行内存中，清单必须用 sha256 摘要固定版本。"
       type="info"
       :closable="false"
       show-icon
@@ -487,7 +487,7 @@ onUnmounted(() => {
   padding: 10px 12px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border-color);
-  background: rgba(255, 255, 255, 0.015);
+  background: var(--panel-subtle);
 }
 
 .summary-label {
@@ -513,7 +513,7 @@ onUnmounted(() => {
   font-size: 11px;
   padding: 3px 8px;
   border-radius: 999px;
-  color: #f2c46d;
+  color: var(--warning-color);
   background: rgba(242, 196, 109, 0.1);
   border: 1px solid rgba(242, 196, 109, 0.22);
 }
@@ -524,7 +524,7 @@ onUnmounted(() => {
 }
 
 .image-table :deep(code) {
-  color: #8ab6ff;
+  color: var(--primary-color);
   font-size: 11px;
   font-family: "SFMono-Regular", Menlo, Consolas, monospace;
   overflow-wrap: anywhere;

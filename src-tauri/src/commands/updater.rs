@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 use tauri::{ipc::Channel, AppHandle, Manager, State};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
+const DEFAULT_UPDATE_ENDPOINT: &str =
+    "https://github.com/ZhiPenTu/deploy-desktop/releases/latest/download/latest.json";
+
 #[derive(Default)]
 pub struct PendingUpdate(pub Mutex<Option<Update>>);
 
@@ -44,6 +47,22 @@ fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir.join("update-settings.json"))
 }
 
+fn friendly_update_error(message: String) -> String {
+    let lower = message.to_lowercase();
+    if lower.contains("404") || lower.contains("valid release json") {
+        return format!("未能从 GitHub Releases 获取更新信息，仓库可能尚未发布版本（{message}）");
+    }
+    format!("检查更新失败：{message}")
+}
+
+fn resolve_update_endpoint(endpoint: Option<String>) -> Result<tauri::Url, String> {
+    let raw = endpoint
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_UPDATE_ENDPOINT.to_string());
+    tauri::Url::parse(&raw).map_err(|e| format!("更新源地址无效：{e}"))
+}
+
 #[tauri::command]
 pub fn get_update_settings(app: AppHandle) -> Result<UpdateSettings, String> {
     let path = settings_path(&app)?;
@@ -69,11 +88,7 @@ pub async fn check_app_update(
     endpoint: Option<String>,
     allow_insecure: Option<bool>,
 ) -> Result<Option<UpdateMetadata>, String> {
-    let endpoint = endpoint
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| "请填写更新源地址".to_string())?;
-    let url = tauri::Url::parse(&endpoint).map_err(|e| format!("更新源地址无效：{e}"))?;
+    let url = resolve_update_endpoint(endpoint)?;
     if url.scheme() != "https" && !allow_insecure.unwrap_or(false) {
         return Err(
             "更新源必须使用 HTTPS。内网 HTTP 镜像请先勾选允许 HTTP 更新源。".to_string(),
@@ -88,7 +103,7 @@ pub async fn check_app_update(
         .map_err(|e| e.to_string())?
         .check()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| friendly_update_error(e.to_string()))?;
 
     let metadata = update.as_ref().map(|update| UpdateMetadata {
         version: update.version.clone(),
@@ -130,4 +145,35 @@ pub async fn install_app_update(
         .map_err(|e| e.to_string())?;
 
     app.restart();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_endpoint_points_to_github_latest_json() {
+        let url = resolve_update_endpoint(None).expect("默认更新源应可解析");
+        assert_eq!(url.as_str(), DEFAULT_UPDATE_ENDPOINT);
+        assert_eq!(url.scheme(), "https");
+    }
+
+    #[test]
+    fn custom_endpoint_is_trimmed_and_used() {
+        let url = resolve_update_endpoint(Some("  https://example.com/latest.json  ".to_string()))
+            .expect("自定义更新源应可解析");
+        assert_eq!(url.as_str(), "https://example.com/latest.json");
+    }
+
+    #[test]
+    fn missing_release_error_mentions_github() {
+        let message = friendly_update_error("HTTP status client error (404 Not Found)".to_string());
+        assert!(message.contains("GitHub Releases"));
+    }
+
+    #[test]
+    fn empty_endpoint_falls_back_to_github() {
+        let url = resolve_update_endpoint(Some("   ".to_string())).expect("空白更新源应回退到默认地址");
+        assert_eq!(url.as_str(), DEFAULT_UPDATE_ENDPOINT);
+    }
 }

@@ -1,13 +1,11 @@
 <template>
   <header class="app-header">
-    <div class="brand">
-      <div class="brand-mark">
-        <el-icon :size="21"><Connection /></el-icon>
-      </div>
-      <div class="brand-text">
-        <h1>离线部署助手</h1>
-        <span>镜像清单、离线导入与集群运维</span>
-      </div>
+    <div class="crumb">
+      <span class="crumb-root">工作区</span>
+      <span class="crumb-sep">/</span>
+      <span class="crumb-group">{{ group }}</span>
+      <span class="crumb-sep">/</span>
+      <span class="crumb-current">{{ pageTitle }}</span>
     </div>
 
     <div class="header-actions">
@@ -19,7 +17,9 @@
         </div>
       </div>
 
-      <el-button type="primary" plain @click="$emit('quick-check')">
+      <span class="action-divider"></span>
+
+      <el-button plain @click="$emit('quick-check')">
         <el-icon><Refresh /></el-icon>
         <span>刷新状态</span>
       </el-button>
@@ -30,10 +30,18 @@
 
 <script setup>
 import { computed } from 'vue';
-import { Connection, Refresh } from '@element-plus/icons-vue';
+import { Refresh } from '@element-plus/icons-vue';
 import UpdateChecker from './UpdateChecker.vue';
 
 const props = defineProps({
+  pageTitle: {
+    type: String,
+    default: '部署向导'
+  },
+  group: {
+    type: String,
+    default: '部署'
+  },
   deployMode: {
     type: String,
     default: 'local'
@@ -52,104 +60,95 @@ const remoteTarget = computed(() => props.remoteHost || '未填写目标主机')
 
 <style scoped>
 .app-header {
-  height: 64px;
+  height: 60px;
   flex: none;
-  background: rgba(15, 23, 36, 0.9);
-  backdrop-filter: blur(14px);
-  border-bottom: 1px solid var(--border-color);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 24px;
+  gap: 20px;
+  padding: 0 32px;
+  background: rgba(255, 255, 255, 0.92);
+  border-bottom: 1px solid var(--border-color);
 }
 
-.brand {
+.crumb {
   display: flex;
   align-items: center;
-  gap: 13px;
+  gap: 8px;
   min-width: 0;
+  font-size: 12px;
+  color: var(--text-faint);
 }
 
-.brand-mark {
-  width: 38px;
-  height: 38px;
-  border-radius: 11px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #fff;
-  background: linear-gradient(145deg, #4f8cff, #2f66d0);
-  box-shadow: 0 8px 20px rgba(79, 140, 255, 0.28);
-  flex: none;
+.crumb-sep {
+  color: #d0d5dd;
 }
 
-.brand-text {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-
-.brand-text h1 {
-  font-size: 16px;
+.crumb-current {
+  font-size: 13px;
   font-weight: 600;
-  letter-spacing: 0.01em;
   color: var(--text-main);
-  white-space: nowrap;
-}
-
-.brand-text span {
-  margin-top: 2px;
-  font-size: 11px;
-  color: var(--text-muted);
-  white-space: nowrap;
 }
 
 .header-actions {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 9px;
+  flex: none;
 }
 
 .mode-chip {
   display: flex;
   align-items: center;
-  gap: 10px;
-  min-width: 176px;
-  padding: 6px 12px;
-  border-radius: 10px;
+  gap: 9px;
+  padding: 5px 12px;
+  border-radius: 9px;
   border: 1px solid var(--border-color);
-  background: rgba(255, 255, 255, 0.025);
+  background: #fbfcfe;
 }
 
 .mode-indicator {
-  width: 7px;
-  height: 7px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   background: var(--success-color);
-  box-shadow: 0 0 0 4px rgba(53, 196, 143, 0.12);
+  box-shadow: 0 0 0 3px rgba(14, 159, 110, 0.12);
   flex: none;
 }
 
 .mode-chip.remote .mode-indicator {
   background: var(--primary-color);
-  box-shadow: 0 0 0 4px rgba(79, 140, 255, 0.13);
+  box-shadow: 0 0 0 3px var(--primary-ring);
 }
 
 .mode-copy {
   display: flex;
-  flex-direction: column;
-  line-height: 1.25;
+  align-items: baseline;
+  gap: 7px;
+  line-height: 1.2;
 }
 
 .mode-name {
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 500;
-  color: var(--text-main);
+  color: var(--text-secondary);
 }
 
 .mode-target {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--text-muted);
   font-family: "SFMono-Regular", Menlo, Consolas, monospace;
+}
+
+.action-divider {
+  width: 1px;
+  height: 20px;
+  background: var(--border-color);
+  margin: 0 2px;
+}
+
+:deep(.el-button) {
+  height: 32px;
+  padding: 0 12px;
 }
 </style>

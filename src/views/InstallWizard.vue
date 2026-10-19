@@ -38,6 +38,7 @@
             :class="{ active: config.mode === 'local' }"
             @click="config.mode = 'local'"
           >
+            <span class="mode-check"><el-icon><Check /></el-icon></span>
             <span class="icon-tile mode-icon">
               <el-icon><Monitor /></el-icon>
             </span>
@@ -50,6 +51,7 @@
             :class="{ active: config.mode === 'remote' }"
             @click="config.mode = 'remote'"
           >
+            <span class="mode-check"><el-icon><Check /></el-icon></span>
             <span class="icon-tile mode-icon">
               <el-icon><Connection /></el-icon>
             </span>
@@ -60,8 +62,13 @@
 
         <div v-if="config.mode === 'local'" class="form-section">
           <el-form label-width="120px">
-            <el-form-item label="离线安装包路径">
-              <el-input v-model="config.bundleDir" placeholder="如: /opt/deploy/bundle 或当前目录" />
+            <el-form-item label="交付包目录">
+              <el-input v-model="config.bundleDir" placeholder="如: /opt/deploy/bundle，需包含 app/ 与 deploy/" />
+              <div class="field-hint">来自制品中心下载的交付包：镜像模式含 images/ 与 deploy/，文件模式含 app/ 与 deploy/。</div>
+            </el-form-item>
+            <el-form-item label="离线介质目录">
+              <el-input v-model="config.mediaDir" placeholder="如: /opt/deploy/bundle，其下需有 images/ 与 docker-engine/" />
+              <div class="field-hint">镜像包与 Docker 离线安装包所在目录，与交付包目录可以是同一个目录。</div>
             </el-form-item>
             <el-form-item label="服务部署目录">
               <el-input v-model="config.deployDir" placeholder="默认: /opt/deploy" />
@@ -234,6 +241,9 @@
           <code>{{ bundleImagesPath }}</code>
           <el-button link type="primary" @click="emit('go-images')">打开镜像包管理</el-button>
         </p>
+        <p class="desc">
+          镜像模式交付包自带 images/ 镜像包与 deploy/ 配置；文件模式交付包只含 app/ 与 deploy/，需要另行准备镜像包。
+        </p>
 
         <div class="action-box">
           <el-button type="primary" :loading="loadingImages" @click="handleLoadImages">
@@ -257,6 +267,30 @@
               <code>{{ image.imageRef }}</code>
             </li>
           </ul>
+        </div>
+
+        <div class="bundle-distribute">
+          <h4>分发交付包到部署目录</h4>
+          <p class="desc">
+            将交付包中的 <code>app/</code>、<code>images/</code> 与 <code>deploy/</code> 写入
+            <code>{{ installTarget }}</code>，容器才能读取到新的镜像、jar、网关 classes 与前端产物。
+            目标目录中的同名产物会被覆盖，已有的 <code>.env.local</code> 等未包含文件会保留。
+          </p>
+          <div class="action-box">
+            <el-button
+              type="primary"
+              plain
+              :loading="installingBundle"
+              :disabled="!config.bundleDir"
+              @click="handleInstallBundle"
+            >
+              分发交付包
+            </el-button>
+            <span class="tip" v-if="bundleMsg">{{ bundleMsg }}</span>
+          </div>
+          <div v-if="bundleLog" class="terminal-log">
+            <pre>{{ bundleLog }}</pre>
+          </div>
         </div>
 
         <div class="step-footer">
@@ -417,9 +451,10 @@ import {
   importRemoteOceanbaseSql,
   testSshConnection,
   setupRemoteSshKey,
-  onImageLoadProgress
+  onImageLoadProgress,
+  installBundle
 } from '../api/tauri.js';
-import profile from '../../profile.json';
+import { profileState as profile } from '../config/profile.js';
 
 const props = defineProps({
   connection: {
@@ -436,7 +471,13 @@ const steps = ['模式配置', '环境检测', '镜像导入', '启动集群', '
 
 const config = props.connection;
 
-const bundleImagesPath = computed(() => `${String(config.bundleDir || '').replace(/\/+$/, '')}/images`);
+const mediaRoot = computed(() => config.mediaDir || config.bundleDir || '');
+const bundleImagesPath = computed(() => `${String(mediaRoot.value).replace(/\/+$/, '')}/images`);
+const installTarget = computed(() => config.installDir || config.deployDir || '');
+
+const installingBundle = ref(false);
+const bundleMsg = ref('');
+const bundleLog = ref('');
 
 // SSH 测试
 const testingSsh = ref(false);
@@ -544,9 +585,9 @@ const handleInstallDocker = async () => {
           config.remotePort,
           config.remoteUser,
           config.remoteKey || null,
-          config.bundleDir
+          mediaRoot.value
         )
-      : await installOfflineDockerEngine(config.bundleDir);
+      : await installOfflineDockerEngine(mediaRoot.value);
     dockerSteps.value = res.steps;
     await loadEnvData();
     if (!res.success && res.error_message) {
@@ -569,14 +610,39 @@ const handleLoadImages = async () => {
           config.remotePort,
           config.remoteUser,
           config.remoteKey || null,
-          config.bundleDir
+          mediaRoot.value
         )
-      : await loadOfflineImages(config.bundleDir);
+      : await loadOfflineImages(mediaRoot.value);
     imageMsg.value = `成功载入 ${res.length} 个镜像文件！`;
   } catch (e) {
     imageMsg.value = `导入错误: ${e}。可先打开“镜像包管理”扫描本地镜像包并上传到目标机，再回到本步重试。`;
   } finally {
     loadingImages.value = false;
+  }
+};
+
+const handleInstallBundle = async () => {
+  installingBundle.value = true;
+  bundleMsg.value = '正在分发交付包...';
+  bundleLog.value = '';
+  try {
+    const res = await installBundle(
+      config.mode,
+      config.remoteHost,
+      config.remotePort,
+      config.remoteUser,
+      config.remoteKey || null,
+      config.bundleDir,
+      installTarget.value
+    );
+    bundleLog.value = res.uploaded?.length
+      ? `已写入:\n${res.uploaded.join('\n')}`
+      : res.output;
+    bundleMsg.value = res.output;
+  } catch (e) {
+    bundleMsg.value = `分发失败: ${e}`;
+  } finally {
+    installingBundle.value = false;
   }
 };
 
@@ -663,8 +729,12 @@ onMounted(() => {
 }
 
 .steps-header {
-  margin-bottom: 24px;
-  padding: 14px 16px;
+  margin-bottom: 20px;
+  padding: 16px 18px;
+  background: var(--panel-bg);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card);
 }
 
 .stepper {
@@ -682,21 +752,21 @@ onMounted(() => {
 .step {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 9px;
   flex: none;
   color: var(--text-muted);
 }
 
 .step-node {
-  width: 26px;
-  height: 26px;
+  width: 28px;
+  height: 28px;
   border-radius: 50%;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex: none;
   border: 1px solid var(--border-strong);
-  background: rgba(255, 255, 255, 0.025);
+  background: #ffffff;
   font-size: 11px;
   font-weight: 600;
   transition: all 0.2s ease;
@@ -712,10 +782,10 @@ onMounted(() => {
 }
 
 .step.active .step-node {
-  color: #fff;
+  color: #ffffff;
   border-color: var(--primary-color);
   background: var(--primary-color);
-  box-shadow: 0 0 0 4px rgba(79, 140, 255, 0.12);
+  box-shadow: 0 0 0 4px var(--primary-ring);
 }
 
 .step.active .step-label {
@@ -724,20 +794,21 @@ onMounted(() => {
 
 .step.done .step-node {
   color: var(--success-color);
-  border-color: rgba(53, 196, 143, 0.36);
-  background: rgba(53, 196, 143, 0.12);
+  border-color: rgba(14, 159, 110, 0.3);
+  background: var(--success-soft);
 }
 
 .step-connect {
-  height: 1px;
+  height: 2px;
   flex: 1;
   min-width: 16px;
-  margin: 0 10px;
-  background: var(--border-color);
+  margin: 0 12px;
+  border-radius: 2px;
+  background: #eef0f4;
 }
 
 .step-connect.done {
-  background: rgba(53, 196, 143, 0.4);
+  background: rgba(14, 159, 110, 0.28);
 }
 
 .step-card {
@@ -745,69 +816,105 @@ onMounted(() => {
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-card);
-  padding: 28px;
+  padding: 30px;
 }
 
 .step-card h3 {
-  font-size: 18px;
-  color: #fff;
+  font-size: 17px;
+  letter-spacing: -0.01em;
+  color: var(--text-main);
   margin-bottom: 6px;
 }
 
 .step-card .desc {
   font-size: 13px;
   color: var(--text-muted);
-  margin-bottom: 20px;
+  margin-bottom: 22px;
 }
 
 .mode-selector {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 20px;
+  gap: 16px;
   margin-bottom: 24px;
 }
 
 .mode-box {
+  position: relative;
   background-color: var(--card-bg);
-  border: 2px solid var(--border-color);
-  border-radius: 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
   padding: 20px;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease, background-color 0.18s ease;
 }
 
 .mode-box:hover {
-  border-color: #3b82f6;
-  background-color: rgba(59, 130, 246, 0.05);
+  border-color: #c9d2e3;
+  box-shadow: var(--shadow-raised);
+  transform: translateY(-1px);
 }
 
 .mode-box.active {
-  border-color: #3b82f6;
-  background-color: rgba(59, 130, 246, 0.12);
+  border-color: var(--primary-color);
+  background: linear-gradient(180deg, #f8faff 0%, #ffffff 100%);
+  box-shadow: 0 0 0 3px var(--primary-ring);
+}
+
+.mode-check {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1px solid var(--border-strong);
+  background: #ffffff;
+  color: transparent;
+  font-size: 11px;
+  transition: all 0.18s ease;
+}
+
+.mode-box.active .mode-check {
+  border-color: var(--primary-color);
+  background: var(--primary-color);
+  color: #ffffff;
 }
 
 .mode-box .mode-icon {
-  margin-bottom: 14px;
+  margin-bottom: 16px;
+  width: 40px;
+  height: 40px;
+  font-size: 19px;
+}
+
+.mode-box.active .mode-icon {
+  background: var(--primary-soft);
+  color: var(--primary-color);
 }
 
 .mode-box .name {
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 600;
-  color: #fff;
+  color: var(--text-main);
   margin-bottom: 6px;
+  padding-right: 26px;
 }
 
 .mode-box .detail {
   font-size: 12px;
   color: var(--text-muted);
-  line-height: 1.4;
+  line-height: 1.55;
 }
 
 .form-section {
-  background-color: rgba(0, 0, 0, 0.2);
+  background-color: var(--panel-subtle);
   padding: 20px;
-  border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 10px;
+  border: 1px solid var(--border-color);
   margin-bottom: 24px;
 }
 
@@ -818,12 +925,12 @@ onMounted(() => {
 }
 
 .text-success {
-  color: #34d399;
+  color: var(--success-color);
   font-size: 13px;
 }
 
 .text-danger {
-  color: #f87171;
+  color: var(--danger-color);
   font-size: 13px;
 }
 
@@ -831,9 +938,15 @@ onMounted(() => {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-top: 24px;
+  margin-top: 26px;
   border-top: 1px solid var(--border-color);
   padding-top: 20px;
+}
+
+.step-footer :deep(.el-button--large) {
+  height: 38px;
+  padding: 0 18px;
+  border-radius: 9px;
 }
 
 .step-footer.center {
@@ -850,22 +963,23 @@ onMounted(() => {
 .metric-card {
   background-color: var(--card-bg);
   border: 1px solid var(--border-color);
-  padding: 14px;
-  border-radius: 8px;
+  padding: 15px 16px;
+  border-radius: 10px;
   display: flex;
   flex-direction: column;
 }
 
 .metric-card .label {
   font-size: 11px;
+  letter-spacing: 0.03em;
   color: var(--text-muted);
 }
 
 .metric-card .value {
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 600;
-  color: #fff;
-  margin-top: 4px;
+  color: var(--text-main);
+  margin-top: 5px;
 }
 
 .docker-status-box {
@@ -885,9 +999,10 @@ onMounted(() => {
 .docker-steps-log {
   margin-top: 14px;
   padding: 12px 14px;
-  background-color: #0b0f17;
+  background: var(--panel-subtle);
+  border: 1px solid var(--border-color);
   border-radius: var(--radius-sm);
-  font-family: monospace;
+  font-family: "SFMono-Regular", Menlo, Consolas, monospace;
   font-size: 12px;
 }
 
@@ -909,7 +1024,7 @@ onMounted(() => {
 
 .ports-list h4, .images-list h4 {
   font-size: 13px;
-  color: #cbd5e1;
+  color: var(--text-secondary);
   margin-bottom: 10px;
 }
 
@@ -921,7 +1036,8 @@ onMounted(() => {
 }
 
 .progress-box {
-  background-color: #0b0f17;
+  background: var(--panel-subtle);
+  border: 1px solid var(--border-color);
   padding: 16px;
   border-radius: 8px;
   margin-bottom: 20px;
@@ -929,26 +1045,27 @@ onMounted(() => {
 
 .prog-text {
   font-size: 12px;
-  color: #94a3b8;
+  color: var(--text-muted);
   margin-top: 8px;
   font-family: monospace;
 }
 
 .images-list ul {
   list-style: none;
-  background-color: #0b0f17;
-  padding: 14px 18px;
+  background: var(--panel-subtle);
+  border: 1px solid var(--border-color);
+  padding: 12px 16px;
   border-radius: 8px;
 }
 
 .images-list li {
   font-size: 13px;
-  color: #94a3b8;
+  color: var(--text-secondary);
   margin-bottom: 8px;
 }
 
 .images-list code {
-  color: #60a5fa;
+  color: var(--primary-color);
 }
 
 .terminal-log {
@@ -1057,13 +1174,34 @@ onMounted(() => {
 .url-card .url {
   font-size: 14px;
   font-weight: 600;
-  color: #60a5fa;
+  color: var(--primary-color);
   margin: 8px 0 4px;
   font-family: monospace;
 }
 
 .url-card .note {
   font-size: 11px;
-  color: #64748b;
+  color: var(--text-muted);
+}
+
+.field-hint {
+  width: 100%;
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--text-muted);
+}
+
+.bundle-distribute {
+  margin-top: 28px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border-color);
+}
+
+.bundle-distribute h4 {
+  margin: 0 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-main);
 }
 </style>

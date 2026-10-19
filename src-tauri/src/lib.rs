@@ -3,6 +3,7 @@ pub mod commands;
 use tauri::Manager;
 
 use commands::{
+    artifact::*,
     db_ops::*,
     docker_engine::*,
     docker_ops::*,
@@ -19,6 +20,7 @@ use commands::{
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
+            commands::profile::init_profile(app.handle());
             app.manage(commands::updater::PendingUpdate::default());
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -51,6 +53,7 @@ pub fn run() {
             import_remote_oceanbase_sql,
             run_remote_deploy_action,
             inspect_remote_deployment,
+            inspect_bundle_layout,
             get_remote_containers_status,
             get_remote_service_logs,
             update_remote_deployment,
@@ -67,6 +70,14 @@ pub fn run() {
             install_app_update,
             get_update_settings,
             save_update_settings,
+            list_artifact_sources,
+            save_artifact_source,
+            delete_artifact_source,
+            fetch_artifact_release,
+            download_artifact,
+            open_artifact_bundle,
+            delete_local_bundle,
+            open_external_url,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

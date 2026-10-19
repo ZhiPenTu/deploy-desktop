@@ -1,13 +1,15 @@
 <template>
   <div class="app-layout">
-    <Header
-      :deploy-mode="connection.mode"
-      :remote-host="connection.remoteHost"
-      @quick-check="handleQuickCheck"
-    />
+    <Sidebar :current-tab="currentTab" @update:tab="currentTab = $event" />
 
-    <div class="main-body">
-      <Sidebar :current-tab="currentTab" @update:tab="currentTab = $event" />
+    <div class="workspace">
+      <Header
+        :page-title="currentPage.title"
+        :group="currentPage.group"
+        :deploy-mode="connection.mode"
+        :remote-host="connection.remoteHost"
+        @quick-check="handleQuickCheck"
+      />
 
       <main class="content-panel">
         <InstallWizard
@@ -34,6 +36,11 @@
           @go-dashboard="currentTab = 'dashboard'"
         />
 
+        <ArtifactCenter
+          v-else-if="currentTab === 'artifacts'"
+          :connection="connection"
+        />
+
         <ImageManager
           v-else-if="currentTab === 'images'"
           :connection="connection"
@@ -49,14 +56,13 @@
           :connection="connection"
           :initial-container="activeLogContainer"
         />
-
       </main>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref } from 'vue';
+import { computed, ref } from 'vue';
 import { connection } from './connection';
 import Header from './components/Header.vue';
 import Sidebar from './components/Sidebar.vue';
@@ -65,12 +71,25 @@ import EnvCheck from './views/EnvCheck.vue';
 import Dashboard from './views/Dashboard.vue';
 import ServiceUpdate from './views/ServiceUpdate.vue';
 import ImageManager from './views/ImageManager.vue';
+import ArtifactCenter from './views/ArtifactCenter.vue';
 import RegistryCenter from './views/RegistryCenter.vue';
 import LogViewer from './views/LogViewer.vue';
-import { defaultContainer } from './config/cluster.js';
+import { getDefaultContainer } from './config/cluster.js';
+
+const pages = {
+  wizard: { title: '部署向导', group: '部署' },
+  env: { title: '系统自检', group: '部署' },
+  dashboard: { title: '集群监控', group: '运行' },
+  update: { title: '服务更新', group: '运行' },
+  logs: { title: '日志诊断', group: '运行' },
+  artifacts: { title: '制品中心', group: '资源' },
+  images: { title: '镜像包管理', group: '资源' },
+  registry: { title: '镜像仓库', group: '高级' }
+};
 
 const currentTab = ref('wizard');
-const activeLogContainer = ref(defaultContainer);
+const activeLogContainer = ref(getDefaultContainer());
+const currentPage = computed(() => pages[currentTab.value] || pages.wizard);
 
 const handleViewLog = (containerName) => {
   activeLogContainer.value = containerName;
@@ -85,25 +104,24 @@ const handleQuickCheck = () => {
 <style scoped>
 .app-layout {
   display: flex;
-  flex-direction: column;
   height: 100vh;
   width: 100vw;
-  background: transparent;
+  background: var(--app-bg);
   overflow: hidden;
 }
 
-.main-body {
+.workspace {
   display: flex;
+  flex-direction: column;
   flex: 1;
+  min-width: 0;
   min-height: 0;
-  overflow: hidden;
 }
 
 .content-panel {
   flex: 1;
-  min-width: 0;
-  background: transparent;
-  height: 100%;
+  min-height: 0;
   overflow: hidden;
+  background: var(--app-bg);
 }
 </style>
