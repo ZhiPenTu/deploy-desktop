@@ -1,0 +1,28 @@
+apiVersion: deploy.desktop/v1
+kind: ImageBundle
+metadata:
+  name: demo-stack
+  version: 1.2.0
+  description: 示例镜像清单，请替换为真实仓库与 digest
+  product: Demo Product
+  channel: stable
+  createdAt: 2026-10-19T00:00:00Z
+  minToolVersion: 0.1.0
+spec:
+  registry: registry.cn-hangzhou.aliyuncs.com
+  namespace: your-namespace
+  platform: linux/amd64
+  images:
+    - name: backend
+      repository: backend
+      digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+      sizeBytes: 268435456
+    - name: frontend
+      repository: frontend
+      digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+      sizeBytes: 73400320
+  artifacts:
+    - name: compose
+      path: compose.yaml
+  checksums: sha256sum.txt
+  signature: cosign.bundle

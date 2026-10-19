@@ -1,0 +1,245 @@
+:root {
+  color-scheme: dark;
+  --app-bg: #0a0f17;
+  --panel-bg: #0f1724;
+  --card-bg: #141e2d;
+  --card-bg-hover: #182335;
+  --border-color: #223047;
+  --border-strong: #2c3d57;
+  --text-main: #e9eff8;
+  --text-secondary: #b9c5d6;
+  --text-muted: #8290a5;
+  --primary-color: #4f8cff;
+  --primary-hover: #6ba0ff;
+  --success-color: #35c48f;
+  --warning-color: #e5a33f;
+  --danger-color: #ef6a6a;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.28), 0 14px 34px rgba(0, 0, 0, 0.16);
+
+  --el-color-primary: #4f8cff;
+  --el-color-success: #35c48f;
+  --el-color-warning: #e5a33f;
+  --el-color-danger: #ef6a6a;
+  --el-bg-color: var(--panel-bg);
+  --el-bg-color-overlay: #162133;
+  --el-fill-color-blank: #0d1420;
+  --el-fill-color-light: rgba(255, 255, 255, 0.04);
+  --el-fill-color-lighter: rgba(255, 255, 255, 0.025);
+  --el-border-color: var(--border-color);
+  --el-border-color-light: var(--border-color);
+  --el-border-color-lighter: rgba(34, 48, 71, 0.7);
+  --el-text-color-primary: var(--text-main);
+  --el-text-color-regular: var(--text-secondary);
+  --el-text-color-secondary: var(--text-muted);
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Roboto, "Helvetica Neue", Arial, sans-serif;
+  background:
+    radial-gradient(1100px 560px at 12% -8%, rgba(79, 140, 255, 0.1), transparent 62%),
+    radial-gradient(900px 500px at 92% 0%, rgba(53, 196, 143, 0.05), transparent 58%),
+    var(--app-bg);
+  color: var(--text-main);
+  overflow: hidden;
+  user-select: text;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+button,
+.app-header,
+.app-sidebar,
+.el-button,
+.el-tag,
+.nav-item {
+  user-select: none;
+}
+
+/* 通用页面骨架 */
+.page-view {
+  padding: 24px 28px 32px;
+  height: 100%;
+  overflow-y: auto;
+}
+
+.page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 24px;
+}
+
+.page-title {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text-main);
+}
+
+.page-subtitle {
+  margin-top: 6px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-muted);
+}
+
+.card-surface {
+  background: var(--panel-bg);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card);
+}
+
+.icon-tile {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  background: rgba(79, 140, 255, 0.12);
+  color: #86b2ff;
+  font-size: 20px;
+}
+
+.icon-tile.success {
+  background: rgba(53, 196, 143, 0.12);
+  color: #5ad7a8;
+}
+
+.icon-tile.warning {
+  background: rgba(229, 163, 63, 0.13);
+  color: #eeb866;
+}
+
+.icon-tile.danger {
+  background: rgba(239, 106, 106, 0.12);
+  color: #f58e8e;
+}
+
+.icon-tile.neutral {
+  background: rgba(148, 163, 184, 0.1);
+  color: var(--text-secondary);
+}
+
+.tag-with-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.tag-with-icon .el-icon {
+  font-size: 13px;
+}
+
+.text-muted {
+  color: var(--text-muted);
+}
+
+/* Element Plus 暗色微调 */
+.el-card {
+  background-color: var(--card-bg) !important;
+  border-color: var(--border-color) !important;
+  color: var(--text-main) !important;
+}
+
+.el-card__header {
+  border-bottom: 1px solid var(--border-color) !important;
+}
+
+.el-table {
+  background-color: transparent !important;
+  color: var(--text-main) !important;
+  --el-table-border-color: var(--border-color) !important;
+  --el-table-header-bg-color: var(--panel-bg) !important;
+  --el-table-tr-bg-color: transparent !important;
+  --el-table-row-hover-bg-color: rgba(79, 140, 255, 0.06) !important;
+}
+
+.el-table th.el-table__cell {
+  background-color: rgba(255, 255, 255, 0.025) !important;
+  color: var(--text-secondary) !important;
+  font-weight: 500;
+}
+
+.el-input__wrapper,
+.el-textarea__inner,
+.el-select__wrapper {
+  border-radius: var(--radius-sm) !important;
+}
+
+.el-input__wrapper,
+.el-textarea__inner {
+  background-color: #0d1420 !important;
+  box-shadow: 0 0 0 1px var(--border-color) inset !important;
+  color: var(--text-main) !important;
+}
+
+.el-input__wrapper.is-focus,
+.el-select__wrapper.is-focused {
+  box-shadow: 0 0 0 1px var(--primary-color) inset !important;
+}
+
+.el-button {
+  border-radius: var(--radius-sm);
+  font-weight: 500;
+}
+
+.el-tag {
+  border-radius: 6px;
+}
+
+.el-step__title {
+  color: var(--text-muted) !important;
+}
+
+.el-step__title.is-process {
+  color: var(--primary-color) !important;
+  font-weight: 600;
+}
+
+.el-step__title.is-success {
+  color: var(--success-color) !important;
+}
+
+.el-switch__label,
+.el-checkbox__label,
+.el-form-item__label {
+  color: var(--text-secondary);
+}
+
+/* 滚动条 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #2a3a52;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #3a4e6c;
+}
