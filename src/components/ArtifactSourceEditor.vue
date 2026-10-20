@@ -16,14 +16,14 @@
         </el-select>
       </el-form-item>
       <template v-if="form.type === 'yunxiaoFlow'">
+        <el-form-item label="制品名">
+          <el-input v-model="form.artifactName" placeholder="deploy-bundle" />
+        </el-form-item>
         <el-form-item label="组织 ID">
           <el-input v-model="form.orgId" placeholder="云效组织 ID" />
         </el-form-item>
         <el-form-item label="流水线 ID">
           <el-input v-model="form.pipelineId" placeholder="数字流水线 ID" />
-        </el-form-item>
-        <el-form-item label="制品名">
-          <el-input v-model="form.artifactName" placeholder="deploy-bundle" />
         </el-form-item>
         <el-form-item label="访问令牌">
           <el-input
@@ -38,13 +38,19 @@
         </el-form-item>
       </template>
       <template v-else>
+        <el-form-item label="制品名" required>
+          <el-input v-model="form.artifactName" placeholder="deploy-bundle" />
+        </el-form-item>
+        <el-form-item label="版本号" required>
+          <el-input v-model="form.version" placeholder="填写交付包的版本号" />
+        </el-form-item>
         <el-form-item label="下载地址">
           <el-input v-model="form.downloadUrl" placeholder="https://example.com/deploy-bundle.tgz" />
         </el-form-item>
       </template>
     </el-form>
     <p class="field-hint">
-      令牌只在本机使用，保存在应用数据目录的 artifact-tokens.json（仅当前用户可读），配置文件中只记录组织、流水线与制品名。
+      令牌仅在本机使用，供当前用户读取。
     </p>
     <template #footer>
       <el-button @click="visible = false">取消</el-button>
@@ -81,6 +87,7 @@ const form = reactive({
   orgId: '',
   pipelineId: '',
   artifactName: 'deploy-bundle',
+  version: '',
   downloadUrl: '',
   hasToken: false
 });
@@ -111,6 +118,7 @@ function resetForm() {
     orgId: source.orgId || '',
     pipelineId: source.pipelineId || '',
     artifactName: source.artifactName || 'deploy-bundle',
+    version: source.version || (source.lastVersion !== 'manual' ? source.lastVersion : '') || '',
     downloadUrl: source.downloadUrl || '',
     hasToken: Boolean(source.hasToken)
   });
@@ -119,6 +127,14 @@ function resetForm() {
 }
 
 async function save() {
+  if (!form.name.trim() || !form.artifactName.trim()) {
+    ElMessage.warning('请填写名称和制品名');
+    return;
+  }
+  if (form.type === 'url' && (form.version.trim() === 'manual' || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(form.version.trim()))) {
+    ElMessage.warning('请填写版本号，以字母或数字开头，仅使用字母、数字、点、短横线和下划线，最多 128 个字符');
+    return;
+  }
   saving.value = true;
   try {
     await saveArtifactSource({
@@ -128,6 +144,7 @@ async function save() {
       orgId: form.orgId,
       pipelineId: form.pipelineId,
       artifactName: form.artifactName,
+      version: form.version,
       downloadUrl: form.downloadUrl,
       token: tokenInput.value ? tokenInput.value : null,
       clearToken: clearToken.value

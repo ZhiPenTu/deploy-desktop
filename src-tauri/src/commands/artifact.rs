@@ -24,6 +24,7 @@ pub struct ArtifactSource {
     pub org_id: String,
     pub pipeline_id: String,
     pub artifact_name: String,
+    pub version: String,
     pub download_url: String,
     pub has_token: bool,
     pub last_version: String,
@@ -40,6 +41,7 @@ pub struct ArtifactSourceInput {
     pub org_id: String,
     pub pipeline_id: String,
     pub artifact_name: String,
+    pub version: String,
     pub download_url: String,
     pub token: Option<String>,
     pub clear_token: bool,
@@ -267,6 +269,9 @@ pub fn save_artifact_source(
     } else if kind != "yunxiaoFlow" && kind != "url" {
         return Err(format!("不支持的制品源类型：{kind}"));
     }
+    if kind == "url" {
+        validate_artifact_version(&source.version)?;
+    }
 
     let id = if source.id.trim().is_empty() {
         format!("src-{:x}", now_millis())
@@ -294,6 +299,7 @@ pub fn save_artifact_source(
     let record = ArtifactSource {
         id: id.clone(),
         name,
+        version: if kind == "url" { source.version.trim().to_string() } else { String::new() },
         kind,
         org_id: source.org_id.trim().to_string(),
         pipeline_id: source.pipeline_id.trim().to_string(),
@@ -482,14 +488,9 @@ fn pick_artifact(value: &Value, artifact_name: &str) -> Option<Value> {
                 .map(|name| {
                     name == artifact_name
                         || name == format!("{artifact_name}.tgz")
-                        || name.starts_with(artifact_name)
+                        || name == format!("{artifact_name}.tar.gz")
                 })
                 .unwrap_or(false)
-        })
-        .or_else(|| {
-            candidates.iter().find(|item| {
-                item.get("type").and_then(Value::as_str) == Some("packages")
-            })
         })
         .cloned()
 }
@@ -520,20 +521,39 @@ fn safe_version_key(version: &str) -> String {
         .collect()
 }
 
-fn url_release(source: &ArtifactSource) -> ArtifactRelease {
-    ArtifactRelease {
+fn validate_artifact_version(version: &str) -> Result<&str, String> {
+    let version = version.trim();
+    if version.is_empty() || version == "manual" {
+        return Err("制品缺少版本号，请补充版本后重试".to_string());
+    }
+    if version.len() > 128
+        || !version.starts_with(|character: char| character.is_ascii_alphanumeric())
+        || !version.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_')
+        })
+    {
+        return Err("制品版本号格式无效，请使用字母、数字、点、短横线或下划线，以字母或数字开头，最多 128 个字符".to_string());
+    }
+    Ok(version)
+}
+
+fn url_release(source: &ArtifactSource) -> Result<ArtifactRelease, String> {
+    let version = if source.version.trim().is_empty() {
+        &source.last_version
+    } else {
+        &source.version
+    };
+    let version = validate_artifact_version(version)
+        .map_err(|_| "请编辑制品源，填写与交付包一致的版本号".to_string())?;
+    Ok(ArtifactRelease {
         run_id: 0,
         run_url: String::new(),
         run_status: "manual".to_string(),
-        version: if source.last_version.trim().is_empty() {
-            "manual".to_string()
-        } else {
-            source.last_version.clone()
-        },
+        version: version.to_string(),
         artifact_name: source.artifact_name.clone(),
         download_url: source.download_url.clone(),
         ..Default::default()
-    }
+    })
 }
 
 fn release_from_flow_detail(
@@ -548,12 +568,17 @@ fn release_from_flow_detail(
     if download_url.is_empty() {
         return Ok(None);
     }
+    let version = artifact.get("version").and_then(|value| {
+        value.as_str().map(str::to_string).or_else(|| value.as_u64().map(|number| number.to_string()))
+    }).unwrap_or_default();
+    let version = validate_artifact_version(&version)
+        .map_err(|error| format!("运行 #{run_id}：{error}，请重新构建并上传带版本号的制品"))?;
 
     Ok(Some(ArtifactRelease {
         run_id,
         run_url: format!("{FLOW_WEB}/{}/runs/{}", source.pipeline_id, run_id),
         run_status: json_str(detail, "status").to_string(),
-        version: json_str(&artifact, "version").to_string(),
+        version: version.to_string(),
         commit: find_key_string(detail, "CI_COMMIT_SHA").unwrap_or_default(),
         commit_short: find_key_string(detail, "CI_COMMIT_ID").unwrap_or_default(),
         commit_title: find_key_string(detail, "CI_COMMIT_TITLE").unwrap_or_default(),
@@ -575,26 +600,27 @@ fn cached_bundle_dir(
     source: &ArtifactSource,
     release: &ArtifactRelease,
 ) -> Option<PathBuf> {
-    let version = if source.kind == "url" {
-        "manual".to_string()
-    } else if release.version.trim().is_empty() {
-        "manual".to_string()
-    } else {
-        safe_version_key(&release.version)
-    };
+    let version = safe_version_key(&release.version);
     let expected = config_root.join("bundles").join(&source.id).join(version);
-    if expected.is_dir() {
+    if bundle_has_version(&expected, &release.version) {
         return Some(expected);
     }
 
     let last_dir = source.last_bundle_dir.trim();
     if last_dir.is_empty()
-        || (source.kind != "url" && source.last_version.trim() != release.version.trim())
+        || source.last_version.trim() != release.version.trim()
     {
         return None;
     }
     let last_dir = PathBuf::from(last_dir);
-    last_dir.is_dir().then_some(last_dir)
+    bundle_has_version(&last_dir, &release.version).then_some(last_dir)
+}
+
+fn bundle_has_version(dir: &Path, version: &str) -> bool {
+    fs::read_to_string(dir.join("bundle.json"))
+        .ok()
+        .and_then(|content| serde_json::from_str::<Value>(&content).ok())
+        .is_some_and(|meta| json_str(&meta, "version").trim() == version.trim())
 }
 
 fn attach_local_bundle(
@@ -670,7 +696,7 @@ fn load_artifact_release_page(
     page: u32,
 ) -> Result<ArtifactReleasePage, String> {
     if source.kind == "url" {
-        let mut release = url_release(source);
+        let mut release = url_release(source)?;
         attach_local_bundle(config_root, source, &mut release);
         return Ok(ArtifactReleasePage {
             items: vec![release],
@@ -715,7 +741,7 @@ pub fn fetch_artifact_release(
         .ok_or_else(|| "制品源不存在".to_string())?;
 
     if source.kind == "url" {
-        let mut release = url_release(source);
+        let mut release = url_release(source)?;
         attach_local_bundle(&config_root, source, &mut release);
         return Ok(release);
     }
@@ -921,6 +947,7 @@ fn validate_layout(dir: &Path, backend_artifact: &str) -> Result<(String, String
     }
     let text = fs::read_to_string(&bundle_json).map_err(|e| format!("读取 bundle.json 失败：{e}"))?;
     let meta: Value = serde_json::from_str(&text).map_err(|e| format!("bundle.json 格式无效：{e}"))?;
+    let version = validate_artifact_version(json_str(&meta, "version"))?;
 
     let mut missing = Vec::new();
     // 两种交付形态都接受：
@@ -945,9 +972,51 @@ fn validate_layout(dir: &Path, backend_artifact: &str) -> Result<(String, String
     }
 
     Ok((
-        json_str(&meta, "version").to_string(),
+        version.to_string(),
         json_str(&meta, "commitShort").to_string(),
     ))
+}
+
+fn install_artifact_archive(
+    archive: &Path,
+    dest: &Path,
+    version: &str,
+    backend_artifact: &str,
+) -> Result<ArtifactBundle, String> {
+    let staged = dest.with_file_name(format!(".unpack-{}-{}", std::process::id(), now_millis()));
+    let result = (|| {
+        let files = safe_extract(archive, &staged)?;
+        let (bundle_version, commit) = validate_layout(&staged, backend_artifact)?;
+        if bundle_version != version {
+            return Err(format!("交付包版本不匹配：选择的版本为 {version}，包内版本为 {bundle_version}，请重新选择或重新构建"));
+        }
+        let backup = staged.with_extension("previous");
+        let had_previous = dest.exists();
+        if had_previous {
+            fs::rename(dest, &backup).map_err(|error| format!("保留已有交付包失败：{error}"))?;
+        }
+        if let Err(error) = fs::rename(&staged, dest) {
+            if had_previous {
+                fs::rename(&backup, dest).map_err(|restore_error| {
+                    format!("保存交付包失败：{error}；恢复原交付包失败：{restore_error}")
+                })?;
+            }
+            return Err(format!("保存交付包失败：{error}"));
+        }
+        if had_previous {
+            let _ = fs::remove_dir_all(backup);
+        }
+        Ok(ArtifactBundle {
+            dir: dest.to_string_lossy().to_string(),
+            version: bundle_version,
+            commit,
+            files,
+            md5: String::new(),
+            size_bytes: 0,
+        })
+    })();
+    let _ = fs::remove_dir_all(staged);
+    result
 }
 
 #[tauri::command]
@@ -976,17 +1045,13 @@ pub fn download_artifact(
     validate_download_url(&download_url, &source)?;
 
     let profile = crate::commands::profile::deployment_profile();
-    let version = if source.kind == "url" || release.version.trim().is_empty() {
-        "manual".to_string()
-    } else {
-        release.version.trim().to_string()
-    };
+    let version = validate_artifact_version(&release.version)?.to_string();
+    if source.kind == "url" && url_release(&source)?.version != version {
+        return Err("制品源版本已变更，请刷新列表后重新选择".to_string());
+    }
     let safe_version = safe_version_key(&version);
 
     let dest = dir.join("bundles").join(&id).join(&safe_version);
-    if dest.exists() {
-        fs::remove_dir_all(&dest).map_err(|e| format!("清理旧解包目录失败：{e}"))?;
-    }
 
     let temp = std::env::temp_dir().join(format!("deploy-bundle-{}-{}.tgz", id, safe_version));
     let _ = on_event.send(DownloadProgress {
@@ -994,7 +1059,14 @@ pub fn download_artifact(
         downloaded: 0,
         total: release.size_bytes,
     });
-    let (size, digest) = download_to_file(&download_url, &temp, release.size_bytes, &on_event)?;
+    let downloaded = download_to_file(&download_url, &temp, release.size_bytes, &on_event);
+    let (size, digest) = match downloaded {
+        Ok(result) => result,
+        Err(error) => {
+            let _ = fs::remove_file(&temp);
+            return Err(error);
+        }
+    };
 
     if !release.md5.trim().is_empty() && !digest.eq_ignore_ascii_case(release.md5.trim()) {
         let _ = fs::remove_file(&temp);
@@ -1009,16 +1081,10 @@ pub fn download_artifact(
         downloaded: size,
         total: size,
     });
-    let count = safe_extract(&temp, &dest)?;
+    let installed = install_artifact_archive(&temp, &dest, &version, &profile.backend_artifact);
     let _ = fs::remove_file(&temp);
-
-    let (bundle_version, bundle_commit) = validate_layout(&dest, &profile.backend_artifact)?;
-
-    sources[index].last_version = if bundle_version.is_empty() {
-        version
-    } else {
-        bundle_version.clone()
-    };
+    let mut bundle = installed?;
+    sources[index].last_version = bundle.version.clone();
     sources[index].last_bundle_dir = dest.to_string_lossy().to_string();
     store_sources(&app, &sources)?;
 
@@ -1028,14 +1094,12 @@ pub fn download_artifact(
         total: size,
     });
 
-    Ok(ArtifactBundle {
-        dir: dest.to_string_lossy().to_string(),
-        version: bundle_version,
-        commit: if bundle_commit.is_empty() { release.commit_short } else { bundle_commit },
-        md5: digest,
-        size_bytes: size,
-        files: count,
-    })
+    if bundle.commit.is_empty() {
+        bundle.commit = release.commit_short;
+    }
+    bundle.md5 = digest;
+    bundle.size_bytes = size;
+    Ok(bundle)
 }
 
 fn count_files(dir: &Path) -> usize {
@@ -1165,20 +1229,14 @@ pub fn open_artifact_bundle_version(
         .ok_or_else(|| "制品源不存在".to_string())?;
     let source = sources[index].clone();
 
-    let version = version.trim();
-    if version.is_empty() {
-        return Err("缺少制品版本".to_string());
-    }
+    let version = validate_artifact_version(&version)?;
     let mut dir = config_root
         .join("bundles")
         .join(&id)
         .join(safe_version_key(version));
-    if !dir.is_dir() && source.kind == "url" {
-        dir = config_root.join("bundles").join(&id).join("manual");
-    }
     if !dir.is_dir()
         && !source.last_bundle_dir.trim().is_empty()
-        && (source.kind == "url" || source.last_version.trim() == version)
+        && source.last_version.trim() == version
     {
         dir = PathBuf::from(source.last_bundle_dir.trim());
     }
@@ -1188,11 +1246,10 @@ pub fn open_artifact_bundle_version(
 
     let profile = crate::commands::profile::deployment_profile();
     let (bundle_version, commit) = validate_layout(&dir, &profile.backend_artifact)?;
-    sources[index].last_version = if bundle_version.is_empty() {
-        version.to_string()
-    } else {
-        bundle_version.clone()
-    };
+    if bundle_version != version {
+        return Err("本地交付包版本与所选版本不一致，请重新下载该版本".to_string());
+    }
+    sources[index].last_version = bundle_version.clone();
     sources[index].last_bundle_dir = dir.to_string_lossy().to_string();
     store_sources(&app, &sources)?;
 
@@ -1311,6 +1368,78 @@ mod tests {
             Some("952e9dc")
         );
         assert!(validate_download_url(json_str(&artifact, "downloadUrl"), &source("yunxiaoFlow", "")).is_ok());
+    }
+
+    #[test]
+    fn flow_release_requires_matching_name_and_version() {
+        let mut item = source("yunxiaoFlow", "");
+        item.artifact_name = "deploy-bundle".to_string();
+        let mut detail = serde_json::json!({
+            "status": "SUCCESS",
+            "artifacts": [{
+                "artifact": "deploy-bundle-other.tgz",
+                "version": "8-a1b2c3d",
+                "downloadUrl": "https://packages.aliyun.com/bundle.tgz",
+                "md5": "abc",
+                "type": "packages"
+            }]
+        });
+        assert!(release_from_flow_detail(&item, 8, &detail).unwrap().is_none());
+        detail["artifacts"][0]["artifact"] = "deploy-bundle.tgz".into();
+        let release = release_from_flow_detail(&item, 8, &detail).unwrap().unwrap();
+        assert_eq!(release.version, "8-a1b2c3d");
+        detail["artifacts"][0]["version"] = 7.into();
+        assert_eq!(release_from_flow_detail(&item, 7, &detail).unwrap().unwrap().version, "7");
+        detail["artifacts"][0]["version"] = Value::Null;
+        assert!(release_from_flow_detail(&item, 8, &detail).unwrap_err().contains("缺少版本号"));
+    }
+
+    #[test]
+    fn url_release_uses_configured_version_instead_of_cached_version() {
+        let mut item = source("url", "https://files.example.com/bundle.tgz");
+        assert!(url_release(&item).is_err());
+        item.last_version = "7".to_string();
+        assert_eq!(url_release(&item).unwrap().version, "7");
+        item.version = "8-a1b2c3d".to_string();
+        assert_eq!(url_release(&item).unwrap().version, "8-a1b2c3d");
+        for invalid in ["", "manual", "..", "../8", "/8", "8/other", "8\\other"] {
+            assert!(validate_artifact_version(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn mismatched_archive_keeps_previous_cache_and_is_not_marked_downloaded() {
+        let root = std::env::temp_dir().join(format!("deploy-version-check-{}", std::process::id()));
+        let fixture = root.join("fixture");
+        let cached = root.join("bundles/src-test/8-a1b2c3d");
+        fs::create_dir_all(fixture.join("app/frontend-dist")).unwrap();
+        fs::create_dir_all(fixture.join("deploy")).unwrap();
+        fs::create_dir_all(&cached).unwrap();
+        fs::write(cached.join("previous.txt"), "preserve").unwrap();
+        fs::write(fixture.join("app/server.jar"), "jar").unwrap();
+        fs::write(fixture.join("app/frontend-dist/index.html"), "html").unwrap();
+        fs::write(fixture.join("deploy/docker-compose.yml"), "services: {}").unwrap();
+        fs::write(fixture.join("bundle.json"), r#"{"version":"7"}"#).unwrap();
+        let archive = root.join("bundle.tgz");
+        let status = Command::new("tar").arg("-czf").arg(&archive).arg("-C").arg(&fixture)
+            .args(["app", "deploy", "bundle.json"]).status().unwrap();
+        assert!(status.success());
+        let error = install_artifact_archive(&archive, &cached, "8-a1b2c3d", "server.jar").unwrap_err();
+        assert!(error.contains("版本不匹配"));
+        assert_eq!(fs::read_to_string(cached.join("previous.txt")).unwrap(), "preserve");
+
+        let mut item = source("yunxiaoFlow", "");
+        item.id = "src-test".to_string();
+        let release = ArtifactRelease { version: "8-a1b2c3d".to_string(), ..Default::default() };
+        assert!(cached_bundle_dir(&root, &item, &release).is_none());
+        fs::write(fixture.join("bundle.json"), r#"{"version":"8-a1b2c3d"}"#).unwrap();
+        assert!(Command::new("tar").arg("-czf").arg(&archive).arg("-C").arg(&fixture)
+            .args(["app", "deploy", "bundle.json"]).status().unwrap().success());
+        let installed = install_artifact_archive(&archive, &cached, "8-a1b2c3d", "server.jar").unwrap();
+        assert_eq!(installed.version, "8-a1b2c3d");
+        assert!(!cached.join("previous.txt").exists());
+        assert_eq!(cached_bundle_dir(&root, &item, &release), Some(cached));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

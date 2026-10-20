@@ -6,11 +6,11 @@
           <el-icon><ArrowLeft /></el-icon>
           <span>返回制品源管理</span>
         </el-button>
-        <h2 class="page-title">{{ activeSource ? '制品管理' : '制品源管理' }}</h2>
+        <h2 class="page-title">{{ activeSource ? '制品列表' : '制品源管理' }}</h2>
         <p class="page-subtitle">
           {{ activeSource
-            ? `来源：${activeSource.name} · 查看最新版本、历史构建与本地下载状态`
-            : '连接构建来源，管理可下载的制品；进入某个来源查看最新与历史版本' }}
+            ? `查看 ${activeSource.name} 的制品、版本号和下载状态`
+            : '选择制品源，查看可下载的制品及对应版本' }}
         </p>
       </div>
       <div class="header-actions">
@@ -161,6 +161,14 @@
           </div>
         </div>
         <div class="overview-actions">
+          <el-select
+            :model-value="activeSourceId"
+            aria-label="选择制品源"
+            class="source-switcher"
+            @change="switchSource"
+          >
+            <el-option v-for="source in sources" :key="source.id" :label="source.name" :value="source.id" />
+          </el-select>
           <el-button @click="openEdit(activeSource)">编辑制品源</el-button>
           <el-button
             v-if="activeSource.lastBundleDir"
@@ -182,7 +190,7 @@
             <strong>{{ latestBuiltText }}</strong>
           </div>
           <div class="overview-stat">
-            <span class="stat-label">已加载版本</span>
+            <span class="stat-label">已加载制品</span>
             <strong>{{ loadedVersionText }}</strong>
           </div>
         </div>
@@ -191,7 +199,7 @@
       <div class="card-surface versions-card">
         <div class="card-title-bar">
           <div>
-            <h3>制品版本</h3>
+            <h3>制品列表</h3>
             <p class="card-subtitle">按构建时间倒序排列，最新版本置顶</p>
           </div>
           <el-button v-if="releases.length" link :loading="releasesLoading" @click="loadReleases({ reset: true })">
@@ -223,6 +231,11 @@
           size="small"
           class="versions-table"
         >
+          <el-table-column label="制品名" min-width="160">
+            <template #default="{ row }">
+              <code>{{ row.artifactName || activeSource.artifactName }}</code>
+            </template>
+          </el-table-column>
           <el-table-column label="版本" min-width="175">
             <template #default="{ row }">
               <div class="version-cell">
@@ -231,7 +244,6 @@
                   <el-tag v-if="isLatest(row)" size="small" type="primary" effect="plain">最新</el-tag>
                   <el-tag v-if="isCurrentBundle(row)" size="small" type="success" effect="plain">当前部署</el-tag>
                 </div>
-                <span class="subtle">{{ row.artifactName || activeSource.artifactName }}</span>
               </div>
             </template>
           </el-table-column>
@@ -289,11 +301,11 @@
 
         <div v-else-if="!releasesError" class="versions-empty">
           <span class="empty-icon compact"><el-icon><Box /></el-icon></span>
-          <h4>还没有可用版本</h4>
-          <p>请确认流水线已有成功构建，并上传了与制品名一致的交付包。</p>
+          <h4>当前未找到可用制品</h4>
+          <p>{{ hasMore ? '可以继续加载更早的构建记录。' : '请确认流水线已成功构建，并上传了对应制品。' }}</p>
         </div>
 
-        <div v-if="releases.length && !releasesError" class="list-footer">
+        <div v-if="(releases.length || hasMore) && !releasesError" class="list-footer">
           <el-button v-if="hasMore" :loading="loadingMore" @click="loadMore">加载更早版本</el-button>
           <span v-else class="subtle">已显示全部可加载版本</span>
         </div>
@@ -342,7 +354,7 @@
         <el-alert
           v-if="bundle"
           :title="`已解包到 ${bundle.dir}`"
-          :description="`版本 ${bundle.version || '-'}，共 ${bundle.files} 个文件，MD5 校验通过`"
+          :description="`版本 ${bundle.version || '-'}，共 ${bundle.files} 个文件，交付包校验通过`"
           type="success"
           :closable="false"
           show-icon
@@ -366,7 +378,6 @@
 <script setup>
 import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { invoke, isTauri } from '@tauri-apps/api/core';
 import { ArrowLeft, Box, Plus, Refresh } from '@element-plus/icons-vue';
 import BundlePlanPanel from '../components/BundlePlanPanel.vue';
 import ArtifactSourceEditor from '../components/ArtifactSourceEditor.vue';
@@ -378,7 +389,7 @@ import {
   listArtifactSources,
   openArtifactBundleVersion
 } from '../api/artifact.js';
-import { inspectBundlePlan } from '../api/tauri.js';
+import { inspectBundlePlan, openArtifactRunUrl } from '../api/tauri.js';
 
 const props = defineProps({
   connection: {
@@ -461,7 +472,7 @@ function versionText(item) {
 }
 
 function releaseKey(item) {
-  return `${item.runId || 0}-${item.version || 'manual'}-${item.downloadUrl || ''}`;
+  return `${item.runId || 0}-${item.artifactName || ''}-${item.version || ''}`;
 }
 
 function isLatest(item) {
@@ -614,6 +625,11 @@ function backToSources() {
   loadingMore.value = false;
   releasePage.value = 0;
   hasMore.value = false;
+}
+
+function switchSource(id) {
+  const source = sources.value.find((item) => item.id === id);
+  if (source) openSource(source);
 }
 
 async function refreshActive() {
@@ -774,12 +790,8 @@ function applyBundle() {
 async function openRunUrl(item) {
   const url = item?.runUrl;
   if (!url) return;
-  if (!isTauri()) {
-    window.open(url, '_blank', 'noopener');
-    return;
-  }
   try {
-    await invoke('open_external_url', { url });
+    await openArtifactRunUrl(url);
   } catch (error) {
     ElMessage.error(String(error));
   }
@@ -906,6 +918,12 @@ onMounted(loadSources);
 .overview-actions {
   gap: 8px;
   align-self: start;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.source-switcher {
+  width: 200px;
 }
 
 .overview-stats {
