@@ -1,6 +1,6 @@
 <template>
   <div class="app-layout">
-    <Sidebar :current-tab="currentTab" @update:tab="currentTab = $event" />
+    <Sidebar :current-tab="currentTab" @update:tab="navigateTab" />
 
     <div class="workspace">
       <Header
@@ -19,21 +19,25 @@
 
         <Hosts
           v-else-if="currentTab === 'hosts'"
+          @view-status="viewHostStatus"
           @go-credentials="currentTab = 'credentials'"
         />
 
         <InstallWizard
           v-else-if="currentTab === 'wizard'"
           :connection="connection"
-          @go-dashboard="currentTab = 'dashboard'"
-          @go-images="currentTab = 'images'"
-          @go-artifacts="currentTab = 'artifacts'"
-          @go-hosts="currentTab = 'hosts'"
+          @busy-change="wizardBusy = $event"
+          @go-dashboard="navigateTab('dashboard')"
+          @go-images="navigateTab('images')"
+          @go-artifacts="navigateTab('artifacts')"
+          @go-hosts="navigateTab('hosts')"
         />
 
         <EnvCheck
-          v-else-if="currentTab === 'env'"
+          v-else-if="currentTab === 'host-status'"
+          :host="selectedStatusHost"
           :connection="connection"
+          @go-hosts="navigateTab('hosts')"
         />
 
         <Dashboard
@@ -85,7 +89,8 @@
 
 <script setup>
 import { computed, ref } from 'vue';
-import { connection } from './connection';
+import { ElMessage } from 'element-plus';
+import { connection, connectionInventory, hostById } from './connection';
 import Header from './components/Header.vue';
 import Sidebar from './components/Sidebar.vue';
 import Credentials from './views/Credentials.vue';
@@ -105,7 +110,7 @@ const pages = {
   credentials: { title: '凭证管理', group: '连接' },
   hosts: { title: '主机管理', group: '连接' },
   wizard: { title: '部署向导', group: '部署' },
-  env: { title: '系统自检', group: '部署' },
+  'host-status': { title: '主机状态', group: '连接' },
   dashboard: { title: '集群监控', group: '运行' },
   update: { title: '服务更新', group: '运行' },
   logs: { title: '日志诊断', group: '运行' },
@@ -116,6 +121,13 @@ const pages = {
 };
 
 const currentTab = ref('wizard');
+const wizardBusy = ref(false);
+const selectedStatusHostId = ref('');
+const selectedStatusHost = computed(() => hostById(selectedStatusHostId.value));
+function navigateTab(tab) {
+  if (wizardBusy.value) { ElMessage.warning('当前操作正在进行，请等待完成后切换页面。'); return; }
+  currentTab.value = tab;
+}
 const activeLogContainer = ref(getDefaultContainer());
 const currentPage = computed(() => pages[currentTab.value] || pages.wizard);
 
@@ -125,8 +137,16 @@ const handleViewLog = (containerName) => {
 };
 
 const handleQuickCheck = () => {
-  currentTab.value = 'env';
+  const targetHost = hostById(selectedStatusHostId.value) ||
+    hostById(connectionInventory.activeHostId);
+  selectedStatusHostId.value = targetHost?.id || '';
+  navigateTab('host-status');
 };
+
+function viewHostStatus(host) {
+  selectedStatusHostId.value = host?.id || '';
+  navigateTab('host-status');
+}
 </script>
 
 <style scoped>

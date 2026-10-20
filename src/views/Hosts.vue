@@ -97,6 +97,7 @@
 
           <div class="host-foot">
             <div class="foot-actions">
+              <el-button size="small" text type="primary" @click="$emit('view-status', row)">状态</el-button>
               <el-button
                 v-if="!isLocalHost(row)"
                 size="small"
@@ -177,7 +178,7 @@ import {
   testManagedHostConnection
 } from '../api/tauri.js';
 
-defineEmits(['go-credentials']);
+defineEmits(['go-credentials', 'view-status']);
 
 const editorVisible = ref(false);
 const editing = ref(null);

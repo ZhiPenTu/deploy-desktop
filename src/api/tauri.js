@@ -700,6 +700,21 @@ export async function inspectBundleConfig(bundleDir, file, target = null, imageD
   });
 }
 
+export async function inspectDeploymentReview(bundleDir, installDir, target = null, imageDir = '') {
+  if (!isTauri()) {
+    throw new Error('当前预览暂不可用，请在桌面应用中核对目标主机与部署清单');
+  }
+  return await invoke('inspect_deployment_review', {
+    bundleDir,
+    installDir,
+    imageDir: imageDir || null,
+    host: target?.host || null,
+    port: target?.port ?? null,
+    user: target?.user || null,
+    keyPath: target?.keyPath || null
+  });
+}
+
 export async function inspectRemoteDeployment(host, port, user, keyPath, installDir) {
   if (!isTauri()) {
     return {
@@ -966,4 +981,18 @@ export async function testManagedHostConnection(id) {
 export async function setupManagedHostAccess(id) {
   if (!isTauri()) throw new Error(NO_TAURI_CONNECTIONS);
   return await invoke('setup_managed_host_access', { id });
+}
+
+export async function prepareLocalArtifactBundle(path) {
+  if (!isTauri()) throw new Error('当前环境暂不可用，请在桌面应用中准备制品。');
+  return await invoke('prepare_local_artifact_bundle', { path });
+}
+
+export async function updateLocalDeployment(bundleDir, installDir, components, backup = true, dryRun = false) {
+  if (!isTauri()) throw new Error('当前环境暂不可用，请在桌面应用中执行更新。');
+  return await invoke('update_local_deployment', { bundleDir, installDir, components, backup, dryRun });
+}
+
+export function isDesktopApp() {
+  return isTauri();
 }

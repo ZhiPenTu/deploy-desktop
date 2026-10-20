@@ -43,7 +43,6 @@
 <script setup>
 import {
   Promotion,
-  Odometer,
   DataBoard,
   Document,
   UploadFilled,
@@ -77,8 +76,7 @@ const navGroups = [
   {
     label: '部署',
     items: [
-      { key: 'wizard', icon: Promotion, title: '部署向导' },
-      { key: 'env', icon: Odometer, title: '系统自检' }
+      { key: 'wizard', icon: Promotion, title: '部署向导' }
     ]
   },
   {

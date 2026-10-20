@@ -2,16 +2,47 @@
   <div class="page-view">
     <div class="page-header">
       <div>
-        <h2 class="page-title">系统运行环境</h2>
-        <p class="page-subtitle">检测服务器硬件指标、Docker 守护进程及关键通信端口状态</p>
+        <h2 class="page-title">主机状态</h2>
+        <p class="page-subtitle">{{ targetSummary }}</p>
       </div>
-      <el-button type="primary" :loading="loading" @click="fetchEnv">
-        <el-icon><Refresh /></el-icon>
-        <span>重新自检</span>
-      </el-button>
+      <div class="header-actions">
+        <el-button @click="$emit('go-hosts')">返回主机列表</el-button>
+        <el-button type="primary" :loading="loading" @click="fetchEnv">
+          <el-icon><Refresh /></el-icon>
+          <span>重新检查</span>
+        </el-button>
+      </div>
     </div>
 
-    <div class="metrics-grid" v-if="env">
+    <el-alert
+      v-if="!host"
+      title="暂不可用"
+      description="请先在主机列表中选择要检查的主机。"
+      type="info"
+      show-icon
+      :closable="false"
+    />
+
+    <div class="section-card card-surface host-summary" v-if="host">
+      <div class="summary-title">{{ host.name }}</div>
+      <div class="summary-tags">
+        <el-tag size="small" :type="isRemote ? 'primary' : 'info'" effect="plain">
+          {{ isRemote ? 'SSH 主机' : '本机' }}
+        </el-tag>
+      </div>
+      <div class="summary-grid">
+        <div class="info-row">
+          <span class="k">{{ isRemote ? 'SSH 地址' : '目标位置' }}</span>
+          <span class="v">{{ targetText }}</span>
+        </div>
+        <div class="info-row">
+          <span class="k">部署目录</span>
+          <span class="v" :class="deployDir ? 'code' : 'muted'">{{ deployDir || '沿用当前配置' }}</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="metrics-grid" v-if="host && env">
       <div class="metric-box card-surface">
         <span class="icon-tile">
           <el-icon><Monitor /></el-icon>
@@ -142,7 +173,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, watch } from 'vue';
 import {
   CircleCheck,
   CircleClose,
@@ -160,32 +191,52 @@ import {
   checkRemoteEnv,
   installRemoteDockerEngine
 } from '../api/tauri.js';
+import { credentialById } from '../connection.js';
 
 const props = defineProps({
+  host: {
+    type: Object,
+    default: null
+  },
   connection: {
     type: Object,
     required: true
   }
 });
 
-const isRemote = computed(() => props.connection.mode === 'remote');
+defineEmits(['go-hosts']);
+
+const isRemote = computed(() => props.host?.kind !== 'local');
 const loading = ref(false);
 const installing = ref(false);
 const env = ref(null);
+const credential = computed(() => credentialById(props.host?.credentialId));
+const deployDir = computed(() => props.host?.deployDir || props.connection.deployDir);
+const targetText = computed(() => (
+  isRemote.value
+    ? `${props.host?.address || '未配置地址'}:${props.host?.port || 22}`
+    : '当前电脑'
+));
+const targetSummary = computed(() => (
+  props.host
+    ? `检查「${props.host.name}」的硬件指标、Docker 守护进程及关键通信端口状态`
+    : '选择主机后检查其硬件指标、Docker 守护进程及关键通信端口状态'
+));
 
 const fetchEnv = async () => {
+  if (!props.host) return;
   loading.value = true;
   try {
     env.value = isRemote.value
       ? await checkRemoteEnv(
-          props.connection.remoteHost,
-          props.connection.remotePort,
-          props.connection.remoteUser,
-          props.connection.remoteKey || null
+          props.host.address,
+          props.host.port || 22,
+          credential.value?.username || props.connection.remoteUser || 'root',
+          credential.value?.privateKeyPath || props.connection.remoteKey || null
         )
-      : await checkLocalEnv(props.connection.deployDir);
+      : await checkLocalEnv(deployDir.value);
   } catch (e) {
-    ElMessage.error(`环境自检失败: ${e}`);
+    ElMessage.error(`主机状态检查失败: ${e}`);
   } finally {
     loading.value = false;
   }
@@ -196,10 +247,10 @@ const handleInstallDocker = async () => {
   try {
     if (isRemote.value) {
       await installRemoteDockerEngine(
-        props.connection.remoteHost,
-        props.connection.remotePort,
-        props.connection.remoteUser,
-        props.connection.remoteKey || null,
+        props.host.address,
+        props.host.port || 22,
+        credential.value?.username || props.connection.remoteUser || 'root',
+        credential.value?.privateKeyPath || props.connection.remoteKey || null,
         props.connection.bundleDir
       );
     } else {
@@ -213,7 +264,14 @@ const handleInstallDocker = async () => {
   }
 };
 
-onMounted(fetchEnv);
+watch(
+  () => props.host?.id,
+  () => {
+    env.value = null;
+    fetchEnv();
+  },
+  { immediate: true }
+);
 </script>
 
 <style scoped>
@@ -331,5 +389,53 @@ onMounted(fetchEnv);
 .issue-icon {
   margin-top: 2px;
   flex: none;
+}
+
+.header-actions {
+  display: flex;
+  flex: none;
+  gap: 10px;
+}
+
+.host-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.summary-title {
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.summary-tags {
+  margin-top: -8px;
+}
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px 28px;
+}
+
+.summary-grid .info-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.summary-grid .k {
+  width: 72px;
+  flex: none;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.summary-grid .v {
+  min-width: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
 }
 </style>

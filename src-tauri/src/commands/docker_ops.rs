@@ -4,6 +4,8 @@ use std::path::Path;
 use std::process::Command;
 use tauri::Emitter;
 
+use super::remote_ssh::find_binary;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageLoadProgress {
     pub current: usize,
@@ -176,7 +178,7 @@ pub async fn load_offline_images(
             },
         );
 
-        let output = Command::new("docker")
+        let output = Command::new(find_binary("docker"))
             .args(["load", "-i", &tar_path.to_string_lossy()])
             .output();
 
@@ -217,7 +219,7 @@ pub fn get_containers_status() -> Result<Vec<ContainerStatusItem>, String> {
 
     for (c_name, svc_key) in target_containers {
         // 使用 docker inspect 获取详细信息
-        let output = Command::new("docker")
+        let output = Command::new(find_binary("docker"))
             .args([
                 "inspect",
                 "--format",
@@ -235,7 +237,7 @@ pub fn get_containers_status() -> Result<Vec<ContainerStatusItem>, String> {
                 let image = parts.get(2).unwrap_or(&"").to_string();
 
                 // 获取运行端口及简要状态字符串
-                let ps_out = Command::new("docker")
+                let ps_out = Command::new(find_binary("docker"))
                     .args(["ps", "-a", "--filter", &format!("name=^{}$", c_name), "--format", "{{.Status}}\t{{.Ports}}"])
                     .output();
 
@@ -331,7 +333,7 @@ pub fn docker_compose_action(
         _ => return Err(format!("不支持的 Compose 操作: {}", action)),
     }
 
-    let output = Command::new("docker")
+    let output = Command::new(find_binary("docker"))
         .args(&args)
         .current_dir(compose_file.parent().unwrap_or(root))
         .output();
@@ -345,7 +347,7 @@ pub fn docker_compose_action(
                 if action == "up" {
                     let containers = artifact_containers();
                     if !containers.is_empty() {
-                        match Command::new("docker")
+                        match Command::new(find_binary("docker"))
                             .arg("restart")
                             .args(&containers)
                             .output()
@@ -394,7 +396,7 @@ pub fn docker_compose_action(
 
 #[tauri::command]
 pub fn get_service_logs(container_name: String, tail: u32) -> Result<String, String> {
-    let output = Command::new("docker")
+    let output = Command::new(find_binary("docker"))
         .args(["logs", "--tail", &tail.to_string(), &container_name])
         .output();
 
