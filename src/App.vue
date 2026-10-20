@@ -19,6 +19,7 @@
 
         <Hosts
           v-else-if="currentTab === 'hosts'"
+          @view-status="viewHostStatus"
           @go-credentials="currentTab = 'credentials'"
         />
 
@@ -33,8 +34,10 @@
         />
 
         <EnvCheck
-          v-else-if="currentTab === 'env'"
+          v-else-if="currentTab === 'host-status'"
+          :host="selectedStatusHost"
           :connection="connection"
+          @go-hosts="navigateTab('hosts')"
         />
 
         <Dashboard
@@ -87,7 +90,7 @@
 <script setup>
 import { computed, ref } from 'vue';
 import { ElMessage } from 'element-plus';
-import { connection } from './connection';
+import { connection, connectionInventory, hostById } from './connection';
 import Header from './components/Header.vue';
 import Sidebar from './components/Sidebar.vue';
 import Credentials from './views/Credentials.vue';
@@ -107,7 +110,7 @@ const pages = {
   credentials: { title: '凭证管理', group: '连接' },
   hosts: { title: '主机管理', group: '连接' },
   wizard: { title: '部署向导', group: '部署' },
-  env: { title: '系统自检', group: '部署' },
+  'host-status': { title: '主机状态', group: '连接' },
   dashboard: { title: '集群监控', group: '运行' },
   update: { title: '服务更新', group: '运行' },
   logs: { title: '日志诊断', group: '运行' },
@@ -119,6 +122,8 @@ const pages = {
 
 const currentTab = ref('wizard');
 const wizardBusy = ref(false);
+const selectedStatusHostId = ref('');
+const selectedStatusHost = computed(() => hostById(selectedStatusHostId.value));
 function navigateTab(tab) {
   if (wizardBusy.value) { ElMessage.warning('当前操作正在进行，请等待完成后切换页面。'); return; }
   currentTab.value = tab;
@@ -132,8 +137,16 @@ const handleViewLog = (containerName) => {
 };
 
 const handleQuickCheck = () => {
-  navigateTab('env');
+  const targetHost = hostById(selectedStatusHostId.value) ||
+    hostById(connectionInventory.activeHostId);
+  selectedStatusHostId.value = targetHost?.id || '';
+  navigateTab('host-status');
 };
+
+function viewHostStatus(host) {
+  selectedStatusHostId.value = host?.id || '';
+  navigateTab('host-status');
+}
 </script>
 
 <style scoped>
