@@ -1,4 +1,4 @@
-import { invokeDesktop, listenProgress } from '../desktop.js';
+import { invokeRead, invokeDesktop, listenProgress } from '../desktop.js';
 
 export async function installOfflineDockerEngine(bundleDir) {
   return await invokeDesktop("install_offline_docker_engine", { bundleDir });
@@ -13,7 +13,7 @@ export async function loadOfflineImages(bundleDir) {
 }
 
 export async function inspectBundlePlan(bundleDir, target = null) {
-  return await invokeDesktop('inspect_bundle_plan', {
+  return await invokeRead('inspect_bundle_plan', {
     bundleDir,
     host: target?.host || null,
     port: target?.port ?? null,
@@ -23,7 +23,7 @@ export async function inspectBundlePlan(bundleDir, target = null) {
 }
 
 export async function inspectBundleConfig(bundleDir, file, target = null, imageDir = '') {
-  return await invokeDesktop('inspect_bundle_config', {
+  return await invokeRead('inspect_bundle_config', {
     bundleDir,
     file,
     imageDir: imageDir || null,
@@ -35,7 +35,7 @@ export async function inspectBundleConfig(bundleDir, file, target = null, imageD
 }
 
 export async function inspectDeploymentReview(bundleDir, installDir, target = null, imageDir = '') {
-  return await invokeDesktop('inspect_deployment_review', {
+  return await invokeRead('inspect_deployment_review', {
     bundleDir,
     installDir,
     imageDir: imageDir || null,

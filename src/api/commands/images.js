@@ -1,11 +1,11 @@
-import { invokeDesktop, listenProgress } from '../desktop.js';
+import { invokeRead, invokeDesktop, listenProgress } from '../desktop.js';
 
 export async function scanLocalImageBundle(dir) {
   return await invokeDesktop("scan_local_image_bundle", { dir });
 }
 
 export async function inspectRemoteImageBundle(host, port, user, keyPath, bundleDir) {
-  return await invokeDesktop("inspect_remote_image_bundle", { host, port, user, keyPath, bundleDir });
+  return await invokeRead("inspect_remote_image_bundle", { host, port, user, keyPath, bundleDir });
 }
 
 export async function uploadRemoteImageBundle(host, port, user, keyPath, localDir, remoteBundleDir, files, overwrite = false) {
@@ -52,7 +52,7 @@ export async function saveImageLibrarySettings(offlineDir) {
 }
 
 export async function listLocalDockerImages() {
-  return await invokeDesktop("list_local_docker_images");
+  return await invokeRead("list_local_docker_images");
 }
 
 export async function pullLocalDockerImage(reference, username = null, password = null, registrySourceId = null) {

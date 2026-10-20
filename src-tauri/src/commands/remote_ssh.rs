@@ -57,7 +57,17 @@ pub struct SshDeployExecutionResult {
 }
 
 #[tauri::command]
-pub fn test_ssh_connection(
+pub async fn test_ssh_connection(
+    host: String,
+    port: u16,
+    user: String,
+    key_path: Option<String>,
+) -> Result<SshTestResult, String> {
+    crate::commands::blocking::run(move || test_ssh_connection_blocking(host, port, user, key_path))
+        .await
+}
+
+pub(crate) fn test_ssh_connection_blocking(
     host: String,
     port: u16,
     user: String,
@@ -114,7 +124,20 @@ pub fn test_ssh_connection(
 }
 
 #[tauri::command]
-pub fn setup_remote_ssh_key(
+pub async fn setup_remote_ssh_key(
+    host: String,
+    port: u16,
+    user: String,
+    password: Option<String>,
+    key_path: Option<String>,
+) -> Result<SshTestResult, String> {
+    crate::commands::blocking::run(move || {
+        setup_remote_ssh_key_blocking(host, port, user, password, key_path)
+    })
+    .await
+}
+
+pub(crate) fn setup_remote_ssh_key_blocking(
     host: String,
     port: u16,
     user: String,
@@ -146,7 +169,7 @@ pub fn setup_remote_ssh_key(
     }
 
     // 私钥已经可用时直接返回成功，避免重复下发
-    if let Ok(result) = test_ssh_connection(host.clone(), port, user.clone(), Some(target_key.clone())) {
+    if let Ok(result) = test_ssh_connection_blocking(host.clone(), port, user.clone(), Some(target_key.clone())) {
         if result.success {
             return Ok(SshTestResult {
                 success: true,
@@ -169,7 +192,7 @@ pub fn setup_remote_ssh_key(
     if let Some(pwd) = password.filter(|p| !p.is_empty()) {
         match deploy_public_key_with_password(&host, port, &user, &pwd, &remote_sh) {
             Ok(()) => {
-                let verify = test_ssh_connection(host.clone(), port, user.clone(), Some(target_key.clone()))?;
+                let verify = test_ssh_connection_blocking(host.clone(), port, user.clone(), Some(target_key.clone()))?;
                 if verify.success {
                     return Ok(SshTestResult {
                         success: true,
@@ -204,7 +227,17 @@ pub fn setup_remote_ssh_key(
 }
 
 #[tauri::command]
-pub fn check_remote_env(
+pub async fn check_remote_env(
+    host: String,
+    port: u16,
+    user: String,
+    key_path: Option<String>,
+) -> Result<RemoteEnvResult, String> {
+    crate::commands::blocking::run(move || check_remote_env_blocking(host, port, user, key_path))
+        .await
+}
+
+pub(crate) fn check_remote_env_blocking(
     host: String,
     port: u16,
     user: String,
@@ -369,7 +402,30 @@ done
 }
 
 #[tauri::command]
-pub fn run_remote_deploy_action(
+pub async fn run_remote_deploy_action(
+    host: String,
+    port: u16,
+    user: String,
+    key_path: Option<String>,
+    mode: String, // "deploy-all", "server-only", "gateway-app-only", "frontend-only", "status", "start", "stop", "restart"
+    target_service: Option<String>,
+    deploy_dir: Option<String>,
+) -> Result<SshDeployExecutionResult, String> {
+    crate::commands::blocking::run(move || {
+        run_remote_deploy_action_blocking(
+            host,
+            port,
+            user,
+            key_path,
+            mode,
+            target_service,
+            deploy_dir,
+        )
+    })
+    .await
+}
+
+pub(crate) fn run_remote_deploy_action_blocking(
     host: String,
     port: u16,
     user: String,
@@ -894,7 +950,20 @@ fi
 }
 
 #[tauri::command]
-pub fn install_remote_docker_engine(
+pub async fn install_remote_docker_engine(
+    host: String,
+    port: u16,
+    user: String,
+    key_path: Option<String>,
+    bundle_dir: String,
+) -> Result<DockerInstallResult, String> {
+    crate::commands::blocking::run(move || {
+        install_remote_docker_engine_blocking(host, port, user, key_path, bundle_dir)
+    })
+    .await
+}
+
+pub(crate) fn install_remote_docker_engine_blocking(
     host: String,
     port: u16,
     user: String,
@@ -1147,7 +1216,24 @@ pub async fn load_remote_images(
 }
 
 #[tauri::command]
-pub fn remote_docker_compose_action(
+pub async fn remote_docker_compose_action(
+    host: String,
+    port: u16,
+    user: String,
+    key_path: Option<String>,
+    deploy_dir: String,
+    action: String,
+    service: Option<String>,
+) -> Result<ComposeActionResult, String> {
+    crate::commands::blocking::run(move || {
+        remote_docker_compose_action_blocking(
+            host, port, user, key_path, deploy_dir, action, service,
+        )
+    })
+    .await
+}
+
+pub(crate) fn remote_docker_compose_action_blocking(
     host: String,
     port: u16,
     user: String,
@@ -1197,7 +1283,19 @@ pub fn remote_docker_compose_action(
 }
 
 #[tauri::command]
-pub fn check_remote_oceanbase_status(
+pub async fn check_remote_oceanbase_status(
+    host: String,
+    port: u16,
+    user: String,
+    key_path: Option<String>,
+) -> Result<OceanBaseHealth, String> {
+    crate::commands::blocking::run(move || {
+        check_remote_oceanbase_status_blocking(host, port, user, key_path)
+    })
+    .await
+}
+
+pub(crate) fn check_remote_oceanbase_status_blocking(
     host: String,
     port: u16,
     user: String,
@@ -1263,7 +1361,20 @@ fi
 }
 
 #[tauri::command]
-pub fn import_remote_oceanbase_sql(
+pub async fn import_remote_oceanbase_sql(
+    host: String,
+    port: u16,
+    user: String,
+    key_path: Option<String>,
+    sql_file_path: String,
+) -> Result<DbImportResult, String> {
+    crate::commands::blocking::run(move || {
+        import_remote_oceanbase_sql_blocking(host, port, user, key_path, sql_file_path)
+    })
+    .await
+}
+
+pub(crate) fn import_remote_oceanbase_sql_blocking(
     host: String,
     port: u16,
     user: String,

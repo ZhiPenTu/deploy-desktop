@@ -15,6 +15,19 @@ export async function invokeDesktop(command, args) {
   return await invoke(command, args);
 }
 
+const pendingReads = new Map();
+
+// Share only pending reads across page mounts. Results and failures are never cached.
+export async function invokeRead(command, args) {
+  requireDesktop();
+  const key = JSON.stringify([command, args]);
+  if (!pendingReads.has(key)) {
+    const pending = invoke(command, args).finally(() => pendingReads.delete(key));
+    pendingReads.set(key, pending);
+  }
+  return await pendingReads.get(key);
+}
+
 export async function invokeWithProgress(command, args, onProgress) {
   requireDesktop();
   const channel = new Channel();

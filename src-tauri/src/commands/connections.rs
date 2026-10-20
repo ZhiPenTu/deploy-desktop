@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use tauri::{AppHandle, Manager};
 
-use super::remote_ssh::{setup_remote_ssh_key, test_ssh_connection, SshTestResult};
+use super::remote_ssh::{setup_remote_ssh_key_blocking, test_ssh_connection_blocking, SshTestResult};
 
 const CONNECTIONS_FILE: &str = "connections.json";
 const SECRETS_FILE: &str = "connection-secrets.json";
@@ -548,9 +548,16 @@ pub fn set_active_managed_host(app: AppHandle, id: String) -> Result<ConnectionI
 }
 
 #[tauri::command]
-pub fn test_managed_host_connection(app: AppHandle, id: String) -> Result<SshTestResult, String> {
+pub async fn test_managed_host_connection(
+    app: AppHandle,
+    id: String,
+) -> Result<SshTestResult, String> {
+    crate::commands::blocking::run(move || test_managed_host_connection_blocking(app, id)).await
+}
+
+pub(crate) fn test_managed_host_connection_blocking(app: AppHandle, id: String) -> Result<SshTestResult, String> {
     let (host, credential) = host_connection_at(&config_dir(&app)?, &id)?;
-    test_ssh_connection(
+    test_ssh_connection_blocking(
         host.address,
         host.port,
         credential.username,
@@ -563,11 +570,18 @@ pub fn test_managed_host_connection(app: AppHandle, id: String) -> Result<SshTes
 }
 
 #[tauri::command]
-pub fn setup_managed_host_access(app: AppHandle, id: String) -> Result<SshTestResult, String> {
+pub async fn setup_managed_host_access(
+    app: AppHandle,
+    id: String,
+) -> Result<SshTestResult, String> {
+    crate::commands::blocking::run(move || setup_managed_host_access_blocking(app, id)).await
+}
+
+pub(crate) fn setup_managed_host_access_blocking(app: AppHandle, id: String) -> Result<SshTestResult, String> {
     let dir = config_dir(&app)?;
     let (host, credential) = host_connection_at(&dir, &id)?;
     let password = read_secrets(&dir)?.remove(&credential.id);
-    setup_remote_ssh_key(
+    setup_remote_ssh_key_blocking(
         host.address,
         host.port,
         credential.username,

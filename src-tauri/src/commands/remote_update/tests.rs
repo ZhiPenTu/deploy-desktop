@@ -313,7 +313,7 @@ fn compose_config_lists_services_and_images() {
         "{\"files\":[{\"file\":\"redis.tar\",\"images\":[\"redis:7.2.8\"]}]}",
     );
 
-    let view = inspect_bundle_config(
+    let view = super::config::inspect_bundle_config_blocking(
         bundle.to_string_lossy().to_string(),
         "deploy/docker-compose.yml".to_string(),
         None,
@@ -411,7 +411,7 @@ fn bundle_config_rejects_paths_outside_bundle() {
     let bundle = root.join("bundle");
     write(&bundle.join("deploy/docker-compose.yml"), "name: demo");
 
-    let error = inspect_bundle_config(
+    let error = super::config::inspect_bundle_config_blocking(
         bundle.to_string_lossy().to_string(),
         "../secret.txt".to_string(),
         None,

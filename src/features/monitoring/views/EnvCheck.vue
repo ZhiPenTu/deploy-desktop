@@ -14,6 +14,8 @@
       </div>
     </div>
 
+    <el-alert v-if="readError" :title="readError" type="error" :closable="false" show-icon class="read-error" />
+
     <el-alert
       v-if="!host"
       title="暂不可用"
@@ -173,7 +175,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch } from 'vue';
+import { ref, computed, onScopeDispose, watch } from 'vue';
 import {
   CircleCheck,
   CircleClose,
@@ -192,6 +194,7 @@ import {
   installRemoteDockerEngine
 } from '../../../api/tauri.js';
 import { credentialById } from '../../connections/state.js';
+import { createRequestScope } from '../../../shared/async/requestScope.js';
 
 const props = defineProps({
   host: {
@@ -210,6 +213,9 @@ const isRemote = computed(() => props.host?.kind !== 'local');
 const loading = ref(false);
 const installing = ref(false);
 const env = ref(null);
+const readError = ref('');
+const envRequests = createRequestScope();
+onScopeDispose(() => envRequests.dispose());
 const credential = computed(() => credentialById(props.host?.credentialId));
 const deployDir = computed(() => props.host?.deployDir || props.connection.deployDir);
 const targetText = computed(() => (
@@ -224,10 +230,13 @@ const targetSummary = computed(() => (
 ));
 
 const fetchEnv = async () => {
+  const ticket = envRequests.begin();
+  readError.value = '';
+  loading.value = false;
   if (!props.host) return;
   loading.value = true;
   try {
-    env.value = isRemote.value
+    const response = isRemote.value
       ? await checkRemoteEnv(
           props.host.address,
           props.host.port || 22,
@@ -235,10 +244,15 @@ const fetchEnv = async () => {
           credential.value?.privateKeyPath || props.connection.remoteKey || null
         )
       : await checkLocalEnv(deployDir.value);
+    if (envRequests.isCurrent(ticket)) env.value = response;
   } catch (e) {
-    ElMessage.error(`主机状态检查失败: ${e}`);
+    if (!envRequests.isCurrent(ticket)) return;
+    env.value = null;
+    readError.value = isRemote.value
+      ? '无法连接目标主机，请确认已连接对应局域网或 VPN，再检查 SSH 地址和凭证。'
+      : '无法读取本机状态，请检查 Docker 和部署目录后重试。';
   } finally {
-    loading.value = false;
+    if (envRequests.isCurrent(ticket)) loading.value = false;
   }
 };
 
@@ -275,6 +289,8 @@ watch(
 </script>
 
 <style scoped>
+.read-error { margin-bottom: 20px; }
+
 .metrics-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));

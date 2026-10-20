@@ -26,6 +26,8 @@
       </div>
     </div>
 
+    <el-alert v-if="readError" :title="readError" type="error" :closable="false" show-icon class="read-error" />
+
     <div class="endpoint-grid">
       <a
         class="endpoint-card"
@@ -129,7 +131,8 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, onMounted, onScopeDispose } from 'vue';
+import { createRequestScope } from '../../../shared/async/requestScope.js';
 import {
   CircleCheck,
   Connection,
@@ -167,6 +170,9 @@ const deployDir = computed(() => props.connection.deployDir || '/opt/deploy');
 const loading = ref(false);
 const operating = ref(false);
 const containers = ref([]);
+const readError = ref('');
+const statusRequests = createRequestScope();
+onScopeDispose(() => statusRequests.dispose());
 
 const roleMap = Object.fromEntries(
   defaultCluster.services.map((service) => [service.serviceKey, service.description])
@@ -207,10 +213,13 @@ const statusClass = (c) => {
 };
 
 const fetchStatus = async () => {
+  const ticket = statusRequests.begin();
   loading.value = true;
+  readError.value = '';
   try {
+    let response;
     if (isRemote.value) {
-      containers.value = await getRemoteContainersStatus(
+      response = await getRemoteContainersStatus(
         props.connection.remoteHost,
         props.connection.remotePort,
         props.connection.remoteUser,
@@ -218,12 +227,17 @@ const fetchStatus = async () => {
         props.connection.installDir
       );
     } else {
-      containers.value = await getContainersStatus();
+      response = await getContainersStatus();
     }
+    if (statusRequests.isCurrent(ticket)) containers.value = response;
   } catch (e) {
-    ElMessage.error(`读取容器状态失败: ${e}`);
+    if (!statusRequests.isCurrent(ticket)) return;
+    containers.value = [];
+    readError.value = isRemote.value
+      ? '无法读取目标主机状态，请确认已连接对应局域网或 VPN 后重试。'
+      : '无法读取容器状态，请检查本机 Docker 是否正常运行后重试。';
   } finally {
-    loading.value = false;
+    if (statusRequests.isCurrent(ticket)) loading.value = false;
   }
 };
 
@@ -287,6 +301,8 @@ onMounted(fetchStatus);
 </script>
 
 <style scoped>
+.read-error { margin-bottom: 20px; }
+
 .dashboard-view {
   display: block;
 }

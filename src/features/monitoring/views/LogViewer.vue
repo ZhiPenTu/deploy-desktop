@@ -63,11 +63,12 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue';
+import { ref, computed, onMounted, onScopeDispose, nextTick } from 'vue';
 import { ElMessage } from 'element-plus';
 import { CopyDocument, Refresh, Search } from '@element-plus/icons-vue';
 import { getServiceLogs, getRemoteServiceLogs } from '../../../api/tauri.js';
 import { getDefaultContainer, serviceOptions } from '../../../config/cluster.js';
+import { createRequestScope } from '../../../shared/async/requestScope.js';
 
 const props = defineProps({
   connection: {
@@ -92,6 +93,7 @@ const loading = ref(false);
 const autoRefresh = ref(false);
 const termBody = ref(null);
 let timer = null;
+const logRequests = createRequestScope();
 
 const filteredLogs = computed(() => {
   if (!searchKeyword.value.trim()) return rawLogs.value;
@@ -103,9 +105,10 @@ const filteredLogs = computed(() => {
 });
 
 const fetchLogs = async () => {
+  const ticket = logRequests.begin();
   loading.value = true;
   try {
-    rawLogs.value = isRemote.value
+    const response = isRemote.value
       ? await getRemoteServiceLogs(
           props.connection.remoteHost,
           props.connection.remotePort,
@@ -115,24 +118,29 @@ const fetchLogs = async () => {
           tailLines.value
         )
       : await getServiceLogs(selectedContainer.value, tailLines.value);
+    if (!logRequests.isCurrent(ticket)) return;
+    rawLogs.value = response;
     await nextTick();
-    if (termBody.value) {
+    if (logRequests.isCurrent(ticket) && termBody.value) {
       termBody.value.scrollTop = termBody.value.scrollHeight;
     }
   } catch (e) {
-    ElMessage.error(`读取日志失败: ${e}`);
-    rawLogs.value = `读取日志失败: ${e}`;
+    if (!logRequests.isCurrent(ticket)) return;
+    rawLogs.value = isRemote.value
+      ? '无法读取远程日志，请连接对应局域网或 VPN，并检查 SSH 凭证后刷新。'
+      : '无法读取日志，请检查本机 Docker 和目标容器后刷新。';
+    autoRefresh.value = false;
+    handleAutoRefreshChange(false);
   } finally {
-    loading.value = false;
+    if (logRequests.isCurrent(ticket)) loading.value = false;
   }
 };
 
 const handleAutoRefreshChange = (val) => {
+  if (timer) clearInterval(timer);
+  timer = null;
   if (val) {
-    timer = setInterval(fetchLogs, 3000);
-  } else if (timer) {
-    clearInterval(timer);
-    timer = null;
+    timer = setInterval(() => { if (!loading.value) fetchLogs(); }, 3000);
   }
 };
 
@@ -149,7 +157,8 @@ onMounted(() => {
   fetchLogs();
 });
 
-onUnmounted(() => {
+onScopeDispose(() => {
+  logRequests.dispose();
   if (timer) clearInterval(timer);
 });
 </script>

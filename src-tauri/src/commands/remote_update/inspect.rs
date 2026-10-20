@@ -7,7 +7,20 @@ use crate::commands::remote_ssh::{
 use std::collections::HashMap;
 
 #[tauri::command]
-pub fn inspect_remote_deployment(
+pub async fn inspect_remote_deployment(
+    host: String,
+    port: u16,
+    user: String,
+    key_path: Option<String>,
+    install_dir: String,
+) -> Result<RemoteDeploymentStatus, String> {
+    crate::commands::blocking::run(move || {
+        inspect_remote_deployment_blocking(host, port, user, key_path, install_dir)
+    })
+    .await
+}
+
+pub(crate) fn inspect_remote_deployment_blocking(
     host: String,
     port: u16,
     user: String,
@@ -20,7 +33,20 @@ pub fn inspect_remote_deployment(
 }
 
 #[tauri::command]
-pub fn get_remote_containers_status(
+pub async fn get_remote_containers_status(
+    host: String,
+    port: u16,
+    user: String,
+    key_path: Option<String>,
+    install_dir: String,
+) -> Result<Vec<ContainerStatusItem>, String> {
+    crate::commands::blocking::run(move || {
+        get_remote_containers_status_blocking(host, port, user, key_path, install_dir)
+    })
+    .await
+}
+
+pub(crate) fn get_remote_containers_status_blocking(
     host: String,
     port: u16,
     user: String,
@@ -34,7 +60,21 @@ pub fn get_remote_containers_status(
 }
 
 #[tauri::command]
-pub fn get_remote_service_logs(
+pub async fn get_remote_service_logs(
+    host: String,
+    port: u16,
+    user: String,
+    key_path: Option<String>,
+    container_name: String,
+    tail: u32,
+) -> Result<String, String> {
+    crate::commands::blocking::run(move || {
+        get_remote_service_logs_blocking(host, port, user, key_path, container_name, tail)
+    })
+    .await
+}
+
+pub(crate) fn get_remote_service_logs_blocking(
     host: String,
     port: u16,
     user: String,

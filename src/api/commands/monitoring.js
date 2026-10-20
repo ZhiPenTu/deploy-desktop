@@ -1,15 +1,15 @@
-import { invokeDesktop } from '../desktop.js';
+import { invokeRead, invokeDesktop } from '../desktop.js';
 
 export async function checkLocalEnv(targetDir = null) {
-  return await invokeDesktop("check_local_env", { targetDir });
+  return await invokeRead("check_local_env", { targetDir });
 }
 
 export async function checkRemoteEnv(host, port, user, keyPath = null) {
-  return await invokeDesktop("check_remote_env", { host, port, user, keyPath });
+  return await invokeRead("check_remote_env", { host, port, user, keyPath });
 }
 
 export async function getContainersStatus() {
-  return await invokeDesktop("get_containers_status");
+  return await invokeRead("get_containers_status");
 }
 
 export async function dockerComposeAction(deployDir, action, service = null) {
@@ -17,7 +17,7 @@ export async function dockerComposeAction(deployDir, action, service = null) {
 }
 
 export async function getServiceLogs(containerName, tail = 200) {
-  return await invokeDesktop("get_service_logs", { containerName, tail });
+  return await invokeRead("get_service_logs", { containerName, tail });
 }
 
 export async function remoteDockerComposeAction(host, port, user, keyPath, deployDir, action = "up", service = null) {
@@ -25,13 +25,13 @@ export async function remoteDockerComposeAction(host, port, user, keyPath, deplo
 }
 
 export async function inspectRemoteDeployment(host, port, user, keyPath, installDir) {
-  return await invokeDesktop("inspect_remote_deployment", { host, port, user, keyPath, installDir });
+  return await invokeRead("inspect_remote_deployment", { host, port, user, keyPath, installDir });
 }
 
 export async function getRemoteContainersStatus(host, port, user, keyPath, installDir) {
-  return await invokeDesktop("get_remote_containers_status", { host, port, user, keyPath, installDir });
+  return await invokeRead("get_remote_containers_status", { host, port, user, keyPath, installDir });
 }
 
 export async function getRemoteServiceLogs(host, port, user, keyPath, containerName, tail = 200) {
-  return await invokeDesktop("get_remote_service_logs", { host, port, user, keyPath, containerName, tail });
+  return await invokeRead("get_remote_service_logs", { host, port, user, keyPath, containerName, tail });
 }

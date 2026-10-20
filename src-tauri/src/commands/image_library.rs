@@ -122,7 +122,11 @@ pub fn save_image_library_settings(
 }
 
 #[tauri::command]
-pub fn list_local_docker_images() -> Result<Vec<LocalDockerImage>, String> {
+pub async fn list_local_docker_images() -> Result<Vec<LocalDockerImage>, String> {
+    crate::commands::blocking::run(move || list_local_docker_images_blocking()).await
+}
+
+pub(crate) fn list_local_docker_images_blocking() -> Result<Vec<LocalDockerImage>, String> {
     let output = Command::new("docker")
         .args(["image", "ls", "--no-trunc", "--format", "{{json .}}"])
         .output()

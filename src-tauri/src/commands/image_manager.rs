@@ -77,7 +77,20 @@ pub fn scan_local_image_bundle(dir: String) -> Result<ImageBundleScan, String> {
 }
 
 #[tauri::command]
-pub fn inspect_remote_image_bundle(
+pub async fn inspect_remote_image_bundle(
+    host: String,
+    port: u16,
+    user: String,
+    key_path: Option<String>,
+    bundle_dir: String,
+) -> Result<RemoteImageBundleStatus, String> {
+    crate::commands::blocking::run(move || {
+        inspect_remote_image_bundle_blocking(host, port, user, key_path, bundle_dir)
+    })
+    .await
+}
+
+pub(crate) fn inspect_remote_image_bundle_blocking(
     host: String,
     port: u16,
     user: String,

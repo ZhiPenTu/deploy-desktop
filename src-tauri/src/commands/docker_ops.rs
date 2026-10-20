@@ -212,7 +212,11 @@ pub async fn load_offline_images(
 }
 
 #[tauri::command]
-pub fn get_containers_status() -> Result<Vec<ContainerStatusItem>, String> {
+pub async fn get_containers_status() -> Result<Vec<ContainerStatusItem>, String> {
+    crate::commands::blocking::run(move || get_containers_status_blocking()).await
+}
+
+pub(crate) fn get_containers_status_blocking() -> Result<Vec<ContainerStatusItem>, String> {
     let target_containers = super::profile::deployment_profile().container_entries();
 
     let mut results = Vec::new();
@@ -395,7 +399,11 @@ pub fn docker_compose_action(
 }
 
 #[tauri::command]
-pub fn get_service_logs(container_name: String, tail: u32) -> Result<String, String> {
+pub async fn get_service_logs(container_name: String, tail: u32) -> Result<String, String> {
+    crate::commands::blocking::run(move || get_service_logs_blocking(container_name, tail)).await
+}
+
+pub(crate) fn get_service_logs_blocking(container_name: String, tail: u32) -> Result<String, String> {
     let output = Command::new(find_binary("docker"))
         .args(["logs", "--tail", &tail.to_string(), &container_name])
         .output();

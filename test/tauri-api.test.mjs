@@ -96,3 +96,44 @@ test('progress listeners remain optional in preview and can unsubscribe on deskt
   assert.equal(window.__TAURI_INTERNALS__.callbacks.size, 0);
   assert.deepEqual(events, [{ step: 'backup' }]);
 });
+
+test('pending reads are shared across remounts while different targets remain independent', async () => {
+  globalThis.isTauri = true;
+  const pending = [];
+  mockIPC((command, args) => new Promise((resolve) => pending.push({ command, args, resolve })));
+  const first = api.getRemoteContainersStatus('host.example.com', 22, 'deploy', null, '/srv/app');
+  const remounted = api.getRemoteContainersStatus('host.example.com', 22, 'deploy', null, '/srv/app');
+  const other = api.getRemoteContainersStatus('other.example.com', 22, 'deploy', null, '/srv/app');
+  assert.equal(pending.length, 2);
+  pending[0].resolve([{ name: 'service' }]);
+  pending[1].resolve([]);
+  assert.deepEqual(await first, await remounted);
+  assert.deepEqual(await other, []);
+});
+
+test('failed reads are not cached and explicit retry executes again', async () => {
+  globalThis.isTauri = true;
+  let reject;
+  let calls = 0;
+  mockIPC(() => { calls += 1; return new Promise((_, fail) => { reject = fail; }); });
+  const first = api.checkRemoteEnv('host.example.com', 22, 'deploy');
+  const second = api.checkRemoteEnv('host.example.com', 22, 'deploy');
+  const checked = Promise.allSettled([first, second]);
+  reject(new Error('连接超时'));
+  assert.ok((await checked).every((item) => item.status === 'rejected'));
+  assert.equal(calls, 1);
+  mockIPC(() => { calls += 1; return { docker_running: true }; });
+  assert.equal((await api.checkRemoteEnv('host.example.com', 22, 'deploy')).docker_running, true);
+  assert.equal(calls, 2);
+});
+
+test('mutating operations are never coalesced', async () => {
+  globalThis.isTauri = true;
+  let calls = 0;
+  mockIPC(() => { calls += 1; return { success: true }; });
+  await Promise.all([
+    api.remoteDockerComposeAction('host.example.com', 22, 'deploy', null, '/srv/app', 'restart'),
+    api.remoteDockerComposeAction('host.example.com', 22, 'deploy', null, '/srv/app', 'restart')
+  ]);
+  assert.equal(calls, 2);
+});

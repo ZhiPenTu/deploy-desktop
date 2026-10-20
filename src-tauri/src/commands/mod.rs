@@ -1,3 +1,4 @@
+pub(crate) mod blocking;
 pub mod artifact;
 pub mod connections;
 pub mod db_ops;

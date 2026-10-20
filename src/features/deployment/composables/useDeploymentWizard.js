@@ -126,7 +126,11 @@ export function useDeploymentWizard(config, emit) {
     envRevision = 0,
     disposed = false;
 
-  watch(busy, (value) => emit('busy-change', value), { flush: 'sync' });
+  // Read-only SSH checks may continue after leaving; destructive work keeps its guard.
+  const navigationBlocked = computed(() => selectingHost.value || settingKey.value ||
+    installingDocker.value || artifactBusy.value || importingImages.value ||
+    executing.value || preflighting.value);
+  watch(navigationBlocked, (value) => emit('busy-change', value), { flush: 'sync' });
 
   onBeforeUnmount(() => {
     disposed = true;
@@ -285,9 +289,9 @@ export function useDeploymentWizard(config, emit) {
         : await checkLocalEnv(config.installDir);
       if (current === envRevision && !disposed) envData.value = response;
     } catch (error) {
-      if (current === envRevision) envError.value = failureText(error, '环境检测');
+      if (current === envRevision && !disposed) envError.value = failureText(error, '环境检测');
     } finally {
-      checkingEnv.value = false;
+      if (current === envRevision && !disposed) checkingEnv.value = false;
     }
   }
 
@@ -362,9 +366,9 @@ export function useDeploymentWizard(config, emit) {
       review.value = checked;
       bundlePlan.value = plan;
     } catch (error) {
-      if (current === revision) reviewError.value = failureText(error, '清单比对');
+      if (current === revision && !disposed) reviewError.value = failureText(error, '清单比对');
     } finally {
-      checkingReview.value = false;
+      if (current === revision && !disposed) checkingReview.value = false;
     }
   }
 

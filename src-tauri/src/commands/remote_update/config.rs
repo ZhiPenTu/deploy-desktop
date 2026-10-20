@@ -56,7 +56,22 @@ pub struct BundleConfigView {
 /// 配置文件是唯一事实来源：界面展示的镜像清单直接来自 compose，service 归属也一并返回，
 /// 不再依赖手工维护的 images 列表，避免清单与实际编排漂移。
 #[tauri::command]
-pub fn inspect_bundle_config(
+pub async fn inspect_bundle_config(
+    bundle_dir: String,
+    file: String,
+    image_dir: Option<String>,
+    host: Option<String>,
+    port: Option<u16>,
+    user: Option<String>,
+    key_path: Option<String>,
+) -> Result<BundleConfigView, String> {
+    crate::commands::blocking::run(move || {
+        inspect_bundle_config_blocking(bundle_dir, file, image_dir, host, port, user, key_path)
+    })
+    .await
+}
+
+pub(crate) fn inspect_bundle_config_blocking(
     bundle_dir: String,
     file: String,
     image_dir: Option<String>,

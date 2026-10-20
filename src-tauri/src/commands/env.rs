@@ -33,7 +33,11 @@ pub struct LocalEnvInfo {
 }
 
 #[tauri::command]
-pub fn check_local_env(target_dir: Option<String>) -> Result<LocalEnvInfo, String> {
+pub async fn check_local_env(target_dir: Option<String>) -> Result<LocalEnvInfo, String> {
+    crate::commands::blocking::run(move || check_local_env_blocking(target_dir)).await
+}
+
+pub(crate) fn check_local_env_blocking(target_dir: Option<String>) -> Result<LocalEnvInfo, String> {
     let os = std::env::consts::OS.to_string();
     let arch = std::env::consts::ARCH.to_string();
     let cpu_cores = std::thread::available_parallelism()
