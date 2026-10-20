@@ -115,7 +115,7 @@
     <div class="card-surface settings-card">
       <div class="card-title-bar">
         <h3>当前部署配置</h3>
-        <span class="hint">来自部署向导与制品中心的选择</span>
+        <span class="hint">来自主机管理、部署向导与制品中心的选择</span>
       </div>
       <div class="info-grid">
         <span class="info-label">部署方式</span>
@@ -126,7 +126,7 @@
         <span class="info-value path-value">{{ connection.bundleDir || '未设置' }}</span>
       </div>
       <p class="field-hint">
-        部署方式与目标主机在部署向导中调整，当前部署包在制品中心选择。
+        目标主机在主机管理中切换，部署方式在部署向导中选择，当前部署包在制品中心选择。
       </p>
     </div>
 

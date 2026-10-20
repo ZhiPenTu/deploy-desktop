@@ -620,7 +620,7 @@ pub(crate) fn explain_ssh_failure(stderr: &str, key: Option<&str>) -> String {
         "目标主机可达，但 SSH 端口未监听或端口号填写错误。"
     } else if lower.contains("permission denied") {
         if key.is_some() {
-            "认证被拒绝：目标机未授权当前密钥。请点击“一键配置并下发免密 SSH 密钥”，或手动把公钥追加到目标机 ~/.ssh/authorized_keys。"
+            "认证被拒绝：目标机未授权当前密钥。请先配置免密登录，或手动把公钥追加到目标机 ~/.ssh/authorized_keys。"
         } else {
             "认证被拒绝：未找到可用私钥。请先配置免密 SSH 密钥。"
         }

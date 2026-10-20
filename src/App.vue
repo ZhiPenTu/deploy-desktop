@@ -12,12 +12,23 @@
       />
 
       <main class="content-panel">
+        <Credentials
+          v-if="currentTab === 'credentials'"
+          @go-hosts="currentTab = 'hosts'"
+        />
+
+        <Hosts
+          v-else-if="currentTab === 'hosts'"
+          @go-credentials="currentTab = 'credentials'"
+        />
+
         <InstallWizard
-          v-if="currentTab === 'wizard'"
+          v-else-if="currentTab === 'wizard'"
           :connection="connection"
           @go-dashboard="currentTab = 'dashboard'"
           @go-images="currentTab = 'images'"
           @go-artifacts="currentTab = 'artifacts'"
+          @go-hosts="currentTab = 'hosts'"
         />
 
         <EnvCheck
@@ -77,6 +88,8 @@ import { computed, ref } from 'vue';
 import { connection } from './connection';
 import Header from './components/Header.vue';
 import Sidebar from './components/Sidebar.vue';
+import Credentials from './views/Credentials.vue';
+import Hosts from './views/Hosts.vue';
 import InstallWizard from './views/InstallWizard.vue';
 import EnvCheck from './views/EnvCheck.vue';
 import Dashboard from './views/Dashboard.vue';
@@ -89,6 +102,8 @@ import LogViewer from './views/LogViewer.vue';
 import { getDefaultContainer } from './config/cluster.js';
 
 const pages = {
+  credentials: { title: '凭证管理', group: '连接' },
+  hosts: { title: '主机管理', group: '连接' },
   wizard: { title: '部署向导', group: '部署' },
   env: { title: '系统自检', group: '部署' },
   dashboard: { title: '集群监控', group: '运行' },

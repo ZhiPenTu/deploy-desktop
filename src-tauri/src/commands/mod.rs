@@ -1,4 +1,5 @@
 pub mod artifact;
+pub mod connections;
 pub mod db_ops;
 pub mod docker_engine;
 pub mod docker_ops;

@@ -4,6 +4,7 @@ use tauri::Manager;
 
 use commands::{
     artifact::*,
+    connections::*,
     db_ops::*,
     docker_engine::*,
     docker_ops::*,
@@ -86,6 +87,14 @@ pub fn run() {
             list_artifact_sources,
             save_artifact_source,
             delete_artifact_source,
+            list_connection_inventory,
+            save_ssh_credential,
+            delete_ssh_credential,
+            save_managed_host,
+            delete_managed_host,
+            set_active_managed_host,
+            test_managed_host_connection,
+            setup_managed_host_access,
             fetch_artifact_release,
             download_artifact,
             open_artifact_bundle,

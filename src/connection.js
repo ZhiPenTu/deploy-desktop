@@ -1,5 +1,6 @@
 import { reactive } from 'vue';
 import { profileState } from './config/profile.js';
+import { listConnectionInventory, setActiveManagedHost } from './api/tauri.js';
 
 export const connection = reactive({
   mode: 'remote',
@@ -11,7 +12,17 @@ export const connection = reactive({
   remotePort: 22,
   remoteUser: 'root',
   remotePassword: '',
-  remoteKey: ''
+  remoteKey: '',
+  remoteCredentialId: '',
+  activeHostId: ''
+});
+
+export const connectionInventory = reactive({
+  credentials: [],
+  hosts: [],
+  activeHostId: '',
+  loading: false,
+  error: ''
 });
 
 export function syncConnectionFromProfile() {
@@ -27,4 +38,89 @@ export function syncConnectionFromProfile() {
   if (profileState.installDir) {
     connection.installDir = profileState.installDir;
   }
+}
+
+export function credentialById(id) {
+  return connectionInventory.credentials.find((credential) => credential.id === id) || null;
+}
+
+export function hostById(id) {
+  return connectionInventory.hosts.find((host) => host.id === id) || null;
+}
+
+export function credentialLabel(id) {
+  const credential = credentialById(id);
+  if (!credential) return '凭证不可用';
+  return `${credential.name} · ${credential.username}`;
+}
+
+export function applyManagedHostToConnection(host) {
+  if (!host) return;
+  const credential = credentialById(host.credentialId);
+  connection.mode = 'remote';
+  connection.activeHostId = host.id;
+  connection.remoteHost = host.address;
+  connection.remotePort = host.port || 22;
+  connection.remoteUser = credential?.username || connection.remoteUser || 'root';
+  connection.remoteKey = credential?.privateKeyPath || '';
+  connection.remoteCredentialId = host.credentialId;
+  connection.remotePassword = '';
+  if (host.deployDir) {
+    connection.deployDir = host.deployDir;
+    connection.installDir = host.deployDir;
+  } else {
+    if (profileState.deployDir) connection.deployDir = profileState.deployDir;
+    if (profileState.installDir) connection.installDir = profileState.installDir;
+  }
+}
+
+export function applyConnectionInventory(inventory) {
+  const previousActiveId = connection.activeHostId;
+  connectionInventory.credentials = Array.isArray(inventory?.credentials)
+    ? inventory.credentials
+    : [];
+  connectionInventory.hosts = Array.isArray(inventory?.hosts) ? inventory.hosts : [];
+  connectionInventory.activeHostId = inventory?.activeHostId || '';
+  connectionInventory.error = '';
+
+  const activeHost = hostById(connectionInventory.activeHostId);
+  if (activeHost) {
+    applyManagedHostToConnection(activeHost);
+  } else if (previousActiveId) {
+    connection.activeHostId = '';
+    connection.remoteHost = '';
+    connection.remotePort = 22;
+    connection.remoteUser = 'root';
+    connection.remotePassword = '';
+    connection.remoteKey = '';
+    connection.remoteCredentialId = '';
+  }
+}
+
+export async function refreshConnectionInventory() {
+  connectionInventory.loading = true;
+  try {
+    const inventory = await listConnectionInventory();
+    applyConnectionInventory(inventory);
+    return inventory;
+  } catch (error) {
+    connectionInventory.error = String(error);
+    throw error;
+  } finally {
+    connectionInventory.loading = false;
+  }
+}
+
+export async function initConnectionInventory() {
+  try {
+    await refreshConnectionInventory();
+  } catch (error) {
+    console.warn('读取凭证与主机配置失败，继续使用当前连接设置', error);
+  }
+}
+
+export async function useManagedHost(id) {
+  const inventory = await setActiveManagedHost(id);
+  applyConnectionInventory(inventory);
+  return inventory;
 }

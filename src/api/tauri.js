@@ -859,3 +859,46 @@ export function onRegistryProgress(callback) {
   return listen("registry-progress", (event) => callback(event.payload));
 }
 
+const NO_TAURI_CONNECTIONS = '当前预览环境不支持保存凭证与主机，请在桌面应用中操作。';
+
+export async function listConnectionInventory() {
+  if (!isTauri()) {
+    return { credentials: [], hosts: [], activeHostId: '' };
+  }
+  return await invoke('list_connection_inventory');
+}
+
+export async function saveSshCredential(credential) {
+  if (!isTauri()) throw new Error(NO_TAURI_CONNECTIONS);
+  return await invoke('save_ssh_credential', { credential });
+}
+
+export async function deleteSshCredential(id) {
+  if (!isTauri()) throw new Error(NO_TAURI_CONNECTIONS);
+  return await invoke('delete_ssh_credential', { id });
+}
+
+export async function saveManagedHost(host) {
+  if (!isTauri()) throw new Error(NO_TAURI_CONNECTIONS);
+  return await invoke('save_managed_host', { host });
+}
+
+export async function deleteManagedHost(id) {
+  if (!isTauri()) throw new Error(NO_TAURI_CONNECTIONS);
+  return await invoke('delete_managed_host', { id });
+}
+
+export async function setActiveManagedHost(id) {
+  if (!isTauri()) throw new Error(NO_TAURI_CONNECTIONS);
+  return await invoke('set_active_managed_host', { id });
+}
+
+export async function testManagedHostConnection(id) {
+  if (!isTauri()) throw new Error(NO_TAURI_CONNECTIONS);
+  return await invoke('test_managed_host_connection', { id });
+}
+
+export async function setupManagedHostAccess(id) {
+  if (!isTauri()) throw new Error(NO_TAURI_CONNECTIONS);
+  return await invoke('setup_managed_host_access', { id });
+}

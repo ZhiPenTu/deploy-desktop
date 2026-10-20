@@ -5,12 +5,13 @@ import * as ElementPlusIconsVue from '@element-plus/icons-vue';
 
 import App from './App.vue';
 import { initProfile } from './config/profile.js';
-import { syncConnectionFromProfile } from './connection.js';
+import { initConnectionInventory, syncConnectionFromProfile } from './connection.js';
 import './style.css';
 
 async function bootstrap() {
   await initProfile();
   syncConnectionFromProfile();
+  await initConnectionInventory();
 
   const app = createApp(App);
 

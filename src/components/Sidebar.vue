@@ -41,7 +41,19 @@
 </template>
 
 <script setup>
-import { Promotion, Odometer, DataBoard, Document, UploadFilled, Files, Connection, Box, Setting } from '@element-plus/icons-vue';
+import {
+  Promotion,
+  Odometer,
+  DataBoard,
+  Document,
+  UploadFilled,
+  Files,
+  Connection,
+  Box,
+  Setting,
+  Key,
+  Monitor
+} from '@element-plus/icons-vue';
 
 const appVersion = __APP_VERSION__;
 
@@ -55,6 +67,13 @@ defineProps({
 defineEmits(['update:tab']);
 
 const navGroups = [
+  {
+    label: '连接',
+    items: [
+      { key: 'credentials', icon: Key, title: '凭证管理' },
+      { key: 'hosts', icon: Monitor, title: '主机管理' }
+    ]
+  },
   {
     label: '部署',
     items: [

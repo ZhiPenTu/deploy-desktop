@@ -80,6 +80,28 @@
         </div>
 
         <div v-else class="form-section">
+          <div class="saved-host-toolbar">
+            <div class="saved-host-copy">
+              <span class="saved-host-title">已保存主机</span>
+              <el-select
+                v-if="connectionInventory.hosts.length"
+                :model-value="config.activeHostId"
+                :loading="selectingHost"
+                placeholder="选择主机并带入登录信息"
+                class="saved-host-select"
+                @change="handleManagedHostChange"
+              >
+                <el-option
+                  v-for="host in connectionInventory.hosts"
+                  :key="host.id"
+                  :label="`${host.name} · ${host.address}`"
+                  :value="host.id"
+                />
+              </el-select>
+              <span v-else class="saved-host-empty">尚未保存主机，可直接填写下方连接信息</span>
+            </div>
+            <el-button @click="$emit('go-hosts')">管理主机</el-button>
+          </div>
           <el-form label-width="120px">
             <el-row :gutter="20">
               <el-col :span="16">
@@ -108,6 +130,9 @@
             <el-form-item label="本地私钥路径">
               <el-input v-model="config.remoteKey" placeholder="留空自动使用 ~/.ssh/id_ed25519_<host>" />
             </el-form-item>
+            <p v-if="config.activeHostId" class="field-hint host-hint">
+              当前参数来自已保存主机。临时修改只用于本次操作，不会更新主机管理中的配置。
+            </p>
             <el-form-item>
               <div class="ssh-actions">
                 <el-button type="primary" :loading="testingSsh" @click="handleTestSsh">
@@ -501,6 +526,7 @@ import {
 } from '../api/tauri.js';
 import BundlePlanPanel from '../components/BundlePlanPanel.vue';
 import { profileState as profile } from '../config/profile.js';
+import { connectionInventory, useManagedHost } from '../connection.js';
 
 const props = defineProps({
   connection: {
@@ -509,7 +535,7 @@ const props = defineProps({
   }
 });
 
-const emit = defineEmits(['go-dashboard', 'go-images', 'go-artifacts']);
+const emit = defineEmits(['go-dashboard', 'go-images', 'go-artifacts', 'go-hosts']);
 
 const activeStep = ref(0);
 
@@ -578,6 +604,7 @@ const bundleLog = ref('');
 // SSH 测试
 const testingSsh = ref(false);
 const settingKey = ref(false);
+const selectingHost = ref(false);
 const sshMsg = ref('');
 const sshOk = ref(false);
 
@@ -614,6 +641,20 @@ const nextStep = async () => {
 
 const prevStep = () => {
   if (activeStep.value > 0) activeStep.value--;
+};
+
+const handleManagedHostChange = async (hostId) => {
+  if (!hostId) return;
+  selectingHost.value = true;
+  sshMsg.value = '';
+  try {
+    await useManagedHost(hostId);
+  } catch (e) {
+    sshMsg.value = `切换主机失败：${e}`;
+    sshOk.value = false;
+  } finally {
+    selectingHost.value = false;
+  }
 };
 
 const handleTestSsh = async () => {
@@ -1012,6 +1053,46 @@ onMounted(() => {
   border-radius: 10px;
   border: 1px solid var(--border-color);
   margin-bottom: 24px;
+}
+
+.saved-host-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 18px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--panel-bg);
+}
+
+.saved-host-copy {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.saved-host-title {
+  flex: none;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.saved-host-select {
+  width: 320px;
+  max-width: 100%;
+}
+
+.saved-host-empty {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.form-section .host-hint {
+  margin: -4px 0 16px 120px;
 }
 
 .ssh-actions {
