@@ -12,6 +12,7 @@ const FLOW_API: &str = "https://openapi-rdc.aliyuncs.com/oapi/v1/flow/organizati
 const FLOW_WEB: &str = "https://flow.aliyun.com/pipelines";
 const SECRET_SERVICE: &str = "deploy-desktop-artifact";
 const MAX_ARTIFACT_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+const FLOW_RUN_PAGE_SIZE: u32 = 20;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -61,6 +62,16 @@ pub struct ArtifactRelease {
     pub size_bytes: u64,
     pub md5: String,
     pub download_url: String,
+    pub local_dir: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactReleasePage {
+    pub items: Vec<ArtifactRelease>,
+    pub page: u32,
+    pub per_page: u32,
+    pub has_more: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -495,13 +506,208 @@ fn json_str<'a>(value: &'a Value, key: &str) -> &'a str {
     value.get(key).and_then(Value::as_str).unwrap_or_default()
 }
 
+fn safe_version_key(version: &str) -> String {
+    version
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn url_release(source: &ArtifactSource) -> ArtifactRelease {
+    ArtifactRelease {
+        run_id: 0,
+        run_url: String::new(),
+        run_status: "manual".to_string(),
+        version: if source.last_version.trim().is_empty() {
+            "manual".to_string()
+        } else {
+            source.last_version.clone()
+        },
+        artifact_name: source.artifact_name.clone(),
+        download_url: source.download_url.clone(),
+        ..Default::default()
+    }
+}
+
+fn release_from_flow_detail(
+    source: &ArtifactSource,
+    run_id: i64,
+    detail: &Value,
+) -> Result<Option<ArtifactRelease>, String> {
+    let Some(artifact) = pick_artifact(detail, &source.artifact_name) else {
+        return Ok(None);
+    };
+    let download_url = json_str(&artifact, "downloadUrl").to_string();
+    if download_url.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(ArtifactRelease {
+        run_id,
+        run_url: format!("{FLOW_WEB}/{}/runs/{}", source.pipeline_id, run_id),
+        run_status: json_str(detail, "status").to_string(),
+        version: json_str(&artifact, "version").to_string(),
+        commit: find_key_string(detail, "CI_COMMIT_SHA").unwrap_or_default(),
+        commit_short: find_key_string(detail, "CI_COMMIT_ID").unwrap_or_default(),
+        commit_title: find_key_string(detail, "CI_COMMIT_TITLE").unwrap_or_default(),
+        branch: find_key_string(detail, "CI_COMMIT_REF_NAME").unwrap_or_default(),
+        built_at: find_key_i64(detail, "startTime"),
+        artifact_name: json_str(&artifact, "artifact").to_string(),
+        repo_id: json_str(&artifact, "repoId").to_string(),
+        size_bytes: json_u64(&artifact, "fileSize")
+            .max(json_u64(&artifact, "size"))
+            .max(find_key_i64(detail, "fileSize").max(0) as u64),
+        md5: json_str(&artifact, "md5").to_string(),
+        download_url,
+        local_dir: String::new(),
+    }))
+}
+
+fn cached_bundle_dir(
+    config_root: &Path,
+    source: &ArtifactSource,
+    release: &ArtifactRelease,
+) -> Option<PathBuf> {
+    let version = if source.kind == "url" {
+        "manual".to_string()
+    } else if release.version.trim().is_empty() {
+        "manual".to_string()
+    } else {
+        safe_version_key(&release.version)
+    };
+    let expected = config_root.join("bundles").join(&source.id).join(version);
+    if expected.is_dir() {
+        return Some(expected);
+    }
+
+    let last_dir = source.last_bundle_dir.trim();
+    if last_dir.is_empty()
+        || (source.kind != "url" && source.last_version.trim() != release.version.trim())
+    {
+        return None;
+    }
+    let last_dir = PathBuf::from(last_dir);
+    last_dir.is_dir().then_some(last_dir)
+}
+
+fn attach_local_bundle(
+    config_root: &Path,
+    source: &ArtifactSource,
+    release: &mut ArtifactRelease,
+) {
+    if let Some(dir) = cached_bundle_dir(config_root, source, release) {
+        release.local_dir = dir.to_string_lossy().to_string();
+    }
+}
+
+fn flow_run_items(
+    token: &str,
+    source: &ArtifactSource,
+    page: u32,
+) -> Result<Vec<Value>, String> {
+    let url = format!(
+        "{FLOW_API}/{}/pipelines/{}/runs?page={}&perPage={}",
+        source.org_id, source.pipeline_id, page.max(1), FLOW_RUN_PAGE_SIZE
+    );
+    let runs = http_get_json(token, &url)?;
+    runs.as_array()
+        .cloned()
+        .ok_or_else(|| "云效运行列表格式异常".to_string())
+}
+
+fn load_flow_release_page(
+    config_root: &Path,
+    source: &ArtifactSource,
+    token: &str,
+    page: u32,
+) -> Result<ArtifactReleasePage, String> {
+    let runs = flow_run_items(token, source, page)?;
+    let mut releases = Vec::new();
+    for run in runs
+        .iter()
+        .filter(|item| json_str(item, "status") == "SUCCESS")
+    {
+        let run_id = json_i64(run, "pipelineRunId");
+        if run_id <= 0 {
+            continue;
+        }
+        let detail_url = format!(
+            "{FLOW_API}/{}/pipelines/{}/runs/{}",
+            source.org_id, source.pipeline_id, run_id
+        );
+        let detail = http_get_json(token, &detail_url)?;
+        if let Some(mut release) = release_from_flow_detail(source, run_id, &detail)? {
+            attach_local_bundle(config_root, source, &mut release);
+            releases.push(release);
+        }
+    }
+
+    releases.sort_by(|left, right| {
+        right
+            .built_at
+            .cmp(&left.built_at)
+            .then_with(|| right.run_id.cmp(&left.run_id))
+    });
+
+    Ok(ArtifactReleasePage {
+        items: releases,
+        page: page.max(1),
+        per_page: FLOW_RUN_PAGE_SIZE,
+        has_more: runs.len() >= FLOW_RUN_PAGE_SIZE as usize,
+    })
+}
+
+fn load_artifact_release_page(
+    config_root: &Path,
+    source: &ArtifactSource,
+    page: u32,
+) -> Result<ArtifactReleasePage, String> {
+    if source.kind == "url" {
+        let mut release = url_release(source);
+        attach_local_bundle(config_root, source, &mut release);
+        return Ok(ArtifactReleasePage {
+            items: vec![release],
+            page: 1,
+            per_page: 1,
+            has_more: false,
+        });
+    }
+
+    let token = secret_get(config_root, &source.id)?
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "尚未配置云效个人访问令牌，请编辑制品源填写令牌".to_string())?;
+    load_flow_release_page(config_root, source, &token, page.max(1))
+}
+
+#[tauri::command]
+pub fn list_artifact_releases(
+    app: AppHandle,
+    id: String,
+    page: Option<u32>,
+) -> Result<ArtifactReleasePage, String> {
+    let config_root = config_dir(&app)?;
+    let sources = load_sources(&app)?;
+    let source = sources
+        .iter()
+        .find(|item| item.id == id)
+        .ok_or_else(|| "制品源不存在".to_string())?;
+    load_artifact_release_page(&config_root, source, page.unwrap_or(1))
+}
+
 #[tauri::command]
 pub fn fetch_artifact_release(
     app: AppHandle,
     id: String,
     run_id: Option<i64>,
 ) -> Result<ArtifactRelease, String> {
-    let dir = config_dir(&app)?;
+    let config_root = config_dir(&app)?;
     let sources = load_sources(&app)?;
     let source = sources
         .iter()
@@ -509,70 +715,32 @@ pub fn fetch_artifact_release(
         .ok_or_else(|| "制品源不存在".to_string())?;
 
     if source.kind == "url" {
-        return Ok(ArtifactRelease {
-            run_id: 0,
-            run_url: String::new(),
-            run_status: "manual".to_string(),
-            version: source.last_version.clone(),
-            artifact_name: source.artifact_name.clone(),
-            download_url: source.download_url.clone(),
-            ..Default::default()
-        });
+        let mut release = url_release(source);
+        attach_local_bundle(&config_root, source, &mut release);
+        return Ok(release);
     }
 
-    let token = secret_get(&dir, &source.id)?
+    let token = secret_get(&config_root, &source.id)?
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| "尚未配置云效个人访问令牌，请先编辑制品源填写令牌".to_string())?;
+        .ok_or_else(|| "尚未配置云效个人访问令牌，请编辑制品源填写令牌".to_string())?;
 
-    let run_id = match run_id.filter(|value| *value > 0) {
-        Some(value) => value,
-        None => {
-            let url = format!(
-                "{FLOW_API}/{}/pipelines/{}/runs?page=1&perPage=20",
-                source.org_id, source.pipeline_id
-            );
-            let runs = http_get_json(&token, &url)?;
-            let items = runs.as_array().ok_or_else(|| "云效运行列表格式异常".to_string())?;
-            items
-                .iter()
-                .find(|item| json_str(item, "status") == "SUCCESS")
-                .map(|item| json_i64(item, "pipelineRunId"))
-                .ok_or_else(|| "没有找到成功的流水线运行记录".to_string())?
-        }
-    };
-
-    let detail_url = format!(
-        "{FLOW_API}/{}/pipelines/{}/runs/{}",
-        source.org_id, source.pipeline_id, run_id
-    );
-    let detail = http_get_json(&token, &detail_url)?;
-
-    let artifact = pick_artifact(&detail, &source.artifact_name)
-        .ok_or_else(|| "未在该运行中找到构建物上传结果".to_string())?;
-
-    let download_url = json_str(&artifact, "downloadUrl").to_string();
-    if download_url.is_empty() {
-        return Err("构建物结果缺少下载地址".to_string());
+    if let Some(run_id) = run_id.filter(|value| *value > 0) {
+        let detail_url = format!(
+            "{FLOW_API}/{}/pipelines/{}/runs/{}",
+            source.org_id, source.pipeline_id, run_id
+        );
+        let detail = http_get_json(&token, &detail_url)?;
+        let mut release = release_from_flow_detail(source, run_id, &detail)?
+            .ok_or_else(|| "未在该运行中找到构建物上传结果".to_string())?;
+        attach_local_bundle(&config_root, source, &mut release);
+        return Ok(release);
     }
 
-    Ok(ArtifactRelease {
-        run_id,
-        run_url: format!("{FLOW_WEB}/{}/runs/{}", source.pipeline_id, run_id),
-        run_status: json_str(&detail, "status").to_string(),
-        version: json_str(&artifact, "version").to_string(),
-        commit: find_key_string(&detail, "CI_COMMIT_SHA").unwrap_or_default(),
-        commit_short: find_key_string(&detail, "CI_COMMIT_ID").unwrap_or_default(),
-        commit_title: find_key_string(&detail, "CI_COMMIT_TITLE").unwrap_or_default(),
-        branch: find_key_string(&detail, "CI_COMMIT_REF_NAME").unwrap_or_default(),
-        built_at: find_key_i64(&detail, "startTime"),
-        artifact_name: json_str(&artifact, "artifact").to_string(),
-        repo_id: json_str(&artifact, "repoId").to_string(),
-        size_bytes: json_u64(&artifact, "fileSize")
-            .max(json_u64(&artifact, "size"))
-            .max(find_key_i64(&detail, "fileSize").max(0) as u64),
-        md5: json_str(&artifact, "md5").to_string(),
-        download_url,
-    })
+    load_flow_release_page(&config_root, source, &token, 1)?
+        .items
+        .into_iter()
+        .next()
+        .ok_or_else(|| "没有找到包含构建物的成功运行".to_string())
 }
 
 fn validate_download_url(url: &str, source: &ArtifactSource) -> Result<(), String> {
@@ -808,15 +976,12 @@ pub fn download_artifact(
     validate_download_url(&download_url, &source)?;
 
     let profile = crate::commands::profile::deployment_profile();
-    let version = if release.version.trim().is_empty() {
+    let version = if source.kind == "url" || release.version.trim().is_empty() {
         "manual".to_string()
     } else {
         release.version.trim().to_string()
     };
-    let safe_version: String = version
-        .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' || ch == '_' { ch } else { '_' })
-        .collect();
+    let safe_version = safe_version_key(&version);
 
     let dest = dir.join("bundles").join(&id).join(&safe_version);
     if dest.exists() {
@@ -974,6 +1139,66 @@ pub fn open_artifact_bundle(app: AppHandle, id: String) -> Result<ArtifactBundle
     Ok(ArtifactBundle {
         dir: dir.to_string_lossy().to_string(),
         version,
+        commit,
+        md5: String::new(),
+        size_bytes: 0,
+        files: count_files(&dir),
+    })
+}
+
+#[tauri::command]
+pub fn open_artifact_bundle_version(
+    app: AppHandle,
+    id: String,
+    version: String,
+) -> Result<ArtifactBundle, String> {
+    let id = id.trim().to_string();
+    if id.is_empty() || id.contains('/') || id.contains('\\') || id.contains("..") {
+        return Err("非法的制品源标识".to_string());
+    }
+
+    let config_root = config_dir(&app)?;
+    let mut sources = load_sources(&app)?;
+    let index = sources
+        .iter()
+        .position(|item| item.id == id)
+        .ok_or_else(|| "制品源不存在".to_string())?;
+    let source = sources[index].clone();
+
+    let version = version.trim();
+    if version.is_empty() {
+        return Err("缺少制品版本".to_string());
+    }
+    let mut dir = config_root
+        .join("bundles")
+        .join(&id)
+        .join(safe_version_key(version));
+    if !dir.is_dir() && source.kind == "url" {
+        dir = config_root.join("bundles").join(&id).join("manual");
+    }
+    if !dir.is_dir()
+        && !source.last_bundle_dir.trim().is_empty()
+        && (source.kind == "url" || source.last_version.trim() == version)
+    {
+        dir = PathBuf::from(source.last_bundle_dir.trim());
+    }
+    if !dir.is_dir() {
+        return Err(format!("版本 {version} 尚未下载到本机"));
+    }
+
+    let profile = crate::commands::profile::deployment_profile();
+    let (bundle_version, commit) = validate_layout(&dir, &profile.backend_artifact)?;
+    sources[index].last_version = if bundle_version.is_empty() {
+        version.to_string()
+    } else {
+        bundle_version.clone()
+    };
+    sources[index].last_bundle_dir = dir.to_string_lossy().to_string();
+    store_sources(&app, &sources)?;
+
+    Ok(ArtifactBundle {
+        dir: dir.to_string_lossy().to_string(),
+        version: bundle_version,
         commit,
         md5: String::new(),
         size_bytes: 0,

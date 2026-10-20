@@ -92,6 +92,7 @@ pub fn run() {
             list_artifact_sources,
             save_artifact_source,
             delete_artifact_source,
+            list_artifact_releases,
             list_connection_inventory,
             save_ssh_credential,
             delete_ssh_credential,
@@ -103,6 +104,7 @@ pub fn run() {
             fetch_artifact_release,
             download_artifact,
             open_artifact_bundle,
+            open_artifact_bundle_version,
             delete_local_bundle,
             open_external_url,
         ])

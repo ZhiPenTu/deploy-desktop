@@ -22,6 +22,11 @@ export async function fetchArtifactRelease(id, runId = null) {
   return await invoke('fetch_artifact_release', { id, runId });
 }
 
+export async function listArtifactReleases(id, page = 1) {
+  if (!isTauri()) throw new Error(NO_TAURI);
+  return await invoke('list_artifact_releases', { id, page });
+}
+
 export async function downloadArtifact(id, release, onProgress) {
   if (!isTauri()) throw new Error(NO_TAURI);
   const channel = new Channel();
@@ -34,6 +39,11 @@ export async function downloadArtifact(id, release, onProgress) {
 export async function openArtifactBundle(id) {
   if (!isTauri()) throw new Error(NO_TAURI);
   return await invoke('open_artifact_bundle', { id });
+}
+
+export async function openArtifactBundleVersion(id, version) {
+  if (!isTauri()) throw new Error(NO_TAURI);
+  return await invoke('open_artifact_bundle_version', { id, version });
 }
 
 export async function deleteLocalBundle(id) {
