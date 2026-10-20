@@ -4,7 +4,7 @@ function containerName(serviceKey) {
   return profileState.containerPrefix ? `${profileState.containerPrefix}-${serviceKey}` : serviceKey;
 }
 
-export function clusterServices() {
+function clusterServices() {
   return profileState.containers.map((container) => ({
     container: containerName(container.serviceKey),
     serviceKey: container.serviceKey,

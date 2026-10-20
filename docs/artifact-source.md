@@ -24,16 +24,16 @@ deploy/
 ```json
 {
   "schemaVersion": 1,
-  "product": "tt-net-manager",
+  "product": "demo-stack",
   "mode": "file",
   "version": "8-a1b2c3d",
   "commit": "40 位提交号",
   "commitShort": "短提交号",
-  "branch": "master",
+  "branch": "main",
   "builtAt": "2026-10-19T00:00:00Z",
   "components": ["backend", "gateway", "frontend", "config"],
   "files": [
-    { "path": "app/tt-net-manager-server.jar", "size": 123456, "sha256": "..." }
+    { "path": "app/app-server.jar", "size": 123456, "sha256": "..." }
   ]
 }
 ```
@@ -120,6 +120,12 @@ deploy/
 
 部署向导的「交付包目录」与「离线介质目录」是两个独立输入：前者来自制品中心，后者由现场准备。两者可以指向同一个目录，但不要把只含 `app/` 与 `deploy/` 的交付包当作镜像目录。
 
+### 文件模式启动
+
+启动时识别部署目录根部或 `deploy/` 下的 Compose 文件，并加载 `.env` / `.env.local`。若 Compose 尚未挂载 `frontend_dist`，则根据交付包中的 `deploy/nginx/frontend-*.conf` 生成前端只读挂载配置；缺少该配置时不会静默回退到预构建前端镜像。
+
+`up -d` 完成后重启后端与网关容器，使挂载的新 jar / classes 生效。
+
 ## 部署向导
 
 部署向导按以下顺序执行，不再单独选择本地或远程模式：
@@ -147,6 +153,6 @@ deploy/
 
 ## 在流水线侧产出
 
-参考 `flow.yml` 的 `assemble_bundle` 步骤：构建后端 Fat Jar、前端静态资源与网关 classpath，按上面的目录结构汇总后打包上传为单制品。制品名需与桌面端填写的一致（默认 `deploy-bundle`）。
+在目标项目的流水线中构建后端 Fat Jar、前端静态资源与网关 classpath，按上面的目录结构汇总后打包上传为单制品。本仓库不包含目标项目的流水线配置。制品名需与桌面端填写的一致（默认 `deploy-bundle`）。
 
 流水线上传的 `version` 与 `bundle.json.version` 必须一致，推荐 `${BUILD_NUMBER}-${CI_COMMIT_ID}`，例如 `8-a1b2c3d`。缺少构建号、提交号时直接使打包失败，不能回退到 `dev` 或空值。已有仅构建号版本的历史交付包，在两处版本相同的情况下仍可使用。桌面端不根据提交号或运行编号伪造缺失的制品版本。

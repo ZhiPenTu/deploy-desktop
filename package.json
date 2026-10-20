@@ -1,13 +1,15 @@
 {
   "name": "deploy-desktop",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "private": true,
   "type": "module",
   "scripts": {
     "check:ui-text": "node scripts/check-ui-text.mjs",
+    "check:boundaries": "node scripts/check-boundaries.mjs",
+    "test:api": "node --test test/*.test.mjs",
     "predev": "npm run check:ui-text",
     "dev": "vite",
-    "prebuild": "npm run check:ui-text",
+    "prebuild": "npm run check:ui-text && npm run check:boundaries",
     "build": "vite build",
     "preview": "vite preview",
     "tauri": "tauri",

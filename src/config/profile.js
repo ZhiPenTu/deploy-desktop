@@ -1,5 +1,5 @@
 import { reactive } from 'vue';
-import { invoke, isTauri } from '@tauri-apps/api/core';
+import { getDeploymentProfile } from '../api/tauri.js';
 import exampleProfile from '../../profile.example.json';
 
 function normalize(profile) {
@@ -20,16 +20,13 @@ function normalize(profile) {
 
 export const profileState = reactive(normalize(exampleProfile));
 
-export function applyProfile(profile) {
+function applyProfile(profile) {
   Object.assign(profileState, normalize(profile));
 }
 
 export async function initProfile() {
-  if (!isTauri()) {
-    return profileState;
-  }
   try {
-    const profile = await invoke('get_deployment_profile');
+    const profile = await getDeploymentProfile();
     if (profile) {
       applyProfile(profile);
     }

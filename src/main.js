@@ -5,7 +5,7 @@ import * as ElementPlusIconsVue from '@element-plus/icons-vue';
 
 import App from './App.vue';
 import { initProfile } from './config/profile.js';
-import { initConnectionInventory, syncConnectionFromProfile } from './connection.js';
+import { initConnectionInventory, syncConnectionFromProfile } from './features/connections/state.js';
 import './style.css';
 
 async function bootstrap() {
