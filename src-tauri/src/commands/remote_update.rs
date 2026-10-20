@@ -104,24 +104,29 @@ pub fn inspect_bundle_layout(bundle_dir: String) -> Result<BundleLayout, String>
     }
     images.sort();
 
-    let mode = if !images.is_empty() {
-        "image"
+    let metadata = if root.join("bundle.json").is_file() {
+        let text = fs::read_to_string(root.join("bundle.json"))
+            .map_err(|_| "无法读取交付包信息，请检查文件权限".to_string())?;
+        Some(serde_json::from_str::<serde_json::Value>(&text)
+            .map_err(|_| "交付包信息格式有误，请重新选择完整制品".to_string())?)
+    } else { None };
+    let declared_mode = metadata.as_ref().and_then(|meta| meta.get("mode"));
+    let mode = if let Some(mode) = declared_mode {
+        match mode.as_str() {
+            Some("file") => "file",
+            Some("image") => "image",
+            _ => return Err("交付包声明的类型无效，请重新选择完整制品".to_string()),
+        }
     } else if root.join("app").is_dir() {
         "file"
+    } else if !images.is_empty() {
+        "image"
     } else {
         "unknown"
     };
 
-    let mut version = String::new();
-    if let Ok(text) = fs::read_to_string(root.join("bundle.json")) {
-        if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&text) {
-            version = meta
-                .get("version")
-                .and_then(|value| value.as_str())
-                .unwrap_or_default()
-                .to_string();
-        }
-    }
+    let version = metadata.as_ref().and_then(|meta| meta.get("version"))
+        .and_then(|value| value.as_str()).unwrap_or_default().to_string();
 
     Ok(BundleLayout {
         mode: mode.to_string(),
@@ -770,7 +775,7 @@ pub fn inspect_bundle_config(
     })
 }
 
-fn resolve_bundle_file(root: &Path, file: &str) -> Result<PathBuf, String> {
+pub(super) fn resolve_bundle_file(root: &Path, file: &str) -> Result<PathBuf, String> {
     let relative = file.trim();
     if relative.is_empty() {
         return Err("未指定要读取的配置文件".to_string());
@@ -795,7 +800,7 @@ fn resolve_bundle_file(root: &Path, file: &str) -> Result<PathBuf, String> {
     Ok(canonical)
 }
 
-fn compose_service_views(content: &str) -> Result<Vec<ComposeServiceView>, String> {
+pub(super) fn compose_service_views(content: &str) -> Result<Vec<ComposeServiceView>, String> {
     let document: serde_yaml::Value =
         serde_yaml::from_str(content).map_err(|error| format!("YAML 解析失败：{error}"))?;
     let Some(services) = document.get("services").and_then(|value| value.as_mapping()) else {
@@ -855,7 +860,7 @@ fn compose_depends_on(value: Option<&serde_yaml::Value>) -> Vec<String> {
     }
 }
 
-fn normalize_image_ref(reference: &str) -> String {
+pub(super) fn normalize_image_ref(reference: &str) -> String {
     let value = reference.trim();
     let without_digest = value.split('@').next().unwrap_or(value).trim();
     let without_registry = without_digest
@@ -882,7 +887,7 @@ fn compose_image_status(
     }
 }
 
-fn scan_image_files(dir: &Path) -> Vec<(String, u64)> {
+pub(super) fn scan_image_files(dir: &Path) -> Vec<(String, u64)> {
     let Ok(entries) = fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -906,7 +911,7 @@ fn scan_image_files(dir: &Path) -> Vec<(String, u64)> {
 
 /// 镜像包匹配顺序：交付包清单 images.json → 部署配置里的文件名映射 → 文件名推断。
 /// 推断只做兜底，界面会标注来源，避免把猜测当成清单结论。
-fn match_tarball(
+pub(super) fn match_tarball(
     match_ref: &str,
     files: &[(String, u64)],
     manifest: &[super::image_manager::ImageManifestEntry],
@@ -2146,12 +2151,7 @@ fn install_bundle_blocking(
     if mode != "local" && mode != "remote" {
         return Err(format!("不支持的分发模式: {mode}"));
     }
-    let components = vec![
-        "backend".to_string(),
-        "gateway".to_string(),
-        "frontend".to_string(),
-        "config".to_string(),
-    ];
+    let components = install_bundle_components(bundle_dir)?;
     emit_progress(window, "校验交付包", 4, "running", "检查交付包结构...");
     let bundle = validate_bundle(bundle_dir, &components)?;
     let install_dir = normalize_install_dir(install_dir);
@@ -2252,6 +2252,44 @@ fn install_bundle_blocking(
             uploaded.len()
         ),
     })
+}
+
+fn install_bundle_components(bundle_dir: &str) -> Result<Vec<String>, String> {
+    let layout = inspect_bundle_layout(bundle_dir.to_string())?;
+    match layout.mode.as_str() {
+        "image" => Ok(vec!["image".to_string(), "config".to_string()]),
+        "file" => {
+            let metadata_path = Path::new(bundle_dir).join("bundle.json");
+            if metadata_path.is_file() {
+                let text = fs::read_to_string(metadata_path)
+                    .map_err(|_| "无法读取交付包信息，请检查文件权限".to_string())?;
+                let metadata: serde_json::Value = serde_json::from_str(&text)
+                    .map_err(|_| "交付包信息格式有误，请重新选择完整制品".to_string())?;
+                if let Some(declared) = metadata.get("components") {
+                    let declared = declared.as_array()
+                        .ok_or_else(|| "交付包的组件清单无效，请重新选择完整制品".to_string())?;
+                    let mut components = Vec::new();
+                    for component in declared.iter().filter_map(|value| value.as_str()) {
+                        if matches!(component, "backend" | "gateway" | "frontend" | "config")
+                            && !components.iter().any(|item| item == component) {
+                            components.push(component.to_string());
+                        }
+                    }
+                    if !components.iter().any(|item| item == "config") {
+                        components.push("config".to_string());
+                    }
+                    return Ok(components);
+                }
+            }
+            Ok(vec!["backend".to_string(), "gateway".to_string(), "frontend".to_string(), "config".to_string()])
+        }
+        _ => Err("无法识别交付包内容，请重新选择完整制品".to_string()),
+    }
+}
+
+pub(super) fn validate_install_bundle(bundle_dir: &str) -> Result<(), String> {
+    let components = install_bundle_components(bundle_dir)?;
+    validate_bundle(bundle_dir, &components).map(|_| ())
 }
 
 fn install_bundle_local(
@@ -2383,6 +2421,96 @@ mod tests {
             fs::create_dir_all(parent).unwrap();
         }
         fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn first_install_validates_image_bundle_without_requiring_app_artifacts() {
+        let root = std::env::temp_dir().join(format!(
+            "deploy-desktop-image-install-{}-{:?}",
+            std::process::id(), std::thread::current().id()
+        ));
+        let bundle = root.join("bundle");
+        write(&bundle.join("images/web.tar"), "image archive");
+        write(&bundle.join("deploy/docker-compose.yml"), "services:\n  web:\n    image: demo/web:1\n");
+        let components = install_bundle_components(bundle.to_str().unwrap()).unwrap();
+        assert_eq!(components, ["image", "config"]);
+        let paths = validate_bundle(bundle.to_str().unwrap(), &components).unwrap();
+        assert!(paths.server_jar.is_none());
+        assert_eq!(paths.image_files.len(), 1);
+        let install = root.join("install");
+        install_bundle_local(&paths, &bundle, install.to_str().unwrap()).unwrap();
+        assert!(install.join("images/web.tar").is_file());
+        assert!(install.join("deploy/docker-compose.yml").is_file());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn first_install_keeps_complete_file_bundle_validation() {
+        let root = std::env::temp_dir().join(format!(
+            "deploy-desktop-file-install-{}-{:?}",
+            std::process::id(), std::thread::current().id()
+        ));
+        write(&root.join("app/frontend-dist/index.html"), "frontend");
+        write(&root.join("deploy/docker-compose.yml"), "services: {}");
+        let components = install_bundle_components(root.to_str().unwrap()).unwrap();
+        assert_eq!(components, ["backend", "gateway", "frontend", "config"]);
+        assert!(validate_bundle(root.to_str().unwrap(), &components).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn file_bundle_with_base_images_still_distributes_application_artifacts() {
+        let root = std::env::temp_dir().join(format!(
+            "deploy-desktop-file-images-install-{}-{:?}",
+            std::process::id(), std::thread::current().id()
+        ));
+        let bundle = root.join("bundle");
+        let artifact = super::super::profile::deployment_profile().backend_artifact.clone();
+        write(&bundle.join("app").join(&artifact), "backend artifact");
+        write(&bundle.join("app/gateway-classes/Main.class"), "gateway classes");
+        write(&bundle.join("app/frontend-dist/index.html"), "frontend");
+        write(&bundle.join("images/base.tar"), "base image archive");
+        write(&bundle.join("deploy/docker-compose.yml"), "services: {}\n");
+        // Legacy packages without a mode prefer application artifacts over auxiliary images.
+        assert_eq!(inspect_bundle_layout(bundle.to_str().unwrap().to_string()).unwrap().mode, "file");
+        write(&bundle.join("bundle.json"), r#"{"mode":"file","version":"1"}"#);
+        let components = install_bundle_components(bundle.to_str().unwrap()).unwrap();
+        assert_eq!(components, ["backend", "gateway", "frontend", "config"]);
+        let paths = validate_bundle(bundle.to_str().unwrap(), &components).unwrap();
+        let install = root.join("install");
+        install_bundle_local(&paths, &bundle, install.to_str().unwrap()).unwrap();
+        assert!(install.join("backend-java/server/target").join(&artifact).is_file());
+        assert!(install.join("backend-java/gateway-app/target/classes/Main.class").is_file());
+        assert!(install.join("deploy/frontend_dist/index.html").is_file());
+        assert!(install.join("images/base.tar").is_file());
+        // An explicit valid package declaration remains authoritative.
+        write(&bundle.join("bundle.json"), r#"{"mode":"image"}"#);
+        assert_eq!(inspect_bundle_layout(bundle.to_str().unwrap().to_string()).unwrap().mode, "image");
+        write(&bundle.join("bundle.json"), r#"{"mode":"other"}"#);
+        assert!(inspect_bundle_layout(bundle.to_str().unwrap().to_string()).is_err());
+        write(&bundle.join("bundle.json"), r#"{"mode":1}"#);
+        assert!(inspect_bundle_layout(bundle.to_str().unwrap().to_string()).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn declared_file_components_are_validated_before_install_without_requiring_gateway() {
+        let root = std::env::temp_dir().join(format!(
+            "deploy-desktop-components-install-{}-{:?}",
+            std::process::id(), std::thread::current().id()
+        ));
+        let artifact = super::super::profile::deployment_profile().backend_artifact.clone();
+        write(&root.join("app").join(artifact), "backend artifact");
+        write(&root.join("app/frontend-dist/index.html"), "frontend");
+        write(&root.join("deploy/docker-compose.yml"), "services: {}\n");
+        write(&root.join("bundle.json"), r#"{"mode":"file","components":["backend","frontend","image","frontend","unknown"]}"#);
+        assert_eq!(install_bundle_components(root.to_str().unwrap()).unwrap(), ["backend", "frontend", "config"]);
+        assert!(validate_install_bundle(root.to_str().unwrap()).is_ok());
+        write(&root.join("bundle.json"), r#"{"mode":"file"}"#);
+        assert!(validate_install_bundle(root.to_str().unwrap()).is_err());
+        write(&root.join("bundle.json"), r#"{"mode":"file","components":"backend"}"#);
+        assert!(validate_install_bundle(root.to_str().unwrap()).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::net::{TcpListener, UdpSocket};
 use std::process::Command;
 
+use super::remote_ssh::find_binary;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortStatus {
     pub port: u16,
@@ -195,12 +197,12 @@ fn get_disk_free_gb(path: &str) -> f64 {
 }
 
 fn check_docker_status() -> (bool, Option<String>, bool) {
-    let ver_res = Command::new("docker").arg("--version").output();
+    let ver_res = Command::new(find_binary("docker")).arg("--version").output();
     if let Ok(out) = ver_res {
         if out.status.success() {
             let ver_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
             // 检测 daemon 是否运行
-            let ping_res = Command::new("docker").arg("info").output();
+            let ping_res = Command::new(find_binary("docker")).arg("info").output();
             let is_running = ping_res.map(|o| o.status.success()).unwrap_or(false);
             return (true, Some(ver_str), is_running);
         }
@@ -209,7 +211,7 @@ fn check_docker_status() -> (bool, Option<String>, bool) {
 }
 
 fn check_docker_compose_status() -> (bool, Option<String>) {
-    let res = Command::new("docker").args(["compose", "version"]).output();
+    let res = Command::new(find_binary("docker")).args(["compose", "version"]).output();
     if let Ok(out) = res {
         if out.status.success() {
             let ver_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -217,7 +219,7 @@ fn check_docker_compose_status() -> (bool, Option<String>) {
         }
     }
     // 兼容独立 docker-compose 命令
-    let res2 = Command::new("docker-compose").arg("--version").output();
+    let res2 = Command::new(find_binary("docker-compose")).arg("--version").output();
     if let Ok(out) = res2 {
         if out.status.success() {
             let ver_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -251,7 +253,7 @@ fn check_port_availability(port: u16, proto: &str) -> (bool, Option<String>) {
 fn probe_port_occupant(port: u16) -> String {
     // 优先检查 docker ps 是否映射此端口
     let port_str = format!(":{}", port);
-    if let Ok(out) = Command::new("docker").args(["ps", "--format", "{{.Names}}\t{{.Ports}}"]).output() {
+    if let Ok(out) = Command::new(find_binary("docker")).args(["ps", "--format", "{{.Names}}\t{{.Ports}}"]).output() {
         let text = String::from_utf8_lossy(&out.stdout);
         for line in text.lines() {
             if line.contains(&port_str) {

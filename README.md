@@ -151,6 +151,12 @@ docker buildx imagetools inspect registry.cn-hangzhou.aliyuncs.com/your-namespac
 
 真实环境把 `profile.example.json` 复制到上表位置并改为自己的拓扑即可，不需要重新编译，也不会污染开源仓库。
 
+## 部署向导
+
+按“选择主机 → 检测环境 → 选择制品 → 解压制品 → 清单比对 → 选择更新”操作。本机与 SSH 连接由所选主机自动确定。向导核对 Compose 服务差异与目标 Docker 镜像，环境、制品或镜像未就绪时阻止执行；随后根据目标目录选择首次部署或增量更新。增量更新默认备份，并在执行前确认目标、版本与影响范围。
+
+详情与验证边界见 [制品源与交付包](docs/artifact-source.md#部署向导)。
+
 ## 凭证与主机管理
 
 侧边栏「连接」下提供凭证管理与主机管理：

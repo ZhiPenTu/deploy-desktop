@@ -692,10 +692,13 @@ fn safe_extract(archive: &Path, dest: &Path) -> Result<usize, String> {
         .arg(archive)
         .output()
         .map_err(|e| format!("调用 tar 失败：{e}"))?;
+    if !verbose.status.success() {
+        return Err("无法检查压缩包内容，请重新选择完整的交付包".to_string());
+    }
     let details = String::from_utf8_lossy(&verbose.stdout);
     for line in details.lines() {
-        if line.starts_with('l') || line.starts_with('h') {
-            return Err("构建物包含符号链接，已拒绝解包".to_string());
+        if !line.starts_with('-') && !line.starts_with('d') {
+            return Err("交付包包含链接或特殊文件，无法解压，请重新打包后重试".to_string());
         }
     }
 
@@ -758,7 +761,7 @@ fn validate_layout(dir: &Path, backend_artifact: &str) -> Result<(String, String
     // 两种交付形态都接受：
     //   - 文件模式：app/ + deploy/（逐文件替换 jar、classes、lib、dist）
     //   - 镜像模式：images/ + deploy/（docker load 镜像后由 compose 直接使用）
-    let image_mode = dir.join("images").is_dir() && !dir.join("app").is_dir();
+    let image_mode = super::remote_update::inspect_bundle_layout(dir.to_string_lossy().to_string())?.mode == "image";
     if !image_mode {
         if !dir.join("app").join(backend_artifact).is_file() {
             missing.push(format!("app/{backend_artifact}"));
@@ -888,6 +891,90 @@ fn count_files(dir: &Path) -> usize {
     total
 }
 
+// 本地目录与压缩包共用同一结构检查；不跟随符号链接，避免部署时访问包外文件。
+fn inspect_local_tree(dir: &Path, depth: usize) -> Result<(usize, u64), String> {
+    if depth > 128 {
+        return Err("交付包目录层级过深，请检查后重试".to_string());
+    }
+    let mut count = 0usize;
+    let mut bytes = 0u64;
+    for entry in fs::read_dir(dir).map_err(|e| format!("读取交付包目录失败：{e}"))? {
+        let entry = entry.map_err(|e| format!("读取交付包文件失败：{e}"))?;
+        let meta = fs::symlink_metadata(entry.path())
+            .map_err(|e| format!("检查交付包文件失败：{e}"))?;
+        if meta.is_dir() {
+            let (nested_count, nested_bytes) = inspect_local_tree(&entry.path(), depth + 1)?;
+            count += nested_count;
+            bytes = bytes.saturating_add(nested_bytes);
+        } else if meta.is_file() {
+            count += 1;
+            bytes = bytes.saturating_add(meta.len());
+        } else {
+            return Err("交付包包含链接或特殊文件，请选择仅含普通文件的交付包".to_string());
+        }
+        if count > 200_000 || bytes > MAX_ARTIFACT_BYTES * 4 {
+            return Err("交付包解压后体积或文件数量超过限制，请检查后重试".to_string());
+        }
+    }
+    Ok((count, bytes))
+}
+
+fn prepare_local_bundle(path: &Path, cache_root: &Path, backend: &str) -> Result<ArtifactBundle, String> {
+    let meta = fs::symlink_metadata(path).map_err(|e| format!("读取所选制品失败：{e}"))?;
+    if meta.file_type().is_symlink() {
+        return Err("请选择交付包原文件或目录，不能使用符号链接".to_string());
+    }
+    let source = fs::canonicalize(path).map_err(|e| format!("读取所选制品失败：{e}"))?;
+    let extracted = if meta.is_dir() {
+        None
+    } else if meta.is_file() {
+        let name = source.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+        if !name.ends_with(".tgz") && !name.ends_with(".tar.gz") {
+            return Err("请选择 .tgz、.tar.gz 交付包，或已解压的交付包目录".to_string());
+        }
+        if meta.len() > MAX_ARTIFACT_BYTES {
+            return Err("交付包超过 5 GiB，请检查所选文件".to_string());
+        }
+        fs::create_dir_all(cache_root).map_err(|e| format!("创建交付包目录失败：{e}"))?;
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "无法生成交付包目录，请检查系统时间".to_string())?.as_nanos();
+        let dest = cache_root.join(format!("local-{}-{stamp}", std::process::id()));
+        fs::create_dir(&dest).map_err(|e| format!("创建解压目录失败：{e}"))?;
+        if let Err(error) = safe_extract(&source, &dest) {
+            let _ = fs::remove_dir_all(&dest);
+            return Err(error);
+        }
+        Some(dest)
+    } else {
+        return Err("所选制品不是普通文件或目录，请重新选择".to_string());
+    };
+    let dir = extracted.as_deref().unwrap_or(&source);
+    let result = (|| {
+        let (files, bytes) = inspect_local_tree(dir, 0)?;
+        let (version, commit) = validate_layout(dir, backend)?;
+        super::remote_update::validate_install_bundle(&dir.to_string_lossy())?;
+        Ok(ArtifactBundle {
+            dir: dir.to_string_lossy().to_string(), version, commit,
+            md5: String::new(), size_bytes: bytes, files,
+        })
+    })();
+    if result.is_err() {
+        if let Some(dest) = extracted { let _ = fs::remove_dir_all(dest); }
+    }
+    result
+}
+
+#[tauri::command]
+pub async fn prepare_local_artifact_bundle(app: AppHandle, path: String) -> Result<ArtifactBundle, String> {
+    if path.trim().is_empty() {
+        return Err("请先选择交付包文件或目录".to_string());
+    }
+    let cache_root = config_dir(&app)?.join("bundles/local");
+    let backend = crate::commands::profile::deployment_profile().backend_artifact.clone();
+    tauri::async_runtime::spawn_blocking(move || prepare_local_bundle(Path::new(path.trim()), &cache_root, &backend))
+        .await.map_err(|e| format!("制品准备失败，请重试：{e}"))?
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalBundleRemoval {
@@ -1011,6 +1098,51 @@ pub fn open_external_url(url: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_artifact_archive_is_prepared_without_overwriting_source() {
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!("local-artifact-{}-{stamp}", std::process::id()));
+        let source = root.join("source");
+        let backend = &crate::commands::profile::deployment_profile().backend_artifact;
+        fs::create_dir_all(source.join("app/frontend-dist")).unwrap();
+        fs::create_dir_all(source.join("deploy")).unwrap();
+        fs::write(source.join("bundle.json"), r#"{"version":"2","commitShort":"test","components":["backend","frontend","config"]}"#).unwrap();
+        fs::write(source.join("app").join(backend), "artifact").unwrap();
+        fs::write(source.join("app/frontend-dist/index.html"), "frontend").unwrap();
+        fs::write(source.join("deploy/docker-compose.yml"), "services: {}\n").unwrap();
+        let archive = root.join("bundle.tgz");
+        assert!(Command::new("tar").arg("-czf").arg(&archive).arg("-C").arg(&source).arg(".").status().unwrap().success());
+        let prepared = prepare_local_bundle(&archive, &root.join("cache"), backend).unwrap();
+        assert_eq!(prepared.version, "2");
+        assert_eq!(prepared.files, 4);
+        assert!(Path::new(&prepared.dir).join("deploy/docker-compose.yml").is_file());
+        assert_eq!(fs::read_to_string(source.join("app").join(backend)).unwrap(), "artifact");
+        let cache_count = fs::read_dir(root.join("cache")).unwrap().count();
+        fs::remove_file(source.join("bundle.json")).unwrap();
+        let invalid = root.join("invalid.tgz");
+        assert!(Command::new("tar").arg("-czf").arg(&invalid).arg("-C").arg(&source).arg(".").status().unwrap().success());
+        assert!(prepare_local_bundle(&invalid, &root.join("cache"), backend).is_err());
+        assert_eq!(fs::read_dir(root.join("cache")).unwrap().count(), cache_count);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_artifact_rejects_links_before_reading_package_files() {
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!("local-artifact-link-{stamp}"));
+        fs::create_dir_all(root.join("source")).unwrap();
+        fs::write(root.join("outside.txt"), "outside").unwrap();
+        std::os::unix::fs::symlink(root.join("outside.txt"), root.join("source/link")).unwrap();
+        assert!(prepare_local_bundle(&root.join("source"), &root.join("cache"), "server.jar").is_err());
+        let archive = root.join("bundle.tgz");
+        assert!(Command::new("tar").arg("-czf").arg(&archive).arg("-C").arg(root.join("source")).arg(".").status().unwrap().success());
+        assert!(prepare_local_bundle(&archive, &root.join("cache"), "server.jar").is_err());
+        assert_eq!(fs::read_to_string(root.join("outside.txt")).unwrap(), "outside");
+        assert!(fs::read_dir(root.join("cache")).unwrap().next().is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     fn source(kind: &str, url: &str) -> ArtifactSource {
         ArtifactSource {

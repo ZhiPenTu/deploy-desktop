@@ -1,6 +1,6 @@
 <template>
   <div class="app-layout">
-    <Sidebar :current-tab="currentTab" @update:tab="currentTab = $event" />
+    <Sidebar :current-tab="currentTab" @update:tab="navigateTab" />
 
     <div class="workspace">
       <Header
@@ -25,10 +25,11 @@
         <InstallWizard
           v-else-if="currentTab === 'wizard'"
           :connection="connection"
-          @go-dashboard="currentTab = 'dashboard'"
-          @go-images="currentTab = 'images'"
-          @go-artifacts="currentTab = 'artifacts'"
-          @go-hosts="currentTab = 'hosts'"
+          @busy-change="wizardBusy = $event"
+          @go-dashboard="navigateTab('dashboard')"
+          @go-images="navigateTab('images')"
+          @go-artifacts="navigateTab('artifacts')"
+          @go-hosts="navigateTab('hosts')"
         />
 
         <EnvCheck
@@ -85,6 +86,7 @@
 
 <script setup>
 import { computed, ref } from 'vue';
+import { ElMessage } from 'element-plus';
 import { connection } from './connection';
 import Header from './components/Header.vue';
 import Sidebar from './components/Sidebar.vue';
@@ -116,6 +118,11 @@ const pages = {
 };
 
 const currentTab = ref('wizard');
+const wizardBusy = ref(false);
+function navigateTab(tab) {
+  if (wizardBusy.value) { ElMessage.warning('当前操作正在进行，请等待完成后切换页面。'); return; }
+  currentTab.value = tab;
+}
 const activeLogContainer = ref(getDefaultContainer());
 const currentPage = computed(() => pages[currentTab.value] || pages.wizard);
 
@@ -125,7 +132,7 @@ const handleViewLog = (containerName) => {
 };
 
 const handleQuickCheck = () => {
-  currentTab.value = 'env';
+  navigateTab('env');
 };
 </script>
 

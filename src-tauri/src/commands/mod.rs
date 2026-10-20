@@ -1,11 +1,13 @@
 pub mod artifact;
 pub mod connections;
 pub mod db_ops;
+pub mod deployment_review;
 pub mod docker_engine;
 pub mod docker_ops;
 pub mod env;
 pub mod image_library;
 pub mod image_manager;
+pub mod local_update;
 pub mod profile;
 pub mod registry;
 pub mod registry_sources;
