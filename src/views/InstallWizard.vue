@@ -297,7 +297,7 @@
           <p class="desc">
             镜像包目录：
             <code>{{ bundleImagesPath }}</code>
-            <el-button link type="primary" @click="emit('go-images')">打开镜像包管理</el-button>
+            <el-button link type="primary" @click="emit('go-images')">打开镜像与离线包</el-button>
           </p>
 
           <div class="action-box">
@@ -711,7 +711,7 @@ const handleLoadImages = async () => {
       : await loadOfflineImages(mediaRoot.value);
     imageMsg.value = `成功载入 ${res.length} 个镜像文件！`;
   } catch (e) {
-    imageMsg.value = `导入错误: ${e}。可先打开“镜像包管理”扫描本地镜像包并上传到目标机，再回到本步重试。`;
+    imageMsg.value = `导入错误: ${e}。可先在“镜像与离线包”中准备并上传离线包，再回到本步重试。`;
   } finally {
     loadingImages.value = false;
   }

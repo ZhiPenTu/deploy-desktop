@@ -3,6 +3,7 @@ pub mod db_ops;
 pub mod docker_engine;
 pub mod docker_ops;
 pub mod env;
+pub mod image_library;
 pub mod image_manager;
 pub mod profile;
 pub mod registry;

@@ -3,7 +3,7 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">设置</h2>
-        <p class="page-subtitle">集中管理云效制品源、访问令牌、更新检查与当前部署配置</p>
+        <p class="page-subtitle">集中管理云效制品源、离线包目录、访问令牌、更新检查与当前部署配置</p>
       </div>
     </div>
 
@@ -86,6 +86,34 @@
 
     <div class="card-surface settings-card">
       <div class="card-title-bar">
+        <h3>离线镜像包</h3>
+        <span class="hint">从镜像列表导出的 tar 包保存在此目录</span>
+      </div>
+      <el-form label-width="110px">
+        <el-form-item label="保存目录">
+          <div class="dir-row">
+            <el-input v-model="offlineDir" placeholder="/path/to/offline-images" />
+            <el-button @click="pickOfflineDir">
+              <el-icon><FolderOpened /></el-icon>
+              <span>选择目录</span>
+            </el-button>
+          </div>
+          <div class="field-hint">
+            默认目录：{{ defaultOfflineDir || '读取中' }}。导出、导入和删除离线包都以该目录为准。
+          </div>
+        </el-form-item>
+      </el-form>
+      <div class="card-actions">
+        <el-button type="primary" :loading="savingOfflineDir" @click="saveOfflineDir">保存目录</el-button>
+        <el-button :disabled="!defaultOfflineDir || savingOfflineDir" @click="resetOfflineDir">
+          恢复默认目录
+        </el-button>
+        <el-button @click="$emit('go-images')">前往镜像与离线包</el-button>
+      </div>
+    </div>
+
+    <div class="card-surface settings-card">
+      <div class="card-title-bar">
         <h3>当前部署配置</h3>
         <span class="hint">来自部署向导与制品中心的选择</span>
       </div>
@@ -113,10 +141,12 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { Plus, Refresh } from '@element-plus/icons-vue';
+import { FolderOpened, Plus, Refresh } from '@element-plus/icons-vue';
+import { open } from '@tauri-apps/plugin-dialog';
 import ArtifactSourceEditor from '../components/ArtifactSourceEditor.vue';
 import UpdateChecker from '../components/UpdateChecker.vue';
 import { deleteArtifactSource, listArtifactSources } from '../api/artifact.js';
+import { getImageLibrarySettings, saveImageLibrarySettings } from '../api/tauri.js';
 
 const props = defineProps({
   connection: {
@@ -125,13 +155,16 @@ const props = defineProps({
   }
 });
 
-defineEmits(['go-artifacts']);
+defineEmits(['go-artifacts', 'go-images']);
 
 const appVersion = __APP_VERSION__;
 const sources = ref([]);
 const loading = ref(false);
 const editorVisible = ref(false);
 const editing = ref(null);
+const offlineDir = ref('');
+const defaultOfflineDir = ref('');
+const savingOfflineDir = ref(false);
 
 const isRemote = computed(() => props.connection.mode === 'remote');
 
@@ -163,6 +196,58 @@ function openEdit(row) {
   editorVisible.value = true;
 }
 
+async function loadImageSettings() {
+  try {
+    const settings = await getImageLibrarySettings();
+    offlineDir.value = settings.offlineDir || '';
+    defaultOfflineDir.value = settings.defaultDir || '';
+  } catch (error) {
+    ElMessage.error(String(error));
+  }
+}
+
+async function pickOfflineDir() {
+  try {
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      title: '选择离线镜像包保存目录'
+    });
+    if (typeof selected === 'string' && selected) {
+      offlineDir.value = selected;
+    }
+  } catch (error) {
+    ElMessage.error(`选择目录失败：${error}`);
+  }
+}
+
+async function resetOfflineDir() {
+  if (!defaultOfflineDir.value) {
+    return;
+  }
+  offlineDir.value = defaultOfflineDir.value;
+  await saveOfflineDir();
+}
+
+async function saveOfflineDir() {
+  const dir = offlineDir.value.trim();
+  if (!dir) {
+    ElMessage.warning('请填写离线包保存目录');
+    return;
+  }
+  savingOfflineDir.value = true;
+  try {
+    const settings = await saveImageLibrarySettings(dir);
+    offlineDir.value = settings.offlineDir || dir;
+    defaultOfflineDir.value = settings.defaultDir || defaultOfflineDir.value;
+    ElMessage.success('离线包保存目录已保存');
+  } catch (error) {
+    ElMessage.error(String(error));
+  } finally {
+    savingOfflineDir.value = false;
+  }
+}
+
 async function remove(row) {
   try {
     await ElMessageBox.confirm(
@@ -182,7 +267,10 @@ async function remove(row) {
   }
 }
 
-onMounted(loadSources);
+onMounted(() => {
+  loadSources();
+  loadImageSettings();
+});
 </script>
 
 <style scoped>
@@ -246,6 +334,12 @@ onMounted(loadSources);
   grid-template-columns: 110px minmax(0, 1fr);
   gap: 10px 14px;
   font-size: 12px;
+}
+
+.dir-row {
+  display: flex;
+  gap: 10px;
+  width: 100%;
 }
 
 .info-label {

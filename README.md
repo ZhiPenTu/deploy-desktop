@@ -115,6 +115,15 @@ docker buildx imagetools inspect registry.cn-hangzhou.aliyuncs.com/your-namespac
 
 将输出的 `Digest` 填入清单。工具拉取后会校验 `RepoDigests`，摘要不一致会直接失败。
 
+## 镜像与离线包
+
+「镜像与离线包」页面直接读取本机 Docker，不再依赖交付包目录结构：
+
+- 「镜像列表」展示本机镜像地址、ID、大小与创建时间，可勾选后批量导出 tar 离线包或删除；「拉取镜像」支持公开仓库与私有仓库，私有仓库凭据只用于本次拉取，写入临时 Docker 配置，完成后自动清除。
+- 「离线包列表」展示离线包目录中的 tar/tgz 文件，可勾选导入本机 Docker，或批量删除；删除只移除文件，不影响已经导入的镜像。
+- 离线包目录在「设置」中维护，默认是 `~/Documents/离线部署助手/离线镜像包`（Windows 为 `%USERPROFILE%\Documents\离线部署助手\离线镜像包`）。
+- 导出时会在目录中维护 `images.json`，记录每个离线包对应的镜像，远程分发页据此识别镜像。
+
 ## 项目配置
 
 仓库内的 `profile.example.json` 只保留通用示例，不包含任何真实产品拓扑。桌面端启动时优先读取应用配置目录下的 `profile.json`，不存在时使用内置示例：

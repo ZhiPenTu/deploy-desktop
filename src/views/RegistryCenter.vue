@@ -3,7 +3,7 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">镜像仓库</h2>
-        <p class="page-subtitle">可选高级能力：按清单从镜像仓库拉取镜像；标准交付走制品中心与镜像包管理</p>
+        <p class="page-subtitle">可选高级能力：按清单从镜像仓库拉取镜像；标准交付在制品中心与“镜像与离线包”页面完成</p>
       </div>
       <div class="header-actions">
         <el-tag v-if="isRemote" type="primary" effect="plain">

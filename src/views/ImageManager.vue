@@ -2,240 +2,233 @@
   <div class="page-view image-view">
     <div class="page-header">
       <div>
-        <h2 class="page-title">离线镜像包管理</h2>
-        <p class="page-subtitle">扫描本地镜像包、上传到目标机，并按需导入 Docker</p>
+        <h2 class="page-title">镜像与离线包</h2>
+        <p class="page-subtitle">管理本机 Docker 镜像，按需导出离线包并分发到目标机</p>
       </div>
       <div class="header-actions">
         <el-tag v-if="isRemote" type="primary" effect="plain">
           远程 {{ connection.remoteHost }}
         </el-tag>
         <el-tag v-else type="info" effect="plain">本地部署</el-tag>
-        <el-button :loading="scanning" @click="scanLocal()">
-          <el-icon><FolderOpened /></el-icon>
-          <span>扫描本地镜像包</span>
-        </el-button>
-        <el-button v-if="isRemote" :loading="inspecting" @click="inspectRemote">
+        <el-button :loading="refreshing" @click="refreshAll">
           <el-icon><Refresh /></el-icon>
-          <span>检测目标机</span>
+          <span>刷新</span>
         </el-button>
       </div>
     </div>
 
-    <el-alert
-      v-if="!isRemote"
-      title="本地模式直接从当前机器导入镜像"
-      description="本地模式无需上传，扫描到镜像包后可直接点击“导入本地镜像”。远程模式会把镜像包上传到目标机后再导入。"
-      type="info"
-      :closable="false"
-      show-icon
-      class="mode-alert"
-    />
-
-    <div class="card-surface image-card">
-      <div class="card-title-bar">
-        <h3>本地镜像包</h3>
-        <span class="hint">支持选择离线包根目录或其中的 images 目录</span>
-      </div>
-
-      <el-form label-width="110px">
-        <el-form-item label="本地目录">
-          <div class="dir-input-row">
-            <el-input v-model="localDir" placeholder="/path/to/deploy-offline-bundle" />
-            <el-button @click="pickLocalDir">选择目录</el-button>
+    <el-tabs v-model="activeTab" class="image-tabs" @tab-change="handleTabChange">
+      <el-tab-pane label="镜像列表" name="images">
+        <div class="card-surface image-card">
+          <div class="card-title-bar">
+            <h3>本机 Docker 镜像</h3>
+            <span class="hint">{{ imageSummary }}</span>
           </div>
-          <div class="field-hint">
-            工具会读取目录下的 images/*.tar 离线镜像包。默认使用制品中心选定的当前部署包目录。
-          </div>
-        </el-form-item>
-        <el-form-item v-if="isRemote" label="目标机镜像目录">
-          <el-input v-model="remoteDirPath" placeholder="/home/deploy/bundle" />
-          <div class="field-hint">
-            上传写入目标机该目录下的 images/；留空时使用目标部署目录下的 bundle/。
-          </div>
-        </el-form-item>
-      </el-form>
 
-      <div v-if="localScan" class="summary-row">
-        <el-tag :type="localState.tagType" size="small">{{ localState.tag }}</el-tag>
-        <span class="summary-text">{{ localState.summary }}</span>
-        <span v-if="localScan.total_bytes" class="summary-text">
-          共 {{ formatSize(localScan.total_bytes) }}
-        </span>
-        <code v-if="localState.showPath" class="path-text">{{ localScan.images_dir }}</code>
-      </div>
-
-      <el-table
-        v-if="localScan && localScan.files.length"
-        :data="localScan.files"
-        size="small"
-        class="image-table"
-      >
-        <el-table-column prop="name" label="镜像包文件" min-width="170" />
-        <el-table-column label="对应镜像" min-width="250">
-          <template #default="{ row }">
-            <code v-if="row.image_ref">{{ row.image_ref }}</code>
-            <span v-else class="muted-text">未识别文件名</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="大小" width="110">
-          <template #default="{ row }">{{ formatSize(row.size_bytes) }}</template>
-        </el-table-column>
-        <el-table-column label="修改时间" width="170">
-          <template #default="{ row }">{{ formatTime(row.modified_ms) }}</template>
-        </el-table-column>
-        <el-table-column v-if="isRemote" label="目标机状态" width="150">
-          <template #default="{ row }">
-            <span :class="localRowClass(row)">{{ localRowText(row) }}</span>
-          </template>
-        </el-table-column>
-      </el-table>
-
-      <div v-else class="empty-state">
-        <template v-if="localState.kind !== 'idle'">
-          <span class="empty-title">{{ localState.title }}</span>
-          <span class="empty-hint">{{ localState.hint }}</span>
-          <div class="empty-actions">
-            <el-button size="small" @click="pickLocalDir">选择目录</el-button>
-            <el-button
-              v-if="canUseDownloadedBundle"
-              size="small"
-              :loading="findingBundle"
-              @click="useDownloadedBundle"
-            >
-              使用已下载的交付包
+          <div class="toolbar-row">
+            <el-button :loading="loadingImages" @click="loadImages">
+              <el-icon><Refresh /></el-icon>
+              <span>刷新镜像</span>
+            </el-button>
+            <el-button type="primary" @click="openPullDialog">
+              <el-icon><Download /></el-icon>
+              <span>拉取镜像</span>
             </el-button>
           </div>
-        </template>
-        <span v-else>{{ localState.summary }}</span>
-      </div>
-    </div>
 
-    <div v-if="isRemote" class="card-surface image-card">
-      <div class="card-title-bar">
-        <h3>目标机镜像包</h3>
-        <span v-if="remote" class="hint">
-          {{ remote.exists ? `${remote.files.length} 个文件 · ${formatSize(remote.total_bytes)}` : '镜像目录未就绪' }}
-        </span>
-      </div>
+          <div class="selection-row">
+            <span class="selection-hint">已选择 {{ selectedImages.length }} 个镜像</span>
+            <el-button
+              type="primary"
+              plain
+              :disabled="!selectedImages.length || busyLocal"
+              :loading="exporting"
+              @click="handleExport"
+            >
+              导出离线包
+            </el-button>
+            <el-button
+              type="danger"
+              plain
+              :disabled="!selectedImages.length || busyLocal"
+              :loading="deletingImages"
+              @click="handleDeleteImages"
+            >
+              删除选中镜像
+            </el-button>
+            <span class="field-hint inline-hint">离线包保存到 {{ offlineDir || '设置中的目录' }}</span>
+          </div>
 
-      <el-alert
-        v-if="remoteError"
-        type="warning"
-        :closable="false"
-        show-icon
-        title="检测目标机失败"
-        :description="remoteError"
-        class="remote-alert"
-      />
+          <el-alert
+            v-if="imagesError"
+            type="warning"
+            :closable="false"
+            show-icon
+            class="error-alert"
+          >
+            <template #title>
+              <span>{{ imagesError }}</span>
+            </template>
+            <div class="error-actions">
+              <span>请确认 Docker 已安装并启动。</span>
+              <el-button size="small" @click="loadImages">重新读取</el-button>
+            </div>
+          </el-alert>
 
-      <div v-if="remote" class="summary-row">
-        <el-tag :type="remote.exists ? 'success' : 'warning'" size="small">
-          {{ remote.exists ? '目录就绪' : '未找到镜像目录' }}
-        </el-tag>
-        <el-tag :type="remote.docker_running ? 'success' : 'danger'" size="small">
-          {{ remote.docker_running ? 'Docker 运行中' : 'Docker 未运行' }}
-        </el-tag>
-        <span class="summary-text">剩余空间 {{ formatSize(remote.free_kb * 1024) }}</span>
-        <code class="path-text">{{ remote.images_dir }}</code>
-      </div>
+          <el-table
+            v-if="dockerImages.length"
+            ref="imageTable"
+            :data="dockerImages"
+            row-key="reference"
+            size="small"
+            class="image-table"
+            @selection-change="handleImageSelection"
+          >
+            <el-table-column type="selection" width="44" />
+            <el-table-column label="镜像" min-width="300">
+              <template #default="{ row }">
+                <code v-if="row.exportable">{{ row.reference }}</code>
+                <span v-else class="muted-text">未标记镜像</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="镜像 ID" width="140">
+              <template #default="{ row }">
+                <code class="muted-code">{{ shortId(row.id) }}</code>
+              </template>
+            </el-table-column>
+            <el-table-column label="大小" width="110">
+              <template #default="{ row }">{{ row.sizeText || formatSize(row.sizeBytes) }}</template>
+            </el-table-column>
+            <el-table-column label="创建时间" width="190">
+              <template #default="{ row }">{{ row.createdText || '-' }}</template>
+            </el-table-column>
+            <el-table-column label="状态" width="110">
+              <template #default="{ row }">
+                <el-tag :type="row.exportable ? 'success' : 'info'" size="small" effect="plain">
+                  {{ row.exportable ? '可导出' : '仅可删除' }}
+                </el-tag>
+              </template>
+            </el-table-column>
+          </el-table>
 
-      <div v-if="remote && remote.issues.length" class="issue-row">
-        <span v-for="issue in remote.issues" :key="issue" class="issue-chip">{{ issue }}</span>
-      </div>
+          <div v-else-if="!imagesError" class="empty-state">
+            <span class="empty-title">{{ loadingImages ? '正在读取本机镜像' : '本机还没有 Docker 镜像' }}</span>
+            <span class="empty-hint">
+              {{ loadingImages ? '请稍候' : '填写镜像地址后拉取，或先在目标机上导入离线包。' }}
+            </span>
+            <div v-if="!loadingImages" class="empty-actions">
+              <el-button size="small" type="primary" @click="openPullDialog">拉取镜像</el-button>
+            </div>
+          </div>
 
-      <el-table
-        v-if="remote && remoteRows.length"
-        ref="remoteTable"
-        :data="remoteRows"
-        size="small"
-        class="image-table"
-        @selection-change="handleRemoteSelection"
-      >
-        <el-table-column type="selection" width="44" :selectable="isRowSelectable" />
-        <el-table-column prop="name" label="镜像包文件" min-width="170" />
-        <el-table-column label="对应镜像" min-width="250">
-          <template #default="{ row }">
-            <code v-if="row.known">{{ row.image_ref }}</code>
-            <span v-else class="muted-text">{{ row.image_ref }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="镜像包" width="110">
-          <template #default="{ row }">
-            <el-tag :type="row.present ? 'success' : 'info'" size="small" effect="plain">
-              {{ row.present ? formatSize(row.size_bytes) : '缺失' }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="Docker 镜像" width="130">
-          <template #default="{ row }">
-            <el-tag v-if="row.known" :type="row.loaded ? 'success' : 'warning'" size="small" effect="plain">
-              {{ row.loaded ? '已导入' : '未导入' }}
-            </el-tag>
-            <span v-else class="muted-text">未识别</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="修改时间" width="170">
-          <template #default="{ row }">{{ row.present ? formatTime(row.modified_ms) : '-' }}</template>
-        </el-table-column>
-      </el-table>
+        </div>
+      </el-tab-pane>
 
-      <div v-else class="empty-state">
-        {{ remote ? (remote.exists ? '镜像目录为空' : '目标机镜像目录未就绪，请先上传本地镜像包') : '点击“检测目标机”读取镜像包与 Docker 镜像状态' }}
-      </div>
-    </div>
+      <el-tab-pane label="离线包列表" name="packages">
+        <div class="card-surface image-card">
+          <div class="card-title-bar">
+            <h3>离线镜像包</h3>
+            <span class="hint">{{ packageSummary }}</span>
+          </div>
 
-    <div class="card-surface action-card">
-      <div class="card-title-bar">
-        <h3>操作</h3>
-        <span class="hint">上传与导入会逐个文件执行，可实时查看进度</span>
-      </div>
+          <div class="dir-row">
+            <span class="dir-label">保存目录</span>
+            <code class="path-text">{{ offlineScan?.offlineDir || offlineDir || '未配置' }}</code>
+            <el-button size="small" @click="goSettings">修改目录</el-button>
+          </div>
 
-      <div class="action-row">
-        <template v-if="isRemote">
-          <el-button type="primary" :disabled="!canUpload" :loading="uploading" @click="handleUpload(false)">
-            上传缺失镜像包
-          </el-button>
-          <el-button :disabled="!canUpload" :loading="uploading" @click="handleUpload(true)">
-            覆盖上传全部
-          </el-button>
-          <el-button type="success" :disabled="!canImport" :loading="importing" @click="handleImport(false)">
-            仅导入未加载镜像
-          </el-button>
-          <el-button :disabled="!canImport" :loading="importing" @click="handleImport(true)">
-            全部重新导入
-          </el-button>
-          <el-button type="danger" plain :disabled="!canDelete || busy" @click="handleDelete">
-            删除选中镜像包
-          </el-button>
-        </template>
-        <template v-else>
-          <el-button type="primary" :disabled="!canLocalImport" :loading="importing" @click="handleLocalImport">
-            导入本地镜像
-          </el-button>
-        </template>
-      </div>
+          <div class="selection-row">
+            <span class="selection-hint">已选择 {{ selectedPackages.length }} 个离线包</span>
+            <el-button
+              type="primary"
+              plain
+              :disabled="!selectedPackages.length || busyLocal"
+              :loading="importingPackages"
+              @click="handleImportPackages"
+            >
+              导入到本机 Docker
+            </el-button>
+            <el-button
+              type="danger"
+              plain
+              :disabled="!selectedPackages.length || busyLocal"
+              :loading="deletingPackages"
+              @click="handleDeletePackages"
+            >
+              删除选中离线包
+            </el-button>
+            <el-button :loading="loadingPackages" @click="loadPackages">
+              <el-icon><Refresh /></el-icon>
+              <span>刷新离线包</span>
+            </el-button>
+            <el-button @click="activeTab = 'images'">从镜像列表导出</el-button>
+          </div>
 
-      <div class="field-hint">
-        <template v-if="isRemote">
-          上传写入目标机 <code>{{ remoteImagesDir }}</code>；导入执行 <code>docker load</code>。
-          删除只移除镜像包文件，不影响已导入的 Docker 镜像。
-        </template>
-        <template v-else>
-          本地导入执行 <code>docker load</code>，不会复制或删除镜像包文件。
-        </template>
-      </div>
-    </div>
+          <el-alert
+            v-if="packagesError"
+            type="warning"
+            :closable="false"
+            show-icon
+            :title="packagesError"
+            class="error-alert"
+          />
+
+          <el-table
+            v-if="offlinePackages.length"
+            ref="packageTable"
+            :data="offlinePackages"
+            row-key="name"
+            size="small"
+            class="image-table"
+            @selection-change="handlePackageSelection"
+          >
+            <el-table-column type="selection" width="44" />
+            <el-table-column prop="name" label="离线包文件" min-width="260" />
+            <el-table-column label="对应镜像" min-width="300">
+              <template #default="{ row }">
+                <template v-if="row.imageRefs && row.imageRefs.length">
+                  <code v-for="image in row.imageRefs" :key="image" class="ref-line">{{ image }}</code>
+                </template>
+                <span v-else class="muted-text">未记录对应镜像</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="大小" width="110">
+              <template #default="{ row }">{{ formatSize(row.sizeBytes) }}</template>
+            </el-table-column>
+            <el-table-column label="修改时间" width="180">
+              <template #default="{ row }">{{ formatTime(row.modifiedMs) }}</template>
+            </el-table-column>
+          </el-table>
+
+          <div v-else-if="!packagesError" class="empty-state">
+            <span class="empty-title">
+              {{ loadingPackages ? '正在读取离线包' : offlineScan?.exists === false ? '离线包目录尚未创建' : '还没有离线包' }}
+            </span>
+            <span class="empty-hint">
+              {{ loadingPackages ? '请稍候' : '在镜像列表勾选镜像并导出，生成的 tar 包会出现在这里。' }}
+            </span>
+            <div v-if="!loadingPackages" class="empty-actions">
+              <el-button size="small" type="primary" @click="activeTab = 'images'">前往镜像列表</el-button>
+            </div>
+          </div>
+        </div>
+      </el-tab-pane>
+
+      <el-tab-pane v-if="isRemote" label="远程分发" name="remote">
+        <RemoteImageDistribution :connection="connection" />
+      </el-tab-pane>
+    </el-tabs>
 
     <div v-if="progress.length" class="card-surface progress-card">
-      <div class="card-title-bar">
-        <h3>执行进度</h3>
+      <div class="progress-head">
+        <span>执行进度</span>
         <span class="hint">{{ progressMessage }}</span>
       </div>
-      <el-progress :percentage="currentPercent" class="progress-bar" />
+      <el-progress :percentage="currentPercent" />
       <div class="progress-list">
         <div
-          v-for="(item, index) in progress.slice(-8)"
-          :key="`${item.file_name}-${index}`"
+          v-for="(item, index) in progress.slice(-6)"
+          :key="`${item.reference}-${index}`"
           class="progress-row"
         >
           <span class="progress-percent">{{ item.percent }}%</span>
@@ -251,24 +244,56 @@
       </div>
       <pre class="output-log">{{ resultLog }}</pre>
     </div>
+
+    <el-dialog v-model="pullDialogVisible" title="拉取镜像" width="560px" :close-on-click-modal="!pulling">
+      <el-form label-width="96px" @submit.prevent>
+        <el-form-item label="镜像地址" required>
+          <el-input
+            v-model="pullForm.reference"
+            placeholder="例如 registry.example.com/demo/app:1.0.0"
+            clearable
+            @keyup.enter="handlePull"
+          />
+        </el-form-item>
+        <el-form-item label="仓库用户名">
+          <el-input v-model="pullForm.username" placeholder="公开镜像可留空" autocomplete="off" clearable />
+        </el-form-item>
+        <el-form-item label="仓库密码">
+          <el-input
+            v-model="pullForm.password"
+            type="password"
+            show-password
+            placeholder="仅用于本次拉取，不会保存"
+            autocomplete="new-password"
+          />
+        </el-form-item>
+      </el-form>
+      <div class="dialog-hint">
+        镜像拉取到本机 Docker 后，可在镜像列表勾选并导出为离线包。
+      </div>
+      <template #footer>
+        <el-button :disabled="pulling" @click="closePullDialog">取消</el-button>
+        <el-button type="primary" :loading="pulling" @click="handlePull">开始拉取</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { FolderOpened, Refresh } from '@element-plus/icons-vue';
-import { open } from '@tauri-apps/plugin-dialog';
-import { listArtifactSources } from '../api/artifact.js';
+import { Download, Refresh } from '@element-plus/icons-vue';
+import RemoteImageDistribution from '../components/RemoteImageDistribution.vue';
 import {
-  importRemoteImageBundle,
-  inspectBundleLayout,
-  inspectRemoteImageBundle,
-  loadOfflineImages,
-  onImageManagerProgress,
-  removeRemoteImageFiles,
-  scanLocalImageBundle,
-  uploadRemoteImageBundle
+  exportLocalDockerImages,
+  getImageLibrarySettings,
+  importOfflinePackages,
+  listLocalDockerImages,
+  onImageLibraryProgress,
+  pullLocalDockerImage,
+  removeLocalDockerImages,
+  removeOfflinePackages,
+  scanOfflinePackages
 } from '../api/tauri.js';
 
 const props = defineProps({
@@ -278,173 +303,80 @@ const props = defineProps({
   }
 });
 
+const emit = defineEmits(['go-settings']);
+
 const isRemote = computed(() => props.connection.mode === 'remote');
-const mediaRoot = computed(() =>
-  props.connection.mode === 'remote'
-    ? props.connection.mediaDir || props.connection.bundleDir
-    : props.connection.bundleDir || props.connection.mediaDir
-);
-const localDir = ref(
-  props.connection.mode === 'remote'
-    ? mediaRoot.value || readSavedLocalDir()
-    : mediaRoot.value || readSavedLocalDir()
-);
-const localScan = ref(null);
-const localLayout = ref(null);
-const localDirMissing = ref(false);
-const remote = ref(null);
-const remoteError = ref('');
-const remoteDirPath = ref(
-  String(props.connection.remoteBundleDir || '').trim() ||
-    `${String(props.connection.deployDir || '/opt/deploy').replace(/\/+$/, '')}/bundle`
-);
-const selectedRemoteFiles = ref([]);
+const activeTab = ref('images');
+const dockerImages = ref([]);
+const offlineScan = ref(null);
+const offlineDir = ref('');
+const imagesError = ref('');
+const packagesError = ref('');
+const loadingImages = ref(false);
+const loadingPackages = ref(false);
+const loadingSettings = ref(false);
+const exporting = ref(false);
+const deletingImages = ref(false);
+const deletingPackages = ref(false);
+const importingPackages = ref(false);
+const pulling = ref(false);
+const imageSelection = ref([]);
+const packageSelection = ref([]);
 const progress = ref([]);
 const resultLog = ref('');
 const resultTitle = ref('');
-const scanning = ref(false);
-const inspecting = ref(false);
-const findingBundle = ref(false);
-const uploading = ref(false);
-const importing = ref(false);
+const pullDialogVisible = ref(false);
+const imageTable = ref(null);
+const packageTable = ref(null);
+const pullForm = reactive({
+  reference: '',
+  username: '',
+  password: ''
+});
 let unlistenProgress = null;
 
-const busy = computed(() => scanning.value || inspecting.value || uploading.value || importing.value);
-
-const localState = computed(() => {
-  const scan = localScan.value;
-  if (!scan) {
-    return {
-      kind: 'idle',
-      tag: '',
-      tagType: 'info',
-      summary: '点击“扫描本地镜像包”读取目录内容',
-      showPath: false
-    };
-  }
-  if (scan.exists) {
-    if (scan.files?.length) {
-      return {
-        kind: 'ready',
-        tag: '目录就绪',
-        tagType: 'success',
-        summary: scan.message,
-        showPath: true
-      };
-    }
-    return {
-      kind: 'empty-images',
-      tag: '暂无镜像包',
-      tagType: 'warning',
-      title: '镜像目录为空',
-      hint: `目录 ${scan.images_dir} 中没有 .tar 镜像包，请放入镜像包或重新选择目录。`,
-      summary: '目录中没有 .tar 文件',
-      showPath: true
-    };
-  }
-  if (localLayout.value?.mode === 'file') {
-    return {
-      kind: 'file-mode',
-      tag: '文件模式',
-      tagType: 'info',
-      title: '当前为文件模式交付包',
-      hint: '该交付包只包含 app/ 与 deploy/，不包含 images 镜像包，无需导入镜像。如需镜像部署，请选择镜像模式交付包。',
-      summary: '该交付包无需镜像包',
-      showPath: false
-    };
-  }
-  if (localDirMissing.value) {
-    return {
-      kind: 'missing-dir',
-      tag: '目录不存在',
-      tagType: 'warning',
-      title: '本地交付包目录不存在',
-      hint: `未在本机找到 ${localDir.value.trim()}。请在制品中心下载交付包并设为当前部署包，或手动选择目录。`,
-      summary: '未在本机找到该目录',
-      showPath: false
-    };
-  }
-  return {
-    kind: 'missing-images',
-    tag: '缺少镜像包',
-    tagType: 'warning',
-    title: '未找到 images 镜像包',
-    hint: '该交付包没有 images/*.tar 镜像包，请选择镜像模式交付包或包含镜像包的目录。',
-    summary: '未找到 images/*.tar',
-    showPath: false
-  };
-});
-
-const remoteImagesDir = computed(() =>
-  `${String(remoteDirPath.value || '').replace(/\/+$/, '')}/images`
+const refreshing = computed(
+  () => loadingImages.value || loadingPackages.value || loadingSettings.value
 );
-
-const remoteRows = computed(() => {
-  if (!remote.value) {
-    return [];
+const busyLocal = computed(
+  () =>
+    exporting.value ||
+    deletingImages.value ||
+    deletingPackages.value ||
+    importingPackages.value ||
+    pulling.value
+);
+const selectedImages = computed(() => imageSelection.value);
+const selectedPackages = computed(() => packageSelection.value);
+const offlinePackages = computed(() => offlineScan.value?.files || []);
+const totalImageBytes = computed(() =>
+  dockerImages.value.reduce((sum, image) => sum + (Number(image.sizeBytes) || 0), 0)
+);
+const imageSummary = computed(() => {
+  if (loadingImages.value && !dockerImages.value.length) {
+    return '正在读取';
   }
-  const rows = [];
-  const knownNames = new Set();
-  for (const expectation of remote.value.expectations || []) {
-    const file = remote.value.files.find((item) => item.name === expectation.file_name);
-    rows.push({
-      name: expectation.file_name,
-      image_ref: expectation.image_ref,
-      known: true,
-      present: Boolean(file),
-      size_bytes: file ? file.size_bytes : 0,
-      modified_ms: file ? file.modified_ms : 0,
-      loaded: remote.value.docker_images.includes(expectation.image_ref)
-    });
-    knownNames.add(expectation.file_name);
-  }
-  for (const file of remote.value.files) {
-    if (knownNames.has(file.name)) {
-      continue;
-    }
-    rows.push({
-      name: file.name,
-      image_ref: file.image_ref || '未识别文件名',
-      known: false,
-      present: true,
-      size_bytes: file.size_bytes,
-      modified_ms: file.modified_ms,
-      loaded: false
-    });
-  }
-  return rows;
+  return `${dockerImages.value.length} 个镜像 · 共 ${formatSize(totalImageBytes.value)}`;
 });
-
+const packageSummary = computed(() => {
+  if (!offlineScan.value) {
+    return loadingPackages.value ? '正在读取' : '未读取';
+  }
+  return `${offlinePackages.value.length} 个文件 · 共 ${formatSize(offlineScan.value.totalBytes)}`;
+});
 const currentPercent = computed(() => {
   if (!progress.value.length) {
     return 0;
   }
   return progress.value[progress.value.length - 1].percent;
 });
-
 const progressMessage = computed(() => {
   if (!progress.value.length) {
     return '';
   }
   const last = progress.value[progress.value.length - 1];
-  return `${last.current} / ${last.total} · ${last.file_name}`;
+  return `${last.current} / ${last.total} · ${last.reference}`;
 });
-
-const canUpload = computed(
-  () => isRemote.value && localScan.value?.files?.length > 0 && !busy.value
-);
-const canImport = computed(
-  () =>
-    isRemote.value &&
-    remoteRows.value.some((row) => row.present) &&
-    !busy.value &&
-    remote.value?.docker_running
-);
-const canDelete = computed(() => selectedRemoteFiles.value.length > 0);
-const canLocalImport = computed(() => !isRemote.value && localScan.value?.files?.length > 0 && !busy.value);
-const canUseDownloadedBundle = computed(() =>
-  ['missing-dir', 'missing-images'].includes(localState.value.kind)
-);
 
 const formatSize = (bytes) => {
   const value = Number(bytes) || 0;
@@ -472,338 +404,306 @@ const formatTime = (ms) => {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 };
 
-const remoteFileFor = (name) => remote.value?.files?.find((file) => file.name === name);
-
-const localRowText = (row) => {
-  const file = remoteFileFor(row.name);
-  if (!file) {
-    return '未上传';
-  }
-  if (file.size_bytes === row.size_bytes) {
-    return '已上传';
-  }
-  return '大小不一致';
+const shortId = (id) => {
+  const value = String(id || '').replace(/^sha256:/, '');
+  return value ? value.slice(0, 12) : '-';
 };
 
-const localRowClass = (row) => {
-  const file = remoteFileFor(row.name);
-  if (!file) {
-    return 'state-missing';
-  }
-  return file.size_bytes === row.size_bytes ? 'state-ok' : 'state-warn';
-};
+const imageLabel = (image) =>
+  image.exportable ? image.reference : `未标记镜像（${shortId(image.id)}）`;
 
-const isRowSelectable = (row) => row.present && row.known;
-
-const handleRemoteSelection = (rows) => {
-  selectedRemoteFiles.value = rows.map((row) => row.name);
-};
-
-const inspectLocalLayout = async (dir) => {
-  localLayout.value = null;
-  localDirMissing.value = false;
+const loadSettings = async () => {
+  loadingSettings.value = true;
   try {
-    localLayout.value = await inspectBundleLayout(dir);
-  } catch {
-    localDirMissing.value = true;
-  }
-};
-
-const scanLocal = async ({ silent = false } = {}) => {
-  const dir = localDir.value.trim();
-  if (!dir) {
-    ElMessage.warning('请先选择本地镜像包目录');
-    return;
-  }
-  scanning.value = true;
-  try {
-    localScan.value = await scanLocalImageBundle(dir);
-    if (!silent) {
-      saveLocalDir(dir);
-    }
-    if (localScan.value.exists) {
-      localLayout.value = null;
-      localDirMissing.value = false;
-    } else {
-      await inspectLocalLayout(dir);
-    }
-    if (!silent) {
-      if (localState.value.kind === 'ready') {
-        ElMessage.success(`找到 ${localScan.value.files.length} 个镜像包文件`);
-      } else if (localState.value.kind === 'file-mode') {
-        ElMessage.info(localState.value.summary);
-      } else {
-        ElMessage.warning(localState.value.title || localState.value.summary);
-      }
-    }
-  } catch (e) {
-    localScan.value = null;
-    localLayout.value = null;
-    localDirMissing.value = false;
-    ElMessage.error(`扫描本地镜像包失败: ${e}`);
+    const settings = await getImageLibrarySettings();
+    offlineDir.value = settings.offlineDir || '';
+  } catch (error) {
+    ElMessage.error(String(error));
   } finally {
-    scanning.value = false;
+    loadingSettings.value = false;
   }
 };
 
-function readSavedLocalDir() {
+const loadImages = async () => {
+  loadingImages.value = true;
+  imagesError.value = '';
   try {
-    return localStorage.getItem('image-local-dir') || '';
-  } catch {
-    return '';
-  }
-}
-
-function saveLocalDir(dir) {
-  try {
-    localStorage.setItem('image-local-dir', dir);
-  } catch {}
-}
-
-const pickLocalDir = async () => {
-  try {
-    const selected = await open({
-      directory: true,
-      multiple: false,
-      title: '选择离线镜像包目录'
-    });
-    if (typeof selected === 'string' && selected) {
-      localDir.value = selected;
-      await scanLocal();
-    }
-  } catch (e) {
-    ElMessage.error(`选择目录失败: ${e}`);
-  }
-};
-
-const useDownloadedBundle = async () => {
-  findingBundle.value = true;
-  try {
-    const sources = await listArtifactSources();
-    const candidates = [
-      ...new Set(
-        sources
-          .map((source) => String(source.lastBundleDir || '').trim())
-          .filter(Boolean)
-      )
-    ];
-    for (const dir of candidates) {
-      if (dir === localDir.value.trim()) {
-        continue;
-      }
-      try {
-        await inspectBundleLayout(dir);
-      } catch {
-        continue;
-      }
-      localDir.value = dir;
-      saveLocalDir(dir);
-      await scanLocal({ silent: true });
-      ElMessage.success(`已切换到本地交付包 ${dir}`);
-      return;
-    }
-    ElMessage.warning('没有可用的本地交付包，请先在制品中心下载');
-  } catch (e) {
-    ElMessage.error(`读取本地交付包失败: ${e}`);
+    dockerImages.value = await listLocalDockerImages();
+    imageSelection.value = [];
+    imageTable.value?.clearSelection?.();
+  } catch (error) {
+    dockerImages.value = [];
+    imageSelection.value = [];
+    imagesError.value = String(error);
   } finally {
-    findingBundle.value = false;
+    loadingImages.value = false;
   }
 };
 
-const inspectRemote = async ({ silent = false } = {}) => {
-  if (!isRemote.value) {
-    return;
-  }
-  const host = String(props.connection.remoteHost || '').trim();
-  if (!host) {
-    remote.value = null;
-    remoteError.value = '';
-    if (!silent) {
-      ElMessage.warning('请先在设置中填写目标机地址');
-    }
-    return;
-  }
-  inspecting.value = true;
-  remoteError.value = '';
+const loadPackages = async () => {
+  loadingPackages.value = true;
+  packagesError.value = '';
   try {
-    remote.value = await inspectRemoteImageBundle(
-      host,
-      props.connection.remotePort,
-      props.connection.remoteUser,
-      props.connection.remoteKey || null,
-      remoteDirPath.value
-    );
-    selectedRemoteFiles.value = [];
-  } catch (e) {
-    remote.value = null;
-    remoteError.value = String(e);
-    if (!silent) {
-      ElMessage.error(`检测目标机镜像包失败: ${e}`);
+    offlineScan.value = await scanOfflinePackages();
+    if (offlineScan.value?.offlineDir) {
+      offlineDir.value = offlineScan.value.offlineDir;
     }
+    packageSelection.value = [];
+    packageTable.value?.clearSelection?.();
+  } catch (error) {
+    offlineScan.value = null;
+    packageSelection.value = [];
+    packagesError.value = String(error);
   } finally {
-    inspecting.value = false;
+    loadingPackages.value = false;
   }
 };
 
-const uploadFileList = computed(() => {
-  if (!localScan.value?.files?.length) {
-    return [];
-  }
-  return localScan.value.files
-    .filter((file) => remoteFileFor(file.name)?.size_bytes !== file.size_bytes)
-    .map((file) => file.name);
-});
+const refreshAll = async () => {
+  await Promise.all([loadSettings(), loadImages(), loadPackages()]);
+};
 
-const handleUpload = async (overwrite) => {
-  const files = overwrite
-    ? localScan.value.files.map((file) => file.name)
-    : uploadFileList.value;
-  if (!files.length) {
-    ElMessage.info('目标机已存在全部镜像包，无需上传');
+const handleTabChange = (name) => {
+  if (name === 'images') {
+    loadImages();
+  } else if (name === 'packages') {
+    loadPackages();
+  }
+};
+
+const handleImageSelection = (rows) => {
+  imageSelection.value = rows;
+};
+
+const handlePackageSelection = (rows) => {
+  packageSelection.value = rows;
+};
+
+const openPullDialog = () => {
+  pullForm.reference = '';
+  pullForm.username = '';
+  pullForm.password = '';
+  pullDialogVisible.value = true;
+};
+
+const closePullDialog = () => {
+  if (pulling.value) {
     return;
   }
-  if (overwrite) {
-    try {
-      await ElMessageBox.confirm(
-        `将覆盖目标机 ${remoteImagesDir.value} 中同名镜像包，共 ${files.length} 个文件。是否继续？`,
-        '确认覆盖上传',
-        { confirmButtonText: '开始上传', cancelButtonText: '取消', type: 'warning' }
-      );
-    } catch {
-      return;
-    }
-  }
+  pullDialogVisible.value = false;
+  pullForm.password = '';
+};
 
-  uploading.value = true;
-  resultLog.value = '';
+const handlePull = async () => {
+  if (pulling.value) {
+    return;
+  }
+  const reference = pullForm.reference.trim();
+  if (!reference) {
+    ElMessage.warning('请填写要拉取的镜像地址');
+    return;
+  }
+  pulling.value = true;
   progress.value = [];
-  try {
-    const messages = await uploadRemoteImageBundle(
-      props.connection.remoteHost,
-      props.connection.remotePort,
-      props.connection.remoteUser,
-      props.connection.remoteKey || null,
-      localDir.value.trim(),
-      remoteDirPath.value,
-      files,
-      overwrite
-    );
-    resultLog.value = messages.join('\n');
-    resultTitle.value = `已上传 ${files.length} 个文件`;
-    ElMessage.success('镜像包上传完成');
-    await inspectRemote();
-  } catch (e) {
-    resultLog.value = String(e);
-    resultTitle.value = '上传失败';
-    ElMessage.error('镜像包上传失败');
-  } finally {
-    uploading.value = false;
-  }
-};
-
-const applyImport = async (files) => {
-  importing.value = true;
   resultLog.value = '';
-  progress.value = [];
   try {
-    const loaded = await importRemoteImageBundle(
-      props.connection.remoteHost,
-      props.connection.remotePort,
-      props.connection.remoteUser,
-      props.connection.remoteKey || null,
-      remoteDirPath.value,
-      files
+    const output = await pullLocalDockerImage(
+      reference,
+      pullForm.username.trim() || null,
+      pullForm.password || null
     );
-    resultLog.value = loaded.join('\n');
-    resultTitle.value = `已导入 ${files.length} 个镜像`;
-    ElMessage.success('镜像导入完成');
-    await inspectRemote();
-  } catch (e) {
-    resultLog.value = String(e);
-    resultTitle.value = '导入失败';
-    ElMessage.error('镜像导入失败');
+    resultLog.value = output;
+    resultTitle.value = `已拉取 ${reference}`;
+    ElMessage.success('镜像拉取完成');
+    pullDialogVisible.value = false;
+    pullForm.password = '';
+    await loadImages();
+  } catch (error) {
+    resultLog.value = String(error);
+    resultTitle.value = '镜像拉取失败';
+    ElMessage.error('镜像拉取失败');
   } finally {
-    importing.value = false;
+    pulling.value = false;
   }
 };
 
-const handleImport = async (reloadAll) => {
-  const files = remoteRows.value
-    .filter((row) => row.present && (reloadAll || !row.loaded))
-    .map((row) => row.name);
-  if (!files.length) {
-    ElMessage.info('没有需要导入的镜像');
+const handleExport = async () => {
+  if (!selectedImages.value.length) {
     return;
   }
-  await applyImport(files);
-};
-
-const handleLocalImport = async () => {
-  importing.value = true;
-  resultLog.value = '';
-  progress.value = [];
-  try {
-    const loaded = await loadOfflineImages(localDir.value.trim());
-    resultLog.value = loaded.join('\n');
-    resultTitle.value = `已导入 ${loaded.length} 个镜像`;
-    ElMessage.success('本地镜像导入完成');
-  } catch (e) {
-    resultLog.value = String(e);
-    resultTitle.value = '导入失败';
-    ElMessage.error('本地镜像导入失败');
-  } finally {
-    importing.value = false;
-  }
-};
-
-const handleDelete = async () => {
-  const files = [...selectedRemoteFiles.value];
-  if (!files.length) {
+  const blocked = selectedImages.value.filter((image) => !image.exportable);
+  if (blocked.length) {
+    ElMessage.warning('未标记镜像无法导出，请先为镜像添加标签');
     return;
   }
+  const references = selectedImages.value.map((image) => image.reference);
+  exporting.value = true;
+  progress.value = [];
+  resultLog.value = '';
+  try {
+    const results = await exportLocalDockerImages(references);
+    const succeeded = results.filter((item) => item.success);
+    const failed = results.filter((item) => !item.success);
+    resultLog.value = results
+      .map((item) => `${item.success ? '[成功]' : '[失败]'} ${item.reference}：${item.message}`)
+      .join('\n');
+    resultTitle.value = `导出完成：成功 ${succeeded.length} 个，失败 ${failed.length} 个`;
+    if (succeeded.length) {
+      ElMessage.success(`已导出 ${succeeded.length} 个离线包`);
+      await loadPackages();
+      activeTab.value = 'packages';
+    }
+    if (failed.length) {
+      ElMessage.warning(`有 ${failed.length} 个镜像导出失败，请查看执行结果`);
+    }
+  } catch (error) {
+    resultLog.value = String(error);
+    resultTitle.value = '导出失败';
+    ElMessage.error('导出离线包失败');
+  } finally {
+    exporting.value = false;
+  }
+};
+
+const handleDeleteImages = async () => {
+  if (!selectedImages.value.length) {
+    return;
+  }
+  const images = [...selectedImages.value];
+  const names = images.slice(0, 5).map(imageLabel).join('、');
+  const more = images.length > 5 ? ` 等 ${images.length} 个镜像` : '';
   try {
     await ElMessageBox.confirm(
-      `将从目标机删除 ${files.length} 个镜像包文件（${files.join('、')}）。已导入的 Docker 镜像不受影响，但之后需要重新上传才能再次导入。是否继续？`,
-      '确认删除镜像包',
+      `将从本机 Docker 删除以下镜像：${names}${more}。\n\n如果镜像仍被容器使用，删除会失败。此操作不可撤销，是否继续？`,
+      '确认删除镜像',
       { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' }
     );
   } catch {
     return;
   }
+
+  const references = images.map((image) => image.reference);
+  deletingImages.value = true;
+  progress.value = [];
+  resultLog.value = '';
   try {
-    resultLog.value = await removeRemoteImageFiles(
-      props.connection.remoteHost,
-      props.connection.remotePort,
-      props.connection.remoteUser,
-      props.connection.remoteKey || null,
-      remoteDirPath.value,
-      files
-    );
-    resultTitle.value = '删除完成';
-    ElMessage.success('已删除目标机镜像包');
-    await inspectRemote();
-  } catch (e) {
-    resultLog.value = String(e);
-    resultTitle.value = '删除失败';
-    ElMessage.error('删除目标机镜像包失败');
+    const results = await removeLocalDockerImages(references);
+    const succeeded = results.filter((item) => item.success);
+    const failed = results.filter((item) => !item.success);
+    resultLog.value = results
+      .map((item) => `${item.success ? '[成功]' : '[失败]'} ${item.target}：${item.message}`)
+      .join('\n');
+    resultTitle.value = `删除完成：成功 ${succeeded.length} 个，失败 ${failed.length} 个`;
+    if (failed.length) {
+      ElMessage.warning(`有 ${failed.length} 个镜像未能删除，请查看执行结果`);
+    } else {
+      ElMessage.success(`已删除 ${succeeded.length} 个镜像`);
+    }
+    await loadImages();
+  } catch (error) {
+    resultLog.value = String(error);
+    resultTitle.value = '删除镜像失败';
+    ElMessage.error('删除镜像失败');
+  } finally {
+    deletingImages.value = false;
   }
 };
 
+const handleDeletePackages = async () => {
+  if (!selectedPackages.value.length) {
+    return;
+  }
+  const files = selectedPackages.value.map((file) => file.name);
+  const names = files.slice(0, 6).join('、');
+  const more = files.length > 6 ? ` 等 ${files.length} 个文件` : '';
+  try {
+    await ElMessageBox.confirm(
+      `将从 ${offlineScan.value?.offlineDir || offlineDir.value} 删除以下离线包：${names}${more}。\n\n只删除离线包文件，不影响本机 Docker 镜像。是否继续？`,
+      '确认删除离线包',
+      { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' }
+    );
+  } catch {
+    return;
+  }
+
+  deletingPackages.value = true;
+  progress.value = [];
+  resultLog.value = '';
+  try {
+    const results = await removeOfflinePackages(files);
+    const succeeded = results.filter((item) => item.success);
+    const failed = results.filter((item) => !item.success);
+    resultLog.value = results
+      .map((item) => `${item.success ? '[成功]' : '[失败]'} ${item.target}：${item.message}`)
+      .join('\n');
+    resultTitle.value = `删除完成：成功 ${succeeded.length} 个，失败 ${failed.length} 个`;
+    if (failed.length) {
+      ElMessage.warning(`有 ${failed.length} 个离线包未能删除，请查看执行结果`);
+    } else {
+      ElMessage.success(`已删除 ${succeeded.length} 个离线包`);
+    }
+    await loadPackages();
+  } catch (error) {
+    resultLog.value = String(error);
+    resultTitle.value = '删除离线包失败';
+    ElMessage.error('删除离线包失败');
+  } finally {
+    deletingPackages.value = false;
+  }
+};
+
+const handleImportPackages = async () => {
+  if (!selectedPackages.value.length) {
+    return;
+  }
+  const files = selectedPackages.value.map((file) => file.name);
+  const names = files.slice(0, 6).join('、');
+  const more = files.length > 6 ? ` 等 ${files.length} 个文件` : '';
+  try {
+    await ElMessageBox.confirm(
+      `将把以下离线包导入本机 Docker：${names}${more}。\n\n导入只读取离线包，不会删除文件。是否继续？`,
+      '确认导入镜像',
+      { confirmButtonText: '导入', cancelButtonText: '取消', type: 'info' }
+    );
+  } catch {
+    return;
+  }
+
+  importingPackages.value = true;
+  progress.value = [];
+  resultLog.value = '';
+  try {
+    const results = await importOfflinePackages(files);
+    const succeeded = results.filter((item) => item.success);
+    const failed = results.filter((item) => !item.success);
+    resultLog.value = results
+      .map((item) => `${item.success ? '[成功]' : '[失败]'} ${item.target}：${item.message}`)
+      .join('\n');
+    resultTitle.value = `导入完成：成功 ${succeeded.length} 个，失败 ${failed.length} 个`;
+    if (failed.length) {
+      ElMessage.warning(`有 ${failed.length} 个离线包未能导入，请查看执行结果`);
+    } else {
+      ElMessage.success(`已导入 ${succeeded.length} 个离线包`);
+    }
+    await loadImages();
+  } catch (error) {
+    resultLog.value = String(error);
+    resultTitle.value = '导入离线包失败';
+    ElMessage.error('导入离线包失败');
+  } finally {
+    importingPackages.value = false;
+  }
+};
+
+const goSettings = () => {
+  emit('go-settings');
+};
+
 onMounted(async () => {
-  unlistenProgress = await onImageManagerProgress((payload) => {
+  unlistenProgress = await onImageLibraryProgress((payload) => {
     progress.value.push(payload);
   });
-  if (localDir.value.trim()) {
-    await scanLocal({ silent: true });
-    const saved = readSavedLocalDir().trim();
-    if (localState.value.kind === 'missing-dir' && saved && saved !== localDir.value.trim()) {
-      localDir.value = saved;
-      await scanLocal({ silent: true });
-    }
-  }
-  if (isRemote.value) {
-    await inspectRemote({ silent: true });
-  }
+  await refreshAll();
 });
 
 onUnmounted(() => {
@@ -814,20 +714,26 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.image-card,
-.action-card,
-.progress-card,
-.result-card {
+.image-tabs {
+  height: 100%;
+}
+
+.image-tabs :deep(.el-tabs__header) {
+  margin-bottom: 18px;
+}
+
+.image-tabs :deep(.el-tabs__content) {
+  overflow: visible;
+}
+
+.image-card {
   padding: 20px;
   margin-bottom: 18px;
 }
 
-.mode-alert {
-  margin-bottom: 20px;
-}
-
-.remote-alert {
-  margin-bottom: 12px;
+.result-card {
+  padding: 20px;
+  margin-bottom: 18px;
 }
 
 .header-actions {
@@ -856,41 +762,73 @@ onUnmounted(() => {
   color: var(--text-muted);
 }
 
-.field-hint {
-  width: 100%;
-  margin-top: 6px;
-  font-size: 11px;
-  line-height: 1.55;
-  color: var(--text-muted);
-}
-
-.dir-input-row {
-  display: flex;
-  gap: 10px;
-  width: 100%;
-}
-
-.summary-row {
+.toolbar-row,
+.selection-row,
+.dir-row {
   display: flex;
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+.toolbar-row {
   margin-bottom: 12px;
 }
 
-.summary-text {
+.selection-row {
+  padding: 10px 12px;
+  margin-bottom: 14px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: #fbfcfe;
+}
+
+.selection-hint {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-right: 4px;
+}
+
+.dir-row {
+  margin-bottom: 14px;
+}
+
+.dir-label {
   font-size: 12px;
   color: var(--text-secondary);
 }
 
 .path-text {
   font-size: 11px;
-  padding: 2px 8px;
+  padding: 3px 8px;
   border-radius: 6px;
   color: var(--primary-color);
   background: rgba(66, 133, 244, 0.08);
   font-family: "SFMono-Regular", Menlo, Consolas, monospace;
   overflow-wrap: anywhere;
+}
+
+.inline-hint {
+  width: auto;
+  margin-top: 0;
+}
+
+.field-hint {
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--text-muted);
+}
+
+.error-alert {
+  margin-bottom: 14px;
+}
+
+.error-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 6px;
+  font-size: 12px;
 }
 
 .image-table {
@@ -904,51 +842,22 @@ onUnmounted(() => {
   font-family: "SFMono-Regular", Menlo, Consolas, monospace;
 }
 
+.image-table :deep(.muted-code) {
+  color: var(--text-muted);
+}
+
+.ref-line {
+  display: block;
+  line-height: 1.7;
+}
+
 .muted-text {
   color: var(--text-muted);
   font-size: 12px;
 }
 
-.state-ok {
-  color: var(--success-color);
-  font-size: 12px;
-}
-
-.state-warn {
-  color: var(--warning-color);
-  font-size: 12px;
-}
-
-.state-missing {
-  color: var(--text-muted);
-  font-size: 12px;
-}
-
-.issue-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: 12px;
-}
-
-.issue-chip {
-  font-size: 11px;
-  padding: 3px 8px;
-  border-radius: 999px;
-  color: var(--warning-color);
-  background: rgba(242, 196, 109, 0.1);
-  border: 1px solid rgba(242, 196, 109, 0.22);
-}
-
-.action-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
 .empty-state {
-  min-height: 120px;
+  min-height: 160px;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -980,14 +889,26 @@ onUnmounted(() => {
   justify-content: center;
 }
 
-.progress-bar {
-  margin-bottom: 12px;
+.progress-card {
+  padding: 20px;
+  margin-bottom: 18px;
+}
+
+.progress-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
 }
 
 .progress-list {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  margin-top: 10px;
 }
 
 .progress-row {
@@ -1009,8 +930,17 @@ onUnmounted(() => {
   overflow-wrap: anywhere;
 }
 
+.dialog-hint {
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: #f7f9fc;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
 .output-log {
-  max-height: 240px;
+  max-height: 260px;
   overflow: auto;
   margin: 0;
   padding: 12px;

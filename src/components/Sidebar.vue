@@ -74,7 +74,7 @@ const navGroups = [
     label: '资源',
     items: [
       { key: 'artifacts', icon: Box, title: '制品中心' },
-      { key: 'images', icon: Files, title: '镜像包管理' }
+      { key: 'images', icon: Files, title: '镜像与离线包' }
     ]
   },
   {

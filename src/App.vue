@@ -47,6 +47,7 @@
         <ImageManager
           v-else-if="currentTab === 'images'"
           :connection="connection"
+          @go-settings="currentTab = 'settings'"
         />
 
         <RegistryCenter
@@ -58,6 +59,7 @@
           v-else-if="currentTab === 'settings'"
           :connection="connection"
           @go-artifacts="currentTab = 'artifacts'"
+          @go-images="currentTab = 'images'"
         />
 
         <LogViewer
@@ -93,7 +95,7 @@ const pages = {
   update: { title: '服务更新', group: '运行' },
   logs: { title: '日志诊断', group: '运行' },
   artifacts: { title: '制品中心', group: '资源' },
-  images: { title: '镜像包管理', group: '资源' },
+  images: { title: '镜像与离线包', group: '资源' },
   registry: { title: '镜像仓库', group: '高级' },
   settings: { title: '设置', group: '高级' }
 };

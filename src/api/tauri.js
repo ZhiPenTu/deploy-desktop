@@ -164,6 +164,161 @@ export async function removeRemoteImageFiles(host, port, user, keyPath, remoteBu
   });
 }
 
+const MOCK_OFFLINE_DIR = "/Users/demo/Documents/离线部署助手/离线镜像包";
+
+const MOCK_LOCAL_DOCKER_IMAGES = [
+  {
+    reference: "bitnamilegacy/kafka:4.0",
+    repository: "bitnamilegacy/kafka",
+    tag: "4.0",
+    id: "sha256:6f2f1f9d0d1a4e2a8a3b1b7c2d4e5f60718293a4b5c6d7e8f90123456789abcd",
+    digest: "sha256:6f2f1f9d0d1a4e2a8a3b1b7c2d4e5f60718293a4b5c6d7e8f90123456789abcd",
+    sizeBytes: 512000000,
+    sizeText: "512MB",
+    createdText: "2026-10-18 09:20:00 +0800 CST",
+    exportable: true
+  },
+  {
+    reference: "tt-net-manager-frontend:dev",
+    repository: "tt-net-manager-frontend",
+    tag: "dev",
+    id: "sha256:1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809",
+    digest: "sha256:1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809",
+    sizeBytes: 48000000,
+    sizeText: "48MB",
+    createdText: "2026-10-19 14:05:00 +0800 CST",
+    exportable: true
+  },
+  {
+    reference: "oceanbase/oceanbase-ce:4.4.2-lts",
+    repository: "oceanbase/oceanbase-ce",
+    tag: "4.4.2-lts",
+    id: "sha256:9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0",
+    digest: "sha256:9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0",
+    sizeBytes: 1890000000,
+    sizeText: "1.89GB",
+    createdText: "2026-10-17 18:30:00 +0800 CST",
+    exportable: true
+  },
+  {
+    reference: "sha256:2c3d4e5f60718293a4b5c6d7e8f90123456789abcdef0123456789abcdef0123",
+    repository: "<none>",
+    tag: "<none>",
+    id: "sha256:2c3d4e5f60718293a4b5c6d7e8f90123456789abcdef0123456789abcdef0123",
+    digest: "",
+    sizeBytes: 0,
+    sizeText: "0B",
+    createdText: "2026-10-16 08:15:00 +0800 CST",
+    exportable: false
+  }
+];
+
+const MOCK_OFFLINE_PACKAGES = [
+  {
+    name: "bitnamilegacy_kafka_4.0.tar",
+    sizeBytes: 512000000,
+    modifiedMs: 1792372800000,
+    imageRefs: ["bitnamilegacy/kafka:4.0"]
+  },
+  {
+    name: "tt-net-manager-frontend_dev.tar",
+    sizeBytes: 48000000,
+    modifiedMs: 1792389900000,
+    imageRefs: ["tt-net-manager-frontend:dev"]
+  }
+];
+
+export async function getImageLibrarySettings() {
+  if (!isTauri()) {
+    return { offlineDir: MOCK_OFFLINE_DIR, defaultDir: MOCK_OFFLINE_DIR };
+  }
+  return await invoke("get_image_library_settings");
+}
+
+export async function saveImageLibrarySettings(offlineDir) {
+  if (!isTauri()) {
+    return { offlineDir, defaultDir: MOCK_OFFLINE_DIR };
+  }
+  return await invoke("save_image_library_settings", { offlineDir });
+}
+
+export async function listLocalDockerImages() {
+  if (!isTauri()) {
+    return MOCK_LOCAL_DOCKER_IMAGES;
+  }
+  return await invoke("list_local_docker_images");
+}
+
+export async function pullLocalDockerImage(reference, username = null, password = null) {
+  if (!isTauri()) {
+    return `已拉取 ${reference} (模拟)`;
+  }
+  return await invoke("pull_local_docker_image", { reference, username, password });
+}
+
+export async function removeLocalDockerImages(references) {
+  if (!isTauri()) {
+    return references.map((reference) => ({
+      target: reference,
+      success: true,
+      message: "已删除 (模拟)"
+    }));
+  }
+  return await invoke("remove_local_docker_images", { references });
+}
+
+export async function exportLocalDockerImages(references) {
+  if (!isTauri()) {
+    return references.map((reference) => {
+      const fileName = `${reference.replace(/[^a-zA-Z0-9._-]/g, "_")}.tar`;
+      return {
+        reference,
+        fileName,
+        path: `${MOCK_OFFLINE_DIR}/${fileName}`,
+        sizeBytes: 320000000,
+        success: true,
+        message: `已导出 ${fileName} (模拟)`
+      };
+    });
+  }
+  return await invoke("export_local_docker_images", { references });
+}
+
+export async function importOfflinePackages(files) {
+  if (!isTauri()) {
+    return files.map((name) => ({
+      target: name,
+      success: true,
+      message: `${name}: Loaded image (模拟)`
+    }));
+  }
+  return await invoke("import_offline_packages", { files });
+}
+
+export async function scanOfflinePackages() {
+  if (!isTauri()) {
+    return {
+      offlineDir: MOCK_OFFLINE_DIR,
+      exists: true,
+      files: MOCK_OFFLINE_PACKAGES,
+      totalBytes: MOCK_OFFLINE_PACKAGES.reduce((sum, file) => sum + file.sizeBytes, 0)
+    };
+  }
+  return await invoke("scan_offline_packages");
+}
+
+export async function removeOfflinePackages(files) {
+  if (!isTauri()) {
+    return files.map((name) => ({ target: name, success: true, message: "已删除 (模拟)" }));
+  }
+  return await invoke("remove_offline_packages", { files });
+}
+
+export function onImageLibraryProgress(callback) {
+  if (!isTauri()) return () => {};
+  return listen("image-library-progress", (event) => callback(event.payload));
+}
+
 export async function getContainersStatus() {
   if (!isTauri()) {
     return MOCK_CONTAINERS;
