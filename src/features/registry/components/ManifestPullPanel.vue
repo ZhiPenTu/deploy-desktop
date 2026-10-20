@@ -1,22 +1,5 @@
 <template>
-  <div class="page-view registry-view">
-    <div class="page-header">
-      <div>
-        <h2 class="page-title">镜像仓库</h2>
-        <p class="page-subtitle">管理镜像源，按清单拉取指定版本的镜像并导出离线包</p>
-      </div>
-      <div class="header-actions">
-        <el-tag v-if="isRemote" type="primary" effect="plain">
-          远程 {{ connection.remoteHost || '未配置主机' }}
-        </el-tag>
-        <el-tag v-else type="info" effect="plain">本地部署</el-tag>
-        <el-button :loading="loading" :disabled="pulling" @click="loadManifest">
-          <el-icon><DocumentChecked /></el-icon>
-          <span>加载清单</span>
-        </el-button>
-      </div>
-    </div>
-
+  <div class="manifest-pull-panel">
     <el-alert
       :title="isRemote ? '镜像将拉取到当前目标机' : '镜像将拉取到本机 Docker'"
       description="可选择已保存的镜像源，或使用清单中的仓库地址。请确认镜像地址与拉取目标，镜像版本使用 sha256 摘要固定。"
@@ -52,6 +35,10 @@
               @keyup.enter="loadManifest"
             />
             <el-button @click="pickManifestFile">选择文件</el-button>
+            <el-button type="primary" :loading="loading" :disabled="pulling" @click="loadManifest">
+              <el-icon><DocumentChecked /></el-icon>
+              <span>加载清单</span>
+            </el-button>
           </div>
         </el-form-item>
       </el-form>
@@ -223,7 +210,7 @@ import { computed, nextTick, onMounted, ref } from 'vue';
 import { ElMessage } from 'element-plus';
 import { DocumentChecked, Download } from '@element-plus/icons-vue';
 import { selectLocalPath as open } from '../../../api/tauri.js';
-import RegistrySourceManager from '../components/RegistrySourceManager.vue';
+import RegistrySourceManager from './RegistrySourceManager.vue';
 import {
   loadImageManifest,
   onRegistryProgress,
@@ -463,14 +450,7 @@ onMounted(async () => {
 }
 
 .mode-alert {
-  margin-bottom: 20px;
-}
-
-.header-actions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
+  margin-bottom: 18px;
 }
 
 .card-title-bar {
