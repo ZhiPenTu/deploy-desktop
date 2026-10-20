@@ -48,7 +48,7 @@
             :disabled="controlsDisabled || !selectedSource.lastBundleDir"
             @click="chooseDownloaded"
           >
-            使用已下载包{{ selectedSource.lastVersion ? `（${selectedSource.lastVersion}）` : '' }}
+            使用已下载包{{ selectedSource.lastVersion && selectedSource.lastVersion !== 'manual' ? `（${selectedSource.lastVersion}）` : '' }}
           </el-button>
           <el-button
             :loading="operation === 'release'"
@@ -63,7 +63,7 @@
         <div v-if="release" class="release-summary">
           <div class="summary-line">
             <span class="summary-label">最新版本</span>
-            <strong>{{ release.version || '未标记版本' }}</strong>
+            <strong>{{ displayVersion(release.version) }}</strong>
             <el-tag v-if="release.commitShort" size="small" type="info" effect="plain">{{ release.commitShort }}</el-tag>
           </div>
           <p v-if="release.sizeBytes" class="field-hint">交付包大小：{{ formatSize(release.sizeBytes) }}</p>
@@ -112,7 +112,7 @@
           <span class="package-icon"><el-icon><Box /></el-icon></span>
           <div>
             <h4>{{ candidate.label }}</h4>
-            <p v-if="candidate.version" class="field-hint">版本：{{ candidate.version }}</p>
+            <p v-if="candidate.version" class="field-hint">版本：{{ displayVersion(candidate.version) }}</p>
             <p v-if="candidate.path" class="path-text">{{ candidate.path }}</p>
           </div>
         </div>
@@ -230,6 +230,10 @@ function formatSize(bytes) {
     unit += 1;
   }
   return `${size.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
+}
+
+function displayVersion(value) {
+  return value && value !== 'manual' ? value : '未标记版本';
 }
 
 function failureText(error, action) {
