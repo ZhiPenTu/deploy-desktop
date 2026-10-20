@@ -108,19 +108,10 @@
         </el-table>
       </div>
 
-      <div v-if="bundleDirText" class="plan-section">
+      <div v-if="bundleDirText && (planLoading || plan)" class="plan-section">
         <div v-if="planLoading" v-loading="true" class="plan-loading card-surface">
           <span>正在读取交付包内容</span>
         </div>
-
-        <el-alert
-          v-else-if="planError"
-          title="当前交付包目录不可读"
-          :description="planError"
-          type="warning"
-          :closable="false"
-          show-icon
-        />
 
         <BundlePlanPanel
           v-else-if="plan"
@@ -422,7 +413,6 @@ const bundle = ref(null);
 const progress = reactive({ percent: 0, stage: '' });
 const plan = ref(null);
 const planLoading = ref(false);
-const planError = ref('');
 const imageDir = ref(localStorage.getItem('image-local-dir') || '');
 let releaseRequestId = 0;
 
@@ -531,16 +521,13 @@ async function loadPlan() {
   const dir = bundleDirText.value;
   if (!dir) {
     plan.value = null;
-    planError.value = '';
     return;
   }
   planLoading.value = true;
-  planError.value = '';
   try {
     plan.value = await inspectBundlePlan(dir, remoteTarget.value);
   } catch (error) {
     plan.value = null;
-    planError.value = `读取交付包失败：${error}`;
   } finally {
     planLoading.value = false;
   }

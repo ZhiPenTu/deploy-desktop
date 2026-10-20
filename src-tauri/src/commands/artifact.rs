@@ -712,8 +712,7 @@ fn load_artifact_release_page(
     load_flow_release_page(config_root, source, &token, page.max(1))
 }
 
-#[tauri::command]
-pub fn list_artifact_releases(
+fn list_artifact_releases_blocking(
     app: AppHandle,
     id: String,
     page: Option<u32>,
@@ -725,6 +724,19 @@ pub fn list_artifact_releases(
         .find(|item| item.id == id)
         .ok_or_else(|| "制品源不存在".to_string())?;
     load_artifact_release_page(&config_root, source, page.unwrap_or(1))
+}
+
+#[tauri::command]
+pub async fn list_artifact_releases(
+    app: AppHandle,
+    id: String,
+    page: Option<u32>,
+) -> Result<ArtifactReleasePage, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        list_artifact_releases_blocking(app, id, page)
+    })
+    .await
+    .map_err(|error| format!("读取制品版本失败：{error}"))?
 }
 
 #[tauri::command]

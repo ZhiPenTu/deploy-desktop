@@ -200,8 +200,7 @@ struct BundleMeta {
 ///
 /// 传入 host 时按目标机查询镜像，否则只查本机；查询失败返回 image_check=unavailable，
 /// 由界面显示「未确认」，不把未知状态当成缺失。
-#[tauri::command]
-pub fn inspect_bundle_plan(
+pub fn inspect_bundle_plan_blocking(
     bundle_dir: String,
     host: Option<String>,
     port: Option<u16>,
@@ -334,6 +333,21 @@ pub fn inspect_bundle_plan(
         image_check,
         steps,
     })
+}
+
+#[tauri::command]
+pub async fn inspect_bundle_plan(
+    bundle_dir: String,
+    host: Option<String>,
+    port: Option<u16>,
+    user: Option<String>,
+    key_path: Option<String>,
+) -> Result<BundlePlan, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        inspect_bundle_plan_blocking(bundle_dir, host, port, user, key_path)
+    })
+    .await
+    .map_err(|error| format!("读取交付包失败：{error}"))?
 }
 
 fn check_label(image_check: &str) -> &'static str {
@@ -2586,7 +2600,13 @@ mod tests {
         );
         write(&bundle.join("bundle.json"), "{\"version\":\"42\",\"mode\":\"file\"}");
 
-        let plan = inspect_bundle_plan(bundle.to_string_lossy().to_string(), None, None, None, None)
+        let plan = inspect_bundle_plan_blocking(
+            bundle.to_string_lossy().to_string(),
+            None,
+            None,
+            None,
+            None,
+        )
             .unwrap();
 
         assert_eq!(plan.mode, "file");
