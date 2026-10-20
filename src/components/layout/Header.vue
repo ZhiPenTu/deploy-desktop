@@ -1,5 +1,5 @@
 <template>
-  <header class="app-header">
+  <header class="app-header" data-tauri-drag-region="deep">
     <div class="crumb">
       <span class="crumb-root">工作区</span>
       <span class="crumb-sep">/</span>
@@ -8,7 +8,7 @@
       <span class="crumb-current">{{ pageTitle }}</span>
     </div>
 
-    <div class="header-actions">
+    <div class="header-actions" data-tauri-drag-region="false">
       <div class="mode-chip" :class="isRemote ? 'remote' : 'local'">
         <span class="mode-indicator"></span>
         <div class="mode-copy">

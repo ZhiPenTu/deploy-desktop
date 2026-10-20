@@ -1,6 +1,7 @@
 <template>
   <aside class="app-sidebar">
-    <div class="brand-block">
+    <div class="sidebar-drag" data-tauri-drag-region></div>
+    <div class="brand-block" data-tauri-drag-region="deep">
       <span class="brand-mark">
         <el-icon :size="18"><Connection /></el-icon>
       </span>
@@ -114,12 +115,26 @@ const navGroups = [
   border-right: 1px solid rgba(15, 23, 42, 0.9);
 }
 
+.sidebar-drag {
+  display: none;
+  height: 34px;
+  flex: none;
+}
+
+.platform-macos .sidebar-drag {
+  display: block;
+}
+
 .brand-block {
   display: flex;
   align-items: center;
   gap: 11px;
   padding: 20px 18px 18px;
   border-bottom: 1px solid var(--sidebar-border);
+}
+
+.platform-macos .brand-block {
+  padding-top: 4px;
 }
 
 .brand-mark {

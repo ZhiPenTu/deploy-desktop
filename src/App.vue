@@ -1,5 +1,5 @@
 <template>
-  <div class="app-layout">
+  <div class="app-layout" :class="{ 'platform-macos': isMacDesktop }">
     <Sidebar :current-tab="currentTab" @update:tab="navigateTab" />
 
     <div class="workspace">
@@ -86,6 +86,7 @@
 <script setup>
 import { computed, ref } from 'vue';
 import { ElMessage } from 'element-plus';
+import { isDesktopApp } from './api/tauri.js';
 import { connection, connectionInventory, hostById } from './features/connections/state.js';
 import Header from './components/layout/Header.vue';
 import Sidebar from './components/layout/Sidebar.vue';
@@ -115,6 +116,7 @@ const pages = {
 };
 
 const currentTab = ref('wizard');
+const isMacDesktop = isDesktopApp() && /mac os x/i.test(navigator.userAgent);
 const wizardBusy = ref(false);
 const updateBusy = ref(false);
 const selectedStatusHostId = ref('');

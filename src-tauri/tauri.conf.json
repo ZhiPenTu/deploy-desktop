@@ -13,6 +13,8 @@
     "windows": [
       {
         "title": "离线部署助手",
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
         "width": 1180,
         "height": 820,
         "minWidth": 960,
