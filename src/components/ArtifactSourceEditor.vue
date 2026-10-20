@@ -62,7 +62,7 @@
 <script setup>
 import { computed, reactive, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
-import { saveArtifactSource } from '../api/artifact.js';
+import { saveArtifactSource } from '../api/tauri.js';
 
 const props = defineProps({
   modelValue: {

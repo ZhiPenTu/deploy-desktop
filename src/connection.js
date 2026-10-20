@@ -58,7 +58,7 @@ export function credentialLabel(id) {
   return `${credential.name} · ${credential.username}`;
 }
 
-export function applyManagedHostToConnection(host) {
+function applyManagedHostToConnection(host) {
   if (!host) return;
   connection.activeHostId = host.id;
   if (isLocalHost(host)) {

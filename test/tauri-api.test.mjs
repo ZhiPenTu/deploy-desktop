@@ -1,0 +1,98 @@
+import assert from 'node:assert/strict';
+import { webcrypto } from 'node:crypto';
+import { afterEach, beforeEach, test } from 'node:test';
+import { mockIPC, clearMocks } from '@tauri-apps/api/mocks';
+import { emit } from '@tauri-apps/api/event';
+import * as api from '../src/api/tauri.js';
+
+beforeEach(() => {
+  globalThis.window = { crypto: webcrypto };
+  globalThis.isTauri = false;
+});
+
+afterEach(() => {
+  clearMocks();
+  delete globalThis.window;
+  delete globalThis.isTauri;
+});
+
+test('browser preview starts with empty inventories and no deployment profile', async () => {
+  assert.equal(api.isDesktopApp(), false);
+  assert.equal(await api.getDeploymentProfile(), null);
+  assert.deepEqual(await api.listArtifactSources(), []);
+  assert.deepEqual(await api.listRegistrySources(), []);
+  assert.deepEqual(await api.listConnectionInventory(), { credentials: [], hosts: [], activeHostId: '' });
+});
+
+test('every desktop operation rejects in the browser instead of reporting simulated success', async () => {
+  const previewHelpers = new Set([
+    'isDesktopApp', 'getDeploymentProfile', 'listArtifactSources', 'listRegistrySources',
+    'listConnectionInventory', 'openArtifactRunUrl', 'onImageLibraryProgress',
+    'onImageManagerProgress', 'onRegistryProgress', 'onRemoteUpdateProgress'
+  ]);
+  for (const [name, operation] of Object.entries(api)) {
+    if (previewHelpers.has(name)) continue;
+    await assert.rejects(operation(), /暂不可用，请在桌面应用中重试/, name);
+  }
+});
+
+test('desktop updates preserve target, component, backup and dry-run arguments and backend outcomes', async () => {
+  globalThis.isTauri = true;
+  const calls = [];
+  const outcome = { success: false, output: '', error: '目标环境尚未就绪' };
+  mockIPC((command, args) => { calls.push({ command, args }); return outcome; });
+  const components = ['backend', 'config'];
+  assert.equal(await api.updateRemoteDeployment('host.example.com', 2222, 'deploy', '/key', '/bundle', '/srv/app', components, false, true), outcome);
+  assert.equal(await api.updateLocalDeployment('/bundle', '/srv/app', components), outcome);
+  assert.deepEqual(calls, [
+    { command: 'update_remote_deployment', args: {
+      host: 'host.example.com', port: 2222, user: 'deploy', keyPath: '/key',
+      bundleDir: '/bundle', installDir: '/srv/app', components, backup: false, dryRun: true
+    } },
+    { command: 'update_local_deployment', args: {
+      bundleDir: '/bundle', installDir: '/srv/app', components, backup: true, dryRun: false
+    } }
+  ]);
+  mockIPC(() => { throw new Error('连接失败'); });
+  await assert.rejects(api.checkLocalEnv(), /连接失败/);
+});
+
+test('profile, update checks and progress channels use the desktop bridge', async () => {
+  globalThis.isTauri = true;
+  const events = [];
+  const calls = [];
+  const profile = { name: 'demo-stack' };
+  const release = { version: '1.0.0' };
+  mockIPC((command, args) => {
+    calls.push(command);
+    if (command === 'get_deployment_profile') return profile;
+    if (command === 'check_app_update') return release;
+    if (command === 'download_artifact') {
+      assert.equal(args.id, 'source');
+      assert.equal(args.release, release);
+    }
+    window.__TAURI_INTERNALS__.runCallback(args.onEvent.id, { index: 0, message: { command, percent: 50 } });
+    window.__TAURI_INTERNALS__.runCallback(args.onEvent.id, { index: 1, end: true });
+    return null;
+  });
+  assert.equal(await api.getDeploymentProfile(), profile);
+  assert.equal(await api.checkAppUpdate(), release);
+  await api.installAppUpdate((event) => events.push(event));
+  await api.downloadArtifact('source', release, (event) => events.push(event));
+  assert.deepEqual(calls, ['get_deployment_profile', 'check_app_update', 'install_app_update', 'download_artifact']);
+  assert.deepEqual(events, [{ command: 'install_app_update', percent: 50 }, { command: 'download_artifact', percent: 50 }]);
+});
+
+test('progress listeners remain optional in preview and can unsubscribe on desktop', async () => {
+  const events = [];
+  const stopPreview = await api.onRemoteUpdateProgress((event) => events.push(event));
+  stopPreview();
+  assert.deepEqual(events, []);
+  globalThis.isTauri = true;
+  mockIPC(() => {}, { shouldMockEvents: true });
+  const stop = await api.onRemoteUpdateProgress((event) => events.push(event));
+  await emit('remote-update-progress', { step: 'backup' });
+  await stop();
+  assert.equal(window.__TAURI_INTERNALS__.callbacks.size, 0);
+  assert.deepEqual(events, [{ step: 'backup' }]);
+});

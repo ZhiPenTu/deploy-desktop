@@ -145,8 +145,7 @@ import { FolderOpened, Plus, Refresh } from '@element-plus/icons-vue';
 import { open } from '@tauri-apps/plugin-dialog';
 import ArtifactSourceEditor from '../components/ArtifactSourceEditor.vue';
 import UpdateChecker from '../components/UpdateChecker.vue';
-import { deleteArtifactSource, listArtifactSources } from '../api/artifact.js';
-import { getImageLibrarySettings, saveImageLibrarySettings } from '../api/tauri.js';
+import { deleteArtifactSource, listArtifactSources, getImageLibrarySettings, saveImageLibrarySettings } from '../api/tauri.js';
 
 const props = defineProps({
   connection: {

@@ -86,7 +86,7 @@
 
 <script setup>
 import { computed, ref } from 'vue';
-import { Channel, invoke } from '@tauri-apps/api/core';
+import { checkAppUpdate, installAppUpdate } from '../api/tauri.js';
 import { Download } from '@element-plus/icons-vue';
 
 const currentVersion = __APP_VERSION__;
@@ -153,7 +153,7 @@ const checkNow = async () => {
   totalBytes.value = 0;
 
   try {
-    const info = await invoke('check_app_update', {});
+    const info = await checkAppUpdate();
     if (info) {
       updateInfo.value = info;
       status.value = 'available';
@@ -176,8 +176,7 @@ const installNow = async () => {
   totalBytes.value = 0;
   progressText.value = '正在准备下载';
 
-  const channel = new Channel();
-  channel.onmessage = (event) => {
+  const onProgress = (event) => {
     if (event.event === 'Started') {
       totalBytes.value = event.data.contentLength || 0;
       progressText.value = totalBytes.value
@@ -194,7 +193,7 @@ const installNow = async () => {
   };
 
   try {
-    await invoke('install_app_update', { onEvent: channel });
+    await installAppUpdate(onProgress);
     progressText.value = '安装完成，正在重启应用';
   } catch (error) {
     installing.value = false;

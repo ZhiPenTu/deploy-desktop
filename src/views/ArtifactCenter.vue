@@ -378,9 +378,10 @@ import {
   downloadArtifact,
   listArtifactReleases,
   listArtifactSources,
-  openArtifactBundleVersion
-} from '../api/artifact.js';
-import { inspectBundlePlan, openArtifactRunUrl } from '../api/tauri.js';
+  openArtifactBundleVersion,
+  inspectBundlePlan,
+  openArtifactRunUrl
+} from '../api/tauri.js';
 
 const props = defineProps({
   connection: {

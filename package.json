@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "check:ui-text": "node scripts/check-ui-text.mjs",
+    "test:api": "node --test test/tauri-api.test.mjs",
     "predev": "npm run check:ui-text",
     "dev": "vite",
     "prebuild": "npm run check:ui-text",
