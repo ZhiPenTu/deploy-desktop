@@ -19,6 +19,7 @@ npm run tauri dev
 
 ```bash
 npm run check:ui-text
+npm run check:boundaries
 npm run test:api
 npm run build
 cargo test --manifest-path src-tauri/Cargo.toml
@@ -75,6 +76,8 @@ bash scripts/dev-app.sh --release --offline --launch
 [安装包检查流程](.github/workflows/build-desktop.yml) 只运行 PR / 手动构建，上传 Actions 产物；发布统一由上述标签流程负责。
 
 ## 代码约定
+
+功能目录、前端调用层、Rust 部署模块与 MCP 注册边界见 [架构说明](docs/architecture.md)。`npm run build` 会先检查文案和模块依赖边界。
 
 - 界面文案使用简体中文，不添加 emoji、颜文字或装饰性符号。
 - 前端只通过 `src/api/tauri.js` 调用 Tauri 命令。

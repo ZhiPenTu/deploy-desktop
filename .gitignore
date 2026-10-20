@@ -21,3 +21,4 @@ Thumbs.db
 *.rpm
 release/
 artifacts/
+!src/features/artifacts/

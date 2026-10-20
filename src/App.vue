@@ -49,7 +49,8 @@
         <ServiceUpdate
           v-else-if="currentTab === 'update'"
           :connection="connection"
-          @go-dashboard="currentTab = 'dashboard'"
+          @busy-change="updateBusy = $event"
+          @go-dashboard="navigateTab('dashboard')"
         />
 
         <ArtifactCenter
@@ -90,20 +91,20 @@
 <script setup>
 import { computed, ref } from 'vue';
 import { ElMessage } from 'element-plus';
-import { connection, connectionInventory, hostById } from './connection';
-import Header from './components/Header.vue';
-import Sidebar from './components/Sidebar.vue';
-import Credentials from './views/Credentials.vue';
-import Hosts from './views/Hosts.vue';
-import InstallWizard from './views/InstallWizard.vue';
-import EnvCheck from './views/EnvCheck.vue';
-import Dashboard from './views/Dashboard.vue';
-import ServiceUpdate from './views/ServiceUpdate.vue';
-import ImageManager from './views/ImageManager.vue';
-import ArtifactCenter from './views/ArtifactCenter.vue';
-import RegistryCenter from './views/RegistryCenter.vue';
-import Settings from './views/Settings.vue';
-import LogViewer from './views/LogViewer.vue';
+import { connection, connectionInventory, hostById } from './features/connections/state.js';
+import Header from './components/layout/Header.vue';
+import Sidebar from './components/layout/Sidebar.vue';
+import Credentials from './features/connections/views/Credentials.vue';
+import Hosts from './features/connections/views/Hosts.vue';
+import InstallWizard from './features/deployment/views/InstallWizard.vue';
+import EnvCheck from './features/monitoring/views/EnvCheck.vue';
+import Dashboard from './features/monitoring/views/Dashboard.vue';
+import ServiceUpdate from './features/deployment/views/ServiceUpdate.vue';
+import ImageManager from './features/images/views/ImageManager.vue';
+import ArtifactCenter from './features/artifacts/views/ArtifactCenter.vue';
+import RegistryCenter from './features/registry/views/RegistryCenter.vue';
+import Settings from './features/settings/views/Settings.vue';
+import LogViewer from './features/monitoring/views/LogViewer.vue';
 import { getDefaultContainer } from './config/cluster.js';
 
 const pages = {
@@ -122,10 +123,11 @@ const pages = {
 
 const currentTab = ref('wizard');
 const wizardBusy = ref(false);
+const updateBusy = ref(false);
 const selectedStatusHostId = ref('');
 const selectedStatusHost = computed(() => hostById(selectedStatusHostId.value));
 function navigateTab(tab) {
-  if (wizardBusy.value) { ElMessage.warning('当前操作正在进行，请等待完成后切换页面。'); return; }
+  if (wizardBusy.value || updateBusy.value) { ElMessage.warning('当前操作正在进行，请等待完成后切换页面。'); return; }
   currentTab.value = tab;
 }
 const activeLogContainer = ref(getDefaultContainer());

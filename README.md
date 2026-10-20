@@ -78,6 +78,7 @@ npm run tauri dev
 - [镜像源管理](docs/registry-sources.md)
 - [镜像清单规范](docs/manifest-schema.md)与[清单示例](examples/manifest.example.yaml)
 - [MCP 服务](mcp-server/README.md)
+- [功能目录与调用边界](docs/architecture.md)
 - [项目协作规则](AGENTS.md)与[贡献指南](CONTRIBUTING.md)
 
 ## 数据与安全
