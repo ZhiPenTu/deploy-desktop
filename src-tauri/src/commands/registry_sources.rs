@@ -13,6 +13,13 @@ const SOURCES_FILE: &str = "registry-sources.json";
 const SECRETS_FILE: &str = "registry-secrets.json";
 static STORE_LOCK: Mutex<()> = Mutex::new(());
 
+// 首次使用时预置的国内公共加速镜像源；保存后与用户自行添加的源一致，可编辑或删除。
+const DEFAULT_SOURCES: &[(&str, &str, &str)] = &[
+    ("default-daocloud", "DaoCloud 加速", "docker.m.daocloud.io"),
+    ("default-1ms", "毫秒镜像加速", "docker.1ms.run"),
+    ("default-xuanyuan", "轩辕镜像加速", "docker.xuanyuan.me"),
+];
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct RegistrySource {
@@ -73,6 +80,28 @@ fn config_dir(app: &AppHandle) -> Result<PathBuf, String> {
 
 fn read_sources(dir: &Path) -> Result<Vec<RegistrySource>, String> {
     read_json(&dir.join(SOURCES_FILE), "镜像源配置")
+}
+
+fn default_sources() -> Vec<RegistrySource> {
+    DEFAULT_SOURCES
+        .iter()
+        .map(|(id, name, address)| RegistrySource {
+            id: id.to_string(),
+            name: name.to_string(),
+            address: address.to_string(),
+            namespace: "library".to_string(),
+            ..Default::default()
+        })
+        .collect()
+}
+
+// 仅在配置文件尚不存在时写入默认源；用户删空后不再重新生成。
+fn read_sources_with_defaults(dir: &Path) -> Result<Vec<RegistrySource>, String> {
+    let path = dir.join(SOURCES_FILE);
+    if !path.exists() {
+        write_private_json(&path, &default_sources())?;
+    }
+    read_sources(dir)
 }
 
 fn read_json<T: serde::de::DeserializeOwned + Default>(
@@ -316,7 +345,7 @@ pub fn list_registry_sources(app: AppHandle) -> Result<Vec<RegistrySource>, Stri
         .lock()
         .map_err(|_| "镜像源配置暂不可用".to_string())?;
     let dir = config_dir(&app)?;
-    let mut sources = read_sources(&dir)?;
+    let mut sources = read_sources_with_defaults(&dir)?;
     let secrets: BTreeMap<String, RegistrySecret> =
         read_json(&dir.join(SECRETS_FILE), "镜像源凭据")?;
     for source in &mut sources {
@@ -364,9 +393,13 @@ pub async fn test_registry_source(
             .redirect(reqwest::redirect::Policy::none()).build().map_err(|_| "无法创建镜像源连接".to_string())?;
         let response = client.get(format!("https://{}/v2/", access.source.address)).send()
             .map_err(|_| "无法连接镜像源，请检查仓库地址、网络和证书；HTTP 仓库请先配置 Docker 后填写登录凭据测试".to_string())?;
+        let registry_v2 = response.headers().get("docker-distribution-api-version").is_some_and(|value| value == "registry/2.0");
         match response.status().as_u16() {
-            200 if response.headers().get("docker-distribution-api-version").is_some_and(|value| value == "registry/2.0") =>
+            200 if registry_v2 =>
                 Ok(RegistryTestResult { authenticated: false, message: "镜像源可连接；镜像访问权限以实际拉取结果为准".to_string() }),
+            // 公共加速仓库对 /v2/ 返回带 Registry V2 头的 401 匿名挑战，属于正常响应。
+            401 if registry_v2 =>
+                Ok(RegistryTestResult { authenticated: false, message: "镜像源可连接，公开镜像可直接拉取；拉取私有镜像请在镜像源中填写用户名和密码".to_string() }),
             401 => Err("镜像源可连接，但需要登录，请编辑镜像源并填写用户名和密码".to_string()),
             _ => Err("镜像源未返回有效的仓库响应，请检查仓库地址和访问权限".to_string()),
         }
@@ -386,6 +419,50 @@ mod tests {
             password: Some("test-only-password".to_string()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn seeds_default_sources_once_and_keeps_edits_and_deletions() {
+        let dir = std::env::temp_dir().join(format!(
+            "registry-defaults-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&dir).unwrap();
+        let seeded = read_sources_with_defaults(&dir).unwrap();
+        assert_eq!(seeded.len(), DEFAULT_SOURCES.len());
+        let mut ids = seeded.iter().map(|source| source.id.clone()).collect::<Vec<_>>();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), seeded.len());
+        for source in &seeded {
+            assert!(normalize_address(&source.address).is_ok());
+            assert_eq!(source.namespace, "library");
+        }
+        let edited = save_source_at(
+            &dir,
+            RegistrySourceInput {
+                id: seeded[0].id.clone(),
+                name: "团队加速源".to_string(),
+                address: seeded[0].address.clone(),
+                namespace: "mirror".to_string(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(edited.id, seeded[0].id);
+        assert_eq!(edited.namespace, "mirror");
+        assert_eq!(
+            read_sources_with_defaults(&dir).unwrap().len(),
+            DEFAULT_SOURCES.len()
+        );
+        for source in read_sources_with_defaults(&dir).unwrap() {
+            delete_source_at(&dir, &source.id).unwrap();
+        }
+        assert!(read_sources_with_defaults(&dir).unwrap().is_empty());
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

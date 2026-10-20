@@ -57,7 +57,45 @@
           >
             检查最新版本
           </el-button>
+          <el-button
+            :loading="operation === 'versions'"
+            :disabled="controlsDisabled || !desktopAvailable"
+            @click="toggleVersions"
+          >
+            {{ versionsVisible ? '收起版本列表' : '选择版本' }}
+          </el-button>
           <span v-if="!selectedSource.lastBundleDir" class="field-hint">该制品源尚无已下载的交付包</span>
+        </div>
+
+        <div v-if="versionsVisible" class="version-list">
+          <p v-if="!versions.length && operation !== 'versions'" class="field-hint">
+            该制品源暂无可用版本。
+          </p>
+          <div v-for="item in versions" :key="releaseKey(item)" class="version-row">
+            <div class="version-info">
+              <div class="summary-line">
+                <strong>{{ displayVersion(item.version) }}</strong>
+                <el-tag v-if="item.commitShort" size="small" type="info" effect="plain">{{ item.commitShort }}</el-tag>
+                <el-tag v-if="item.localDir" size="small" type="success" effect="plain">已下载</el-tag>
+              </div>
+              <p class="field-hint">
+                构建时间：{{ formatTime(item.builtAt) }}
+                <template v-if="item.sizeBytes">，大小：{{ formatSize(item.sizeBytes) }}</template>
+              </p>
+            </div>
+            <el-button size="small" :disabled="controlsDisabled" @click="chooseVersion(item)">
+              {{ item.localDir ? '使用此版本' : '下载此版本' }}
+            </el-button>
+          </div>
+          <el-button
+            v-if="versionsHasMore"
+            size="small"
+            :loading="operation === 'versions'"
+            :disabled="controlsDisabled"
+            @click="loadVersions(false)"
+          >
+            加载更多版本
+          </el-button>
         </div>
 
         <div v-if="release" class="release-summary">
@@ -161,7 +199,7 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { selectLocalPath as open } from '../../../api/tauri.js';
 import { Box, DocumentChecked, FolderOpened, Refresh } from '@element-plus/icons-vue';
-import { downloadArtifact, fetchArtifactRelease, isDesktopApp, listArtifactSources, openArtifactBundle, prepareLocalArtifactBundle } from '../../../api/tauri.js';
+import { downloadArtifact, fetchArtifactRelease, isDesktopApp, listArtifactReleases, listArtifactSources, openArtifactBundle, openArtifactBundleVersion, prepareLocalArtifactBundle } from '../../../api/tauri.js';
 
 const props = defineProps({
   connection: { type: Object, required: true },
@@ -174,6 +212,10 @@ const desktopAvailable = isDesktopApp();
 const sources = ref([]);
 const sourceId = ref('');
 const release = ref(null);
+const versions = ref([]);
+const versionsVisible = ref(false);
+const versionsPage = ref(0);
+const versionsHasMore = ref(false);
 const candidate = ref(null);
 const preparedBundle = ref(null);
 const operation = ref('');
@@ -197,6 +239,10 @@ const preparationHint = computed(() => {
 watch(busy, (value) => emit('busy-change', value), { flush: 'sync' });
 watch(sourceId, () => {
   release.value = null;
+  versions.value = [];
+  versionsVisible.value = false;
+  versionsPage.value = 0;
+  versionsHasMore.value = false;
   clearSelection();
 });
 
@@ -325,6 +371,73 @@ function chooseRelease() {
   });
 }
 
+function releaseKey(item) {
+  return `${item.runId || 0}-${item.artifactName || ''}-${item.version || ''}`;
+}
+
+function formatTime(ms) {
+  const time = Number(ms || 0);
+  return time > 0 ? new Date(time).toLocaleString() : '未知时间';
+}
+
+async function toggleVersions() {
+  if (controlsDisabled.value || !desktopAvailable || !selectedSource.value) return;
+  if (versionsVisible.value) {
+    versionsVisible.value = false;
+    return;
+  }
+  versionsVisible.value = true;
+  await loadVersions(true);
+}
+
+async function loadVersions(reset) {
+  const source = selectedSource.value;
+  if (!source || operation.value === 'versions') return;
+  operation.value = 'versions';
+  errorMessage.value = '';
+  const nextPage = reset ? 1 : versionsPage.value + 1;
+  try {
+    const result = await listArtifactReleases(source.id, nextPage);
+    if (sourceId.value !== source.id) return;
+    if (reset) {
+      versions.value = result.items || [];
+    } else {
+      const known = new Set(versions.value.map(releaseKey));
+      const appended = (result.items || []).filter((item) => !known.has(releaseKey(item)));
+      versions.value = [...versions.value, ...appended];
+    }
+    versionsPage.value = result.page || nextPage;
+    versionsHasMore.value = Boolean(result.hasMore);
+  } catch (error) {
+    errorMessage.value = failureText(error, '读取版本列表');
+  } finally {
+    operation.value = '';
+  }
+}
+
+function chooseVersion(item) {
+  const source = selectedSource.value;
+  if (controlsDisabled.value || !source || !item) return;
+  const version = String(item.version || '').trim();
+  if (item.localDir && version) {
+    choose({
+      kind: 'downloaded-version',
+      sourceId: source.id,
+      label: `${source.name}（${displayVersion(version)}）`,
+      version,
+      path: item.localDir
+    });
+    return;
+  }
+  choose({
+    kind: 'release',
+    sourceId: source.id,
+    label: source.name,
+    version: item.version,
+    release: item
+  });
+}
+
 async function pickLocal(directory) {
   if (controlsDisabled.value || !desktopAvailable) return;
   operation.value = 'pick';
@@ -380,6 +493,8 @@ async function prepare() {
     let bundle;
     if (selected.kind === 'release') {
       bundle = await downloadArtifact(selected.sourceId, selected.release, updateProgress);
+    } else if (selected.kind === 'downloaded-version') {
+      bundle = await openArtifactBundleVersion(selected.sourceId, selected.version);
     } else if (selected.kind === 'downloaded') {
       bundle = await openArtifactBundle(selected.sourceId);
     } else {
@@ -387,7 +502,7 @@ async function prepare() {
     }
     if (!bundle?.dir) throw new Error('交付包目录不存在');
     // Every source goes through the same installation checks before it becomes usable.
-    if (selected.kind === 'release' || selected.kind === 'downloaded') {
+    if (selected.kind === 'release' || selected.kind === 'downloaded' || selected.kind === 'downloaded-version') {
       const validated = await prepareLocalArtifactBundle(bundle.dir);
       bundle = { ...bundle, ...validated };
     }
@@ -475,6 +590,37 @@ onMounted(refreshSources);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-sm);
   background: var(--panel-subtle);
+}
+
+.version-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 16px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--panel-subtle);
+}
+
+.version-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.version-row:last-of-type {
+  border-bottom: none;
+}
+
+.version-info {
+  min-width: 0;
+}
+
+.version-list > .el-button {
+  align-self: flex-start;
 }
 
 .release-summary {
