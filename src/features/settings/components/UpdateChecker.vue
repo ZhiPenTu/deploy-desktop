@@ -50,6 +50,14 @@
         <pre v-if="updateInfo.body" class="update-notes">{{ updateInfo.body }}</pre>
       </div>
 
+      <el-alert
+        v-if="updateInfo && updateInfo.installBlocker"
+        :title="updateInfo.installBlocker"
+        type="warning"
+        :closable="false"
+        show-icon
+      />
+
       <div v-if="installing" class="progress-block">
         <el-progress
           :percentage="percent"
@@ -75,7 +83,7 @@
         v-else
         type="primary"
         :loading="installing"
-        :disabled="checking"
+        :disabled="checking || Boolean(updateInfo.installBlocker)"
         @click="installNow"
       >
         下载并安装
@@ -169,6 +177,11 @@ const checkNow = async () => {
 };
 
 const installNow = async () => {
+  if (updateInfo.value?.installBlocker) {
+    status.value = 'error';
+    errorMessage.value = updateInfo.value.installBlocker;
+    return;
+  }
   installing.value = true;
   status.value = '';
   errorMessage.value = '';

@@ -29,6 +29,7 @@ pub struct UpdateMetadata {
     pub current_version: String,
     pub date: Option<i64>,
     pub body: Option<String>,
+    pub install_blocker: Option<String>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -52,7 +53,95 @@ fn friendly_update_error(message: String) -> String {
     if lower.contains("404") || lower.contains("valid release json") {
         return format!("未能从 GitHub Releases 获取更新信息，仓库可能尚未发布版本（{message}）");
     }
+    if lower.contains("error sending request")
+        || lower.contains("timed out")
+        || lower.contains("dns")
+        || lower.contains("connect")
+    {
+        return "无法连接更新服务器，请检查网络连接后重试。".to_string();
+    }
     format!("检查更新失败：{message}")
+}
+
+fn friendly_install_error(message: String) -> String {
+    let lower = message.to_lowercase();
+    if lower.contains("no such file or directory") || lower.contains("os error 2") {
+        return "无法替换当前应用：应用所在位置不存在或已被移动。请将应用移动到“应用程序”文件夹后重新打开，再检查更新。".to_string();
+    }
+    if lower.contains("permission denied")
+        || lower.contains("operation not permitted")
+        || lower.contains("os error 1")
+        || lower.contains("os error 13")
+    {
+        return "没有权限替换当前应用。请将应用移动到“应用程序”文件夹，或允许当前用户修改该应用后重试。".to_string();
+    }
+    if lower.contains("cross-device link") || lower.contains("os error 18") {
+        return "更新文件与当前应用不在同一磁盘，无法直接替换。请将应用移动到“应用程序”文件夹后重试。".to_string();
+    }
+    if lower.contains("signature") {
+        return "更新包签名校验失败，已停止安装。请从 GitHub Releases 重新下载完整安装包。"
+            .to_string();
+    }
+    if lower.contains("error sending request")
+        || lower.contains("timed out")
+        || lower.contains("dns")
+        || lower.contains("connect")
+    {
+        return "下载更新失败，请检查网络连接后重试。".to_string();
+    }
+    format!("安装更新失败：{message}")
+}
+
+#[cfg(target_os = "macos")]
+fn install_blocker_for_bundle(bundle: &std::path::Path) -> Option<String> {
+    if !bundle.exists() {
+        return Some(
+            "当前应用所在位置已不存在，可能已从磁盘映像或临时目录启动。请将应用移动到“应用程序”文件夹后重新打开，再检查更新。"
+                .to_string(),
+        );
+    }
+    let display = bundle.to_string_lossy();
+    if display.starts_with("/Volumes/")
+        || display.starts_with("/private/var/folders/")
+        || display.starts_with("/var/folders/")
+        || display.starts_with("/private/tmp/")
+        || display.starts_with("/tmp/")
+    {
+        return Some(
+            "当前应用运行在磁盘映像或临时目录中，无法自动更新。请先将应用拖入“应用程序”文件夹后重新打开，再检查更新。"
+                .to_string(),
+        );
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn update_install_blocker() -> Option<String> {
+    let executable = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(_) => return Some(
+            "无法确定当前应用的安装位置，请将应用移动到“应用程序”文件夹后重新打开，再检查更新。"
+                .to_string(),
+        ),
+    };
+    let bundle = executable
+        .parent()
+        .and_then(|macos_dir| macos_dir.parent())
+        .and_then(|contents_dir| contents_dir.parent())
+        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("app"))
+        .map(|path| path.to_path_buf());
+    let Some(bundle) = bundle else {
+        return Some(
+            "当前应用不是从标准 macOS 应用包运行，无法自动更新。请安装正式安装包后再试。"
+                .to_string(),
+        );
+    };
+    install_blocker_for_bundle(&bundle)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn update_install_blocker() -> Option<String> {
+    None
 }
 
 fn resolve_update_endpoint(endpoint: Option<String>) -> Result<tauri::Url, String> {
@@ -110,6 +199,7 @@ pub async fn check_app_update(
         current_version: update.current_version.clone(),
         date: update.date.map(|date| date.unix_timestamp()),
         body: update.body.clone(),
+        install_blocker: update_install_blocker(),
     });
 
     *pending_update.0.lock().unwrap() = update;
@@ -122,6 +212,9 @@ pub async fn install_app_update(
     pending_update: State<'_, PendingUpdate>,
     on_event: Channel<UpdateProgress>,
 ) -> Result<(), String> {
+    if let Some(reason) = update_install_blocker() {
+        return Err(reason);
+    }
     let update = pending_update.0.lock().unwrap().take();
     let Some(update) = update else {
         return Err("没有可安装的更新，请先检查更新".to_string());
@@ -142,7 +235,7 @@ pub async fn install_app_update(
             },
         )
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| friendly_install_error(e.to_string()))?;
 
     app.restart();
 }
@@ -175,5 +268,53 @@ mod tests {
     fn empty_endpoint_falls_back_to_github() {
         let url = resolve_update_endpoint(Some("   ".to_string())).expect("空白更新源应回退到默认地址");
         assert_eq!(url.as_str(), DEFAULT_UPDATE_ENDPOINT);
+    }
+
+    #[test]
+    fn missing_app_bundle_error_is_actionable() {
+        let message = friendly_install_error("No such file or directory (os error 2)".to_string());
+        assert!(message.contains("应用程序"));
+        assert!(message.contains("重新打开"));
+    }
+
+    #[test]
+    fn permission_error_is_actionable() {
+        let message = friendly_install_error("Permission denied (os error 13)".to_string());
+        assert!(message.contains("权限"));
+        assert!(message.contains("应用程序"));
+    }
+
+    #[test]
+    fn signature_error_mentions_release() {
+        let message = friendly_install_error("signature verification failed".to_string());
+        assert!(message.contains("签名"));
+        assert!(message.contains("GitHub Releases"));
+    }
+
+    #[test]
+    fn network_check_error_is_translated() {
+        let message = friendly_update_error("error sending request for url".to_string());
+        assert!(message.contains("网络"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn missing_bundle_blocks_install() {
+        let bundle = std::env::temp_dir().join("deploy-updater-missing.app");
+        let reason = install_blocker_for_bundle(&bundle).expect("不存在的应用包应阻止自动安装");
+        assert!(reason.contains("不存在"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn temp_dir_bundle_blocks_install() {
+        let bundle = std::env::temp_dir().join(format!(
+            "deploy-updater-{}.app",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&bundle).expect("应能创建测试目录");
+        let reason = install_blocker_for_bundle(&bundle).expect("临时目录应阻止自动安装");
+        std::fs::remove_dir_all(&bundle).ok();
+        assert!(reason.contains("临时目录"));
     }
 }
