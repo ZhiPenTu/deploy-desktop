@@ -832,14 +832,45 @@ if [ -f docker-compose.lan.yml ]; then
   COMPOSE_FILE=docker-compose.lan.yml
 elif [ -f docker-compose.yml ]; then
   COMPOSE_FILE=docker-compose.yml
+elif [ -f deploy/docker-compose.lan.yml ]; then
+  COMPOSE_FILE=deploy/docker-compose.lan.yml
+elif [ -f deploy/docker-compose.yml ]; then
+  COMPOSE_FILE=deploy/docker-compose.yml
 else
-  echo "目标目录未找到 docker-compose.lan.yml 或 docker-compose.yml" >&2
+  echo "目标目录及其 deploy/ 子目录未找到 docker-compose.lan.yml 或 docker-compose.yml" >&2
   exit 3
 fi
+ENV_ARGS=""
+for f in .env deploy/.env .env.local deploy/.env.local; do
+  if [ -f "$f" ]; then
+    ENV_ARGS="$ENV_ARGS --env-file $f"
+  fi
+done
+COMPOSE_ARGS="-f $COMPOSE_FILE"
+COMPOSE_DIR=$(dirname "$COMPOSE_FILE")
+if [ -d "$COMPOSE_DIR/frontend_dist" ] && ! grep -q frontend_dist "$COMPOSE_FILE"; then
+  for c in frontend-main.conf frontend-upstream.conf frontend-default.conf; do
+    if [ ! -f "$COMPOSE_DIR/nginx/$c" ]; then
+      echo "交付包缺少 deploy/nginx/$c，文件模式前端无法挂载；请补齐后再启动。" >&2
+      exit 4
+    fi
+  done
+  cat > "$COMPOSE_DIR/docker-compose.frontend-bind.yml" <<'YAML'
+services:
+  frontend:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./frontend_dist:/usr/share/nginx/html:ro
+      - ./nginx/frontend-main.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/frontend-upstream.conf:/etc/nginx/conf.d/00-upstream.conf:ro
+      - ./nginx/frontend-default.conf:/etc/nginx/conf.d/default.conf:ro
+YAML
+  COMPOSE_ARGS="$COMPOSE_ARGS -f $COMPOSE_DIR/docker-compose.frontend-bind.yml"
+fi
 if docker compose version >/dev/null 2>&1; then
-  docker compose -f "$COMPOSE_FILE" {}
+  docker compose $ENV_ARGS $COMPOSE_ARGS {}
 else
-  docker-compose -f "$COMPOSE_FILE" {}
+  docker-compose $ENV_ARGS $COMPOSE_ARGS {}
 fi
 "#,
         shell_quote(deploy_dir),
@@ -1126,7 +1157,7 @@ pub fn remote_docker_compose_action(
     service: Option<String>,
 ) -> Result<ComposeActionResult, String> {
     let key = resolve_existing_key(key_path, &host)?;
-    remote_compose_action(
+    let mut result = remote_compose_action(
         &host,
         port,
         &user,
@@ -1134,7 +1165,35 @@ pub fn remote_docker_compose_action(
         &deploy_dir,
         &action,
         service,
-    )
+    )?;
+    if action == "up" && result.success {
+        let containers = super::docker_ops::artifact_containers();
+        if !containers.is_empty() {
+            let names = containers
+                .iter()
+                .map(|name| shell_quote(name))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let restart = run_ssh_script(
+                &host,
+                port,
+                &user,
+                key.as_deref(),
+                &format!("docker restart {names}"),
+            )?;
+            if restart.status.success() {
+                result.output.push_str(&format!(
+                    "\n已重启交付产物容器: {}",
+                    containers.join(", ")
+                ));
+            } else {
+                let stderr = String::from_utf8_lossy(&restart.stderr).trim().to_string();
+                result.success = false;
+                result.error = Some(format!("重启交付产物容器失败: {stderr}"));
+            }
+        }
+    }
+    Ok(result)
 }
 
 #[tauri::command]

@@ -19,20 +19,40 @@ deploy/
   docker-compose.lan.yml  局域网部署使用，存在时优先
 ```
 
-`bundle.json` 至少包含：
+`bundle.json` 是交付包的唯一事实源，桌面端据此判断模式、版本与可更新组件：
 
 ```json
 {
+  "schemaVersion": 1,
+  "product": "tt-net-manager",
+  "mode": "file",
   "version": "5",
   "commit": "40 位提交号",
   "commitShort": "短提交号",
   "branch": "master",
   "builtAt": "2026-10-19T00:00:00Z",
+  "components": ["backend", "gateway", "frontend", "config"],
   "files": [
     { "path": "app/tt-net-manager-server.jar", "size": 123456, "sha256": "..." }
   ]
 }
 ```
+
+`mode` 有两种：
+
+| 模式 | 目录 | 含义 |
+| --- | --- | --- |
+| `file` | `app/` + `deploy/` | 产物通过 bind mount 挂进容器，交付包不含应用镜像 |
+| `image` | `images/` + `deploy/` | 交付包自带 `docker save` 镜像包，需先导入再启动 |
+
+`components` 决定「服务更新」默认勾选哪些组件（`backend` / `gateway` / `frontend` / `config`，镜像模式额外有 `image`）。
+
+## 预制流程说明
+
+文件模式交付包可以再带两个可选文件，用来把「执行流程」写成配置而不是靠人记：
+
+- `deploy/deployment-plan.json`：`steps[]` 提供每一步的 `title` 与 `hint`，桌面端按 `key` 合入推导出的链路。步骤顺序、实时数量与状态始终由程序按实际文件计算，清单只补说明，不会覆盖真实状态。
+- `deploy/base-images.txt`：目标机所需基础镜像的唯一清单。桌面端据此列出依赖镜像，并比对目标机是否已具备；流水线里应校验它与 compose 的 `image:` 行一致。
 
 下载完成后桌面端会依次校验：MD5、压缩包路径安全（绝对路径、`..`、符号链接）、必要文件是否存在。任一环节失败会中止，不会覆盖已有交付包。
 
@@ -73,7 +93,14 @@ deploy/
 
 ## 交付包与镜像包
 
-交付包只包含程序产物，不包含 Docker 镜像。首次部署还需要一个离线介质目录，自行放置：
+制品中心在选定交付包后会展示「交付包链路」：获取交付包 → 准备基础镜像 → 分发交付包 → 启动容器栈 → 验证与验收，并为每一步标注就绪 / 按需 / 待补齐。链路下面是 `app/` 与 `deploy/` 的实际文件清单和依赖镜像表，镜像表标注来源（随包镜像 / 基础镜像清单 / compose 推导）以及目标机是否已具备。
+
+镜像有两种来源，含义不同：
+
+- 镜像模式交付包里的 `images/`：应用自身的镜像，必须导入，缺一个就无法启动。
+- 文件模式依赖的基础镜像：OceanBase、Kafka、Redis、Nginx 等底座，不在交付包里，只在首次部署准备一次。
+
+首次部署还需要一个离线介质目录，自行放置：
 
 ```text
 <mediaDir>/
@@ -84,6 +111,8 @@ deploy/
 部署向导第 3 步的「分发交付包」会把 `app/` 与 `deploy/` 写入部署目录，形成 Compose 期望的挂载结构（`backend-java/server/target/`、`backend-java/gateway-app/target/`、`deploy/frontend_dist/`），之后再启动容器。远程模式通过 SSH 上传，本地模式直接复制；`deploy/` 采用合并复制，已有的 `.env.local` 不会被删除。
 
 部署向导的「交付包目录」与「离线介质目录」是两个独立输入：前者来自制品中心，后者由现场准备。两者可以指向同一个目录，但不要把只含 `app/` 与 `deploy/` 的交付包当作镜像目录。
+
+文件模式下向导第 3 步是「准备基础镜像并分发交付包」：镜像只作为基础底座按需准备，不影响产物分发；第 5 步是「数据初始化」，后端启动时由 Flyway 自动迁移，手工导入仅用于覆盖历史全量数据。
 
 ## 在流水线侧产出
 

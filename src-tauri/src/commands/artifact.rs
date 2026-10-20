@@ -121,42 +121,10 @@ fn store_sources(app: &AppHandle, sources: &[ArtifactSource]) -> Result<(), Stri
     fs::write(&path, content).map_err(|e| format!("保存制品源配置失败：{e}"))
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-fn secret_set(_dir: &Path, id: &str, token: &str) -> Result<(), String> {
-    keyring::Entry::new(SECRET_SERVICE, id)
-        .map_err(|e| format!("打开系统钥匙串失败：{e}"))?
-        .set_password(token)
-        .map_err(|e| format!("写入系统钥匙串失败：{e}"))
-}
-
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-fn secret_get(_dir: &Path, id: &str) -> Result<Option<String>, String> {
-    let entry = keyring::Entry::new(SECRET_SERVICE, id)
-        .map_err(|e| format!("打开系统钥匙串失败：{e}"))?;
-    match entry.get_password() {
-        Ok(value) => Ok(Some(value)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(error) => Err(format!("读取系统钥匙串失败：{error}")),
-    }
-}
-
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-fn secret_delete(_dir: &Path, id: &str) -> Result<(), String> {
-    let entry = keyring::Entry::new(SECRET_SERVICE, id)
-        .map_err(|e| format!("打开系统钥匙串失败：{e}"))?;
-    match entry.delete_credential() {
-        Ok(()) => Ok(()),
-        Err(keyring::Error::NoEntry) => Ok(()),
-        Err(error) => Err(format!("删除系统钥匙串条目失败：{error}")),
-    }
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn secrets_file(dir: &Path) -> PathBuf {
     dir.join("artifact-tokens.json")
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn read_secrets(dir: &Path) -> std::collections::BTreeMap<String, String> {
     let path = secrets_file(dir);
     fs::read_to_string(path)
@@ -165,42 +133,97 @@ fn read_secrets(dir: &Path) -> std::collections::BTreeMap<String, String> {
         .unwrap_or_default()
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn write_secrets(
     dir: &Path,
     secrets: &std::collections::BTreeMap<String, String>,
 ) -> Result<(), String> {
-    use std::os::unix::fs::OpenOptionsExt;
     let path = secrets_file(dir);
     let content = serde_json::to_string_pretty(secrets).map_err(|e| e.to_string())?;
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .mode(0o600)
-        .open(&path)
-        .map_err(|e| format!("写入本地凭据文件失败：{e}"))?;
-    file.write_all(content.as_bytes())
-        .map_err(|e| format!("写入本地凭据文件失败：{e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|e| format!("写入本地凭据文件失败：{e}"))?;
+        file.write_all(content.as_bytes())
+            .map_err(|e| format!("写入本地凭据文件失败：{e}"))?;
+        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(&path, content).map_err(|e| format!("写入本地凭据文件失败：{e}"))?;
+    }
     Ok(())
 }
 
+fn keychain_marker(id: &str) -> String {
+    format!("__keychain_migrated:{id}")
+}
+
+/// 旧版本把令牌放在系统钥匙串里。macOS 上应用未签名时每次读取都会弹授权框，
+/// 因此这里只尝试迁移一次，之后统一使用本机凭据文件。
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn legacy_keychain_token(id: &str) -> Option<String> {
+    keyring::Entry::new(SECRET_SERVICE, id)
+        .ok()?
+        .get_password()
+        .ok()
+        .filter(|value| !value.is_empty())
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn delete_legacy_keychain_token(id: &str) {
+    if let Ok(entry) = keyring::Entry::new(SECRET_SERVICE, id) {
+        let _ = entry.delete_credential();
+    }
+}
+
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn legacy_keychain_token(_id: &str) -> Option<String> {
+    None
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn delete_legacy_keychain_token(_id: &str) {}
+
 fn secret_set(dir: &Path, id: &str, token: &str) -> Result<(), String> {
     let mut secrets = read_secrets(dir);
     secrets.insert(id.to_string(), token.to_string());
+    secrets.remove(&keychain_marker(id));
     write_secrets(dir, &secrets)
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn secret_get(dir: &Path, id: &str) -> Result<Option<String>, String> {
-    Ok(read_secrets(dir).get(id).cloned())
+    let secrets = read_secrets(dir);
+    if let Some(token) = secrets.get(id) {
+        return Ok(Some(token.clone()));
+    }
+    if secrets.contains_key(&keychain_marker(id)) {
+        return Ok(None);
+    }
+
+    let legacy = legacy_keychain_token(id);
+    let mut secrets = read_secrets(dir);
+    secrets.insert(keychain_marker(id), "1".to_string());
+    if let Some(token) = legacy {
+        secrets.insert(id.to_string(), token.clone());
+        write_secrets(dir, &secrets)?;
+        delete_legacy_keychain_token(id);
+        return Ok(Some(token));
+    }
+    write_secrets(dir, &secrets)?;
+    Ok(None)
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn secret_delete(dir: &Path, id: &str) -> Result<(), String> {
     let mut secrets = read_secrets(dir);
     secrets.remove(id);
+    secrets.remove(&keychain_marker(id));
+    delete_legacy_keychain_token(id);
     write_secrets(dir, &secrets)
 }
 
@@ -1098,5 +1121,46 @@ mod tests {
         assert!(remove_bundle_tree(&root, "src-a").is_err());
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn tokens_persist_in_local_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "deploy-desktop-tokens-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let id = format!("src-test-{}", std::process::id());
+
+        secret_set(&dir, &id, "token-1").unwrap();
+        assert_eq!(secret_get(&dir, &id).unwrap().as_deref(), Some("token-1"));
+        assert!(secrets_file(&dir).is_file());
+
+        secret_delete(&dir, &id).unwrap();
+        let mut secrets = read_secrets(&dir);
+        secrets.insert(keychain_marker(&id), "1".to_string());
+        write_secrets(&dir, &secrets).unwrap();
+        assert_eq!(secret_get(&dir, &id).unwrap(), None);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn token_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "deploy-desktop-token-perm-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        secret_set(&dir, "src-perm", "token").unwrap();
+        let mode = fs::metadata(secrets_file(&dir)).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

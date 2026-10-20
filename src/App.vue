@@ -17,6 +17,7 @@
           :connection="connection"
           @go-dashboard="currentTab = 'dashboard'"
           @go-images="currentTab = 'images'"
+          @go-artifacts="currentTab = 'artifacts'"
         />
 
         <EnvCheck
@@ -39,6 +40,8 @@
         <ArtifactCenter
           v-else-if="currentTab === 'artifacts'"
           :connection="connection"
+          @go-wizard="currentTab = 'wizard'"
+          @go-update="currentTab = 'update'"
         />
 
         <ImageManager
@@ -49,6 +52,12 @@
         <RegistryCenter
           v-else-if="currentTab === 'registry'"
           :connection="connection"
+        />
+
+        <Settings
+          v-else-if="currentTab === 'settings'"
+          :connection="connection"
+          @go-artifacts="currentTab = 'artifacts'"
         />
 
         <LogViewer
@@ -73,6 +82,7 @@ import ServiceUpdate from './views/ServiceUpdate.vue';
 import ImageManager from './views/ImageManager.vue';
 import ArtifactCenter from './views/ArtifactCenter.vue';
 import RegistryCenter from './views/RegistryCenter.vue';
+import Settings from './views/Settings.vue';
 import LogViewer from './views/LogViewer.vue';
 import { getDefaultContainer } from './config/cluster.js';
 
@@ -84,7 +94,8 @@ const pages = {
   logs: { title: '日志诊断', group: '运行' },
   artifacts: { title: '制品中心', group: '资源' },
   images: { title: '镜像包管理', group: '资源' },
-  registry: { title: '镜像仓库', group: '高级' }
+  registry: { title: '镜像仓库', group: '高级' },
+  settings: { title: '设置', group: '高级' }
 };
 
 const currentTab = ref('wizard');

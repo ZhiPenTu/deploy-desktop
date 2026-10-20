@@ -279,7 +279,7 @@ fn scan_images_dir(input: &Path, images_dir: &Path) -> Result<ImageBundleScan, S
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct ImageManifestEntry {
+pub(super) struct ImageManifestEntry {
     pub file: String,
     #[serde(default)]
     pub images: Vec<String>,
@@ -289,7 +289,7 @@ pub struct ImageManifestEntry {
 ///
 /// 清单由流水线生成，描述「哪个镜像包文件包含哪些镜像」，交付包的版本与镜像标签
 /// 因此天然对齐，不再依赖本地 profile 手工维护 images 列表。
-fn load_image_manifest(images_dir: &Path) -> Vec<ImageManifestEntry> {
+pub(super) fn load_image_manifest(images_dir: &Path) -> Vec<ImageManifestEntry> {
     #[derive(Deserialize)]
     struct Manifest {
         #[serde(default)]

@@ -10,7 +10,7 @@
           远程 {{ connection.remoteHost }}
         </el-tag>
         <el-tag v-else type="info" effect="plain">本地部署</el-tag>
-        <el-button :loading="scanning" @click="scanLocal">
+        <el-button :loading="scanning" @click="scanLocal()">
           <el-icon><FolderOpened /></el-icon>
           <span>扫描本地镜像包</span>
         </el-button>
@@ -44,20 +44,24 @@
             <el-button @click="pickLocalDir">选择目录</el-button>
           </div>
           <div class="field-hint">
-            工具会读取目录下的 images/*.tar 离线镜像包。
+            工具会读取目录下的 images/*.tar 离线镜像包。默认使用制品中心选定的当前部署包目录。
+          </div>
+        </el-form-item>
+        <el-form-item v-if="isRemote" label="目标机镜像目录">
+          <el-input v-model="remoteDirPath" placeholder="/home/deploy/bundle" />
+          <div class="field-hint">
+            上传写入目标机该目录下的 images/；留空时使用目标部署目录下的 bundle/。
           </div>
         </el-form-item>
       </el-form>
 
       <div v-if="localScan" class="summary-row">
-        <el-tag :type="localScan.exists ? 'success' : 'danger'" size="small">
-          {{ localScan.exists ? '目录就绪' : '目录不存在' }}
-        </el-tag>
-        <span class="summary-text">{{ localScan.message }}</span>
+        <el-tag :type="localState.tagType" size="small">{{ localState.tag }}</el-tag>
+        <span class="summary-text">{{ localState.summary }}</span>
         <span v-if="localScan.total_bytes" class="summary-text">
           共 {{ formatSize(localScan.total_bytes) }}
         </span>
-        <code class="path-text">{{ localScan.images_dir }}</code>
+        <code v-if="localState.showPath" class="path-text">{{ localScan.images_dir }}</code>
       </div>
 
       <el-table
@@ -87,7 +91,22 @@
       </el-table>
 
       <div v-else class="empty-state">
-        {{ localScan ? localScan.message : '点击“扫描本地镜像包”读取目录内容' }}
+        <template v-if="localState.kind !== 'idle'">
+          <span class="empty-title">{{ localState.title }}</span>
+          <span class="empty-hint">{{ localState.hint }}</span>
+          <div class="empty-actions">
+            <el-button size="small" @click="pickLocalDir">选择目录</el-button>
+            <el-button
+              v-if="canUseDownloadedBundle"
+              size="small"
+              :loading="findingBundle"
+              @click="useDownloadedBundle"
+            >
+              使用已下载的交付包
+            </el-button>
+          </div>
+        </template>
+        <span v-else>{{ localState.summary }}</span>
       </div>
     </div>
 
@@ -95,13 +114,23 @@
       <div class="card-title-bar">
         <h3>目标机镜像包</h3>
         <span v-if="remote" class="hint">
-          {{ remote.exists ? `${remote.files.length} 个文件 · ${formatSize(remote.total_bytes)}` : '镜像目录不存在' }}
+          {{ remote.exists ? `${remote.files.length} 个文件 · ${formatSize(remote.total_bytes)}` : '镜像目录未就绪' }}
         </span>
       </div>
 
+      <el-alert
+        v-if="remoteError"
+        type="warning"
+        :closable="false"
+        show-icon
+        title="检测目标机失败"
+        :description="remoteError"
+        class="remote-alert"
+      />
+
       <div v-if="remote" class="summary-row">
-        <el-tag :type="remote.exists ? 'success' : 'danger'" size="small">
-          {{ remote.exists ? '目录就绪' : '目录不存在' }}
+        <el-tag :type="remote.exists ? 'success' : 'warning'" size="small">
+          {{ remote.exists ? '目录就绪' : '未找到镜像目录' }}
         </el-tag>
         <el-tag :type="remote.docker_running ? 'success' : 'danger'" size="small">
           {{ remote.docker_running ? 'Docker 运行中' : 'Docker 未运行' }}
@@ -151,7 +180,7 @@
       </el-table>
 
       <div v-else class="empty-state">
-        {{ remote ? (remote.exists ? '镜像目录为空' : '目标机镜像目录不存在，请先上传本地镜像包') : '点击“检测目标机”读取镜像包与 Docker 镜像状态' }}
+        {{ remote ? (remote.exists ? '镜像目录为空' : '目标机镜像目录未就绪，请先上传本地镜像包') : '点击“检测目标机”读取镜像包与 Docker 镜像状态' }}
       </div>
     </div>
 
@@ -230,8 +259,10 @@ import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { FolderOpened, Refresh } from '@element-plus/icons-vue';
 import { open } from '@tauri-apps/plugin-dialog';
+import { listArtifactSources } from '../api/artifact.js';
 import {
   importRemoteImageBundle,
+  inspectBundleLayout,
   inspectRemoteImageBundle,
   loadOfflineImages,
   onImageManagerProgress,
@@ -248,28 +279,104 @@ const props = defineProps({
 });
 
 const isRemote = computed(() => props.connection.mode === 'remote');
-const mediaRoot = computed(() => props.connection.mediaDir || props.connection.bundleDir);
+const mediaRoot = computed(() =>
+  props.connection.mode === 'remote'
+    ? props.connection.mediaDir || props.connection.bundleDir
+    : props.connection.bundleDir || props.connection.mediaDir
+);
 const localDir = ref(
   props.connection.mode === 'remote'
-    ? readSavedLocalDir()
-    : mediaRoot.value
+    ? mediaRoot.value || readSavedLocalDir()
+    : mediaRoot.value || readSavedLocalDir()
 );
 const localScan = ref(null);
+const localLayout = ref(null);
+const localDirMissing = ref(false);
 const remote = ref(null);
-const remoteDir = ref(mediaRoot.value);
+const remoteError = ref('');
+const remoteDirPath = ref(
+  String(props.connection.remoteBundleDir || '').trim() ||
+    `${String(props.connection.deployDir || '/opt/deploy').replace(/\/+$/, '')}/bundle`
+);
 const selectedRemoteFiles = ref([]);
 const progress = ref([]);
 const resultLog = ref('');
 const resultTitle = ref('');
 const scanning = ref(false);
 const inspecting = ref(false);
+const findingBundle = ref(false);
 const uploading = ref(false);
 const importing = ref(false);
 let unlistenProgress = null;
 
 const busy = computed(() => scanning.value || inspecting.value || uploading.value || importing.value);
+
+const localState = computed(() => {
+  const scan = localScan.value;
+  if (!scan) {
+    return {
+      kind: 'idle',
+      tag: '',
+      tagType: 'info',
+      summary: '点击“扫描本地镜像包”读取目录内容',
+      showPath: false
+    };
+  }
+  if (scan.exists) {
+    if (scan.files?.length) {
+      return {
+        kind: 'ready',
+        tag: '目录就绪',
+        tagType: 'success',
+        summary: scan.message,
+        showPath: true
+      };
+    }
+    return {
+      kind: 'empty-images',
+      tag: '暂无镜像包',
+      tagType: 'warning',
+      title: '镜像目录为空',
+      hint: `目录 ${scan.images_dir} 中没有 .tar 镜像包，请放入镜像包或重新选择目录。`,
+      summary: '目录中没有 .tar 文件',
+      showPath: true
+    };
+  }
+  if (localLayout.value?.mode === 'file') {
+    return {
+      kind: 'file-mode',
+      tag: '文件模式',
+      tagType: 'info',
+      title: '当前为文件模式交付包',
+      hint: '该交付包只包含 app/ 与 deploy/，不包含 images 镜像包，无需导入镜像。如需镜像部署，请选择镜像模式交付包。',
+      summary: '该交付包无需镜像包',
+      showPath: false
+    };
+  }
+  if (localDirMissing.value) {
+    return {
+      kind: 'missing-dir',
+      tag: '目录不存在',
+      tagType: 'warning',
+      title: '本地交付包目录不存在',
+      hint: `未在本机找到 ${localDir.value.trim()}。请在制品中心下载交付包并设为当前部署包，或手动选择目录。`,
+      summary: '未在本机找到该目录',
+      showPath: false
+    };
+  }
+  return {
+    kind: 'missing-images',
+    tag: '缺少镜像包',
+    tagType: 'warning',
+    title: '未找到 images 镜像包',
+    hint: '该交付包没有 images/*.tar 镜像包，请选择镜像模式交付包或包含镜像包的目录。',
+    summary: '未找到 images/*.tar',
+    showPath: false
+  };
+});
+
 const remoteImagesDir = computed(() =>
-  `${String(mediaRoot.value || '').replace(/\/+$/, '')}/images`
+  `${String(remoteDirPath.value || '').replace(/\/+$/, '')}/images`
 );
 
 const remoteRows = computed(() => {
@@ -329,12 +436,15 @@ const canUpload = computed(
 const canImport = computed(
   () =>
     isRemote.value &&
-    remoteRows.value.some((row) => row.known && row.present) &&
+    remoteRows.value.some((row) => row.present) &&
     !busy.value &&
     remote.value?.docker_running
 );
 const canDelete = computed(() => selectedRemoteFiles.value.length > 0);
 const canLocalImport = computed(() => !isRemote.value && localScan.value?.files?.length > 0 && !busy.value);
+const canUseDownloadedBundle = computed(() =>
+  ['missing-dir', 'missing-images'].includes(localState.value.kind)
+);
 
 const formatSize = (bytes) => {
   const value = Number(bytes) || 0;
@@ -389,20 +499,47 @@ const handleRemoteSelection = (rows) => {
   selectedRemoteFiles.value = rows.map((row) => row.name);
 };
 
-const scanLocal = async () => {
-  if (!localDir.value.trim()) {
+const inspectLocalLayout = async (dir) => {
+  localLayout.value = null;
+  localDirMissing.value = false;
+  try {
+    localLayout.value = await inspectBundleLayout(dir);
+  } catch {
+    localDirMissing.value = true;
+  }
+};
+
+const scanLocal = async ({ silent = false } = {}) => {
+  const dir = localDir.value.trim();
+  if (!dir) {
     ElMessage.warning('请先选择本地镜像包目录');
     return;
   }
   scanning.value = true;
   try {
-    localScan.value = await scanLocalImageBundle(localDir.value.trim());
-    saveLocalDir(localDir.value.trim());
-    if (!localScan.value.exists) {
-      ElMessage.warning(localScan.value.message);
+    localScan.value = await scanLocalImageBundle(dir);
+    if (!silent) {
+      saveLocalDir(dir);
+    }
+    if (localScan.value.exists) {
+      localLayout.value = null;
+      localDirMissing.value = false;
+    } else {
+      await inspectLocalLayout(dir);
+    }
+    if (!silent) {
+      if (localState.value.kind === 'ready') {
+        ElMessage.success(`找到 ${localScan.value.files.length} 个镜像包文件`);
+      } else if (localState.value.kind === 'file-mode') {
+        ElMessage.info(localState.value.summary);
+      } else {
+        ElMessage.warning(localState.value.title || localState.value.summary);
+      }
     }
   } catch (e) {
     localScan.value = null;
+    localLayout.value = null;
+    localDirMissing.value = false;
     ElMessage.error(`扫描本地镜像包失败: ${e}`);
   } finally {
     scanning.value = false;
@@ -439,24 +576,70 @@ const pickLocalDir = async () => {
   }
 };
 
-const inspectRemote = async () => {
+const useDownloadedBundle = async () => {
+  findingBundle.value = true;
+  try {
+    const sources = await listArtifactSources();
+    const candidates = [
+      ...new Set(
+        sources
+          .map((source) => String(source.lastBundleDir || '').trim())
+          .filter(Boolean)
+      )
+    ];
+    for (const dir of candidates) {
+      if (dir === localDir.value.trim()) {
+        continue;
+      }
+      try {
+        await inspectBundleLayout(dir);
+      } catch {
+        continue;
+      }
+      localDir.value = dir;
+      saveLocalDir(dir);
+      await scanLocal({ silent: true });
+      ElMessage.success(`已切换到本地交付包 ${dir}`);
+      return;
+    }
+    ElMessage.warning('没有可用的本地交付包，请先在制品中心下载');
+  } catch (e) {
+    ElMessage.error(`读取本地交付包失败: ${e}`);
+  } finally {
+    findingBundle.value = false;
+  }
+};
+
+const inspectRemote = async ({ silent = false } = {}) => {
   if (!isRemote.value) {
     return;
   }
+  const host = String(props.connection.remoteHost || '').trim();
+  if (!host) {
+    remote.value = null;
+    remoteError.value = '';
+    if (!silent) {
+      ElMessage.warning('请先在设置中填写目标机地址');
+    }
+    return;
+  }
   inspecting.value = true;
+  remoteError.value = '';
   try {
     remote.value = await inspectRemoteImageBundle(
-      props.connection.remoteHost,
+      host,
       props.connection.remotePort,
       props.connection.remoteUser,
       props.connection.remoteKey || null,
-      mediaRoot.value
+      remoteDirPath.value
     );
-    remoteDir.value = remote.value.images_dir;
     selectedRemoteFiles.value = [];
   } catch (e) {
     remote.value = null;
-    ElMessage.error(`检测目标机镜像包失败: ${e}`);
+    remoteError.value = String(e);
+    if (!silent) {
+      ElMessage.error(`检测目标机镜像包失败: ${e}`);
+    }
   } finally {
     inspecting.value = false;
   }
@@ -501,7 +684,7 @@ const handleUpload = async (overwrite) => {
       props.connection.remoteUser,
       props.connection.remoteKey || null,
       localDir.value.trim(),
-      mediaRoot.value,
+      remoteDirPath.value,
       files,
       overwrite
     );
@@ -528,7 +711,7 @@ const applyImport = async (files) => {
       props.connection.remotePort,
       props.connection.remoteUser,
       props.connection.remoteKey || null,
-      mediaRoot.value,
+      remoteDirPath.value,
       files
     );
     resultLog.value = loaded.join('\n');
@@ -546,7 +729,7 @@ const applyImport = async (files) => {
 
 const handleImport = async (reloadAll) => {
   const files = remoteRows.value
-    .filter((row) => row.known && row.present && (reloadAll || !row.loaded))
+    .filter((row) => row.present && (reloadAll || !row.loaded))
     .map((row) => row.name);
   if (!files.length) {
     ElMessage.info('没有需要导入的镜像');
@@ -593,7 +776,7 @@ const handleDelete = async () => {
       props.connection.remotePort,
       props.connection.remoteUser,
       props.connection.remoteKey || null,
-      mediaRoot.value,
+      remoteDirPath.value,
       files
     );
     resultTitle.value = '删除完成';
@@ -611,10 +794,15 @@ onMounted(async () => {
     progress.value.push(payload);
   });
   if (localDir.value.trim()) {
-    await scanLocal();
+    await scanLocal({ silent: true });
+    const saved = readSavedLocalDir().trim();
+    if (localState.value.kind === 'missing-dir' && saved && saved !== localDir.value.trim()) {
+      localDir.value = saved;
+      await scanLocal({ silent: true });
+    }
   }
   if (isRemote.value) {
-    await inspectRemote();
+    await inspectRemote({ silent: true });
   }
 });
 
@@ -636,6 +824,10 @@ onUnmounted(() => {
 
 .mode-alert {
   margin-bottom: 20px;
+}
+
+.remote-alert {
+  margin-bottom: 12px;
 }
 
 .header-actions {
@@ -758,12 +950,34 @@ onUnmounted(() => {
 .empty-state {
   min-height: 120px;
   display: flex;
+  flex-direction: column;
+  gap: 8px;
   align-items: center;
   justify-content: center;
+  padding: 18px;
   color: var(--text-muted);
   font-size: 12px;
+  text-align: center;
   border: 1px dashed var(--border-color);
   border-radius: var(--radius-sm);
+}
+
+.empty-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.empty-hint {
+  max-width: 520px;
+  line-height: 1.6;
+}
+
+.empty-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: center;
 }
 
 .progress-bar {

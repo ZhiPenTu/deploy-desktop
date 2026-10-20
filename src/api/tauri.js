@@ -313,6 +313,161 @@ export async function inspectBundleLayout(bundleDir) {
   return await invoke('inspect_bundle_layout', { bundleDir });
 }
 
+const MOCK_COMPOSE_CONTENT = `name: tt-net-manager
+
+services:
+  kafka:
+    image: bitnamilegacy/kafka:4.0
+    container_name: tt-net-manager-kafka
+    restart: unless-stopped
+  frontend:
+    image: tt-net-manager-frontend:dev
+    container_name: tt-net-manager-frontend
+    ports:
+      - "18080:80"
+    depends_on:
+      - kafka
+  oceanbase:
+    image: oceanbase/oceanbase-ce:4.4.2-lts@sha256:eaa2c3b3513fa21e4a658f197c1deb93c9d6b6eb742cfa5ef0f085f82b9cec54
+    container_name: tt-net-manager-oceanbase
+`;
+
+const MOCK_BUNDLE_PLAN = {
+  product: 'tt-net-manager',
+  mode: 'file',
+  version: '7',
+  commit: '952e9dc3b939cba114d615fc6036a5a798fd41c2',
+  commitShort: '952e9dc3',
+  branch: 'master',
+  builtAt: '2026-10-20T01:12:27Z',
+  components: ['backend', 'gateway', 'frontend', 'config'],
+  appFiles: [
+    { path: 'app/tt-net-manager-server.jar', sizeBytes: 75633122 },
+    { path: 'app/frontend-dist/index.html', sizeBytes: 504 }
+  ],
+  configFiles: [
+    { path: 'deploy/cloudflared/config.yml', sizeBytes: 831 },
+    { path: 'deploy/docker-compose.lan.yml', sizeBytes: 18030 },
+    { path: 'deploy/docker-compose.yml', sizeBytes: 18769 }
+  ],
+  images: [
+    { imageRef: 'bitnamilegacy/kafka:4.0', source: 'compose', presentLocally: true },
+    { imageRef: 'tt-net-manager-frontend:dev', source: 'compose', presentLocally: true },
+    { imageRef: 'oceanbase/oceanbase-ce:4.4.2-lts', source: 'compose', presentLocally: false }
+  ],
+  imageCheck: 'local',
+  steps: [
+    { key: 'artifact', title: '获取交付包', detail: '版本 7 已解包', state: 'ready', hint: '' },
+    { key: 'images', title: '准备基础镜像', detail: '3 个镜像均已在本机', state: 'ready', hint: '' },
+    { key: 'distribute', title: '分发交付包', detail: 'app/ 2 个文件，deploy/ 3 个文件', state: 'ready', hint: '' },
+    { key: 'start', title: '启动容器栈', detail: 'docker compose up -d', state: 'ready', hint: '' },
+    { key: 'verify', title: '验证与验收', detail: '健康检查、登录与页面验证', state: 'ready', hint: '' }
+  ]
+};
+
+const MOCK_COMPOSE_VIEW = {
+  file: 'deploy/docker-compose.yml',
+  kind: 'compose',
+  sizeBytes: 18769,
+  content: MOCK_COMPOSE_CONTENT,
+  truncated: false,
+  services: [
+    {
+      name: 'kafka',
+      image: 'bitnamilegacy/kafka:4.0',
+      containerName: 'tt-net-manager-kafka',
+      restart: 'unless-stopped',
+      ports: [],
+      dependsOn: [],
+      profiles: []
+    },
+    {
+      name: 'frontend',
+      image: 'tt-net-manager-frontend:dev',
+      containerName: 'tt-net-manager-frontend',
+      restart: '',
+      ports: ['18080:80'],
+      dependsOn: ['kafka'],
+      profiles: []
+    },
+    {
+      name: 'oceanbase',
+      image: 'oceanbase/oceanbase-ce:4.4.2-lts@sha256:eaa2c3b3513fa21e4a658f197c1deb93c9d6b6eb742cfa5ef0f085f82b9cec54',
+      containerName: 'tt-net-manager-oceanbase',
+      restart: '',
+      ports: [],
+      dependsOn: [],
+      profiles: []
+    }
+  ],
+  images: [
+    {
+      imageRef: 'bitnamilegacy/kafka:4.0',
+      matchRef: 'bitnamilegacy/kafka:4.0',
+      services: ['kafka'],
+      localFile: 'kafka.tar',
+      localBytes: 132120576,
+      matchSource: 'profile',
+      dockerPresent: true,
+      status: 'ready'
+    },
+    {
+      imageRef: 'tt-net-manager-frontend:dev',
+      matchRef: 'tt-net-manager-frontend:dev',
+      services: ['frontend'],
+      localFile: 'frontend.tar',
+      localBytes: 48234496,
+      matchSource: 'filename',
+      dockerPresent: false,
+      status: 'to_import'
+    },
+    {
+      imageRef:
+        'oceanbase/oceanbase-ce:4.4.2-lts@sha256:eaa2c3b3513fa21e4a658f197c1deb93c9d6b6eb742cfa5ef0f085f82b9cec54',
+      matchRef: 'oceanbase/oceanbase-ce:4.4.2-lts',
+      services: ['oceanbase'],
+      localFile: '',
+      localBytes: 0,
+      matchSource: 'none',
+      dockerPresent: false,
+      status: 'missing'
+    }
+  ],
+  imageDir: '/opt/deploy/bundle/images',
+  imageDirExists: true,
+  manifest: 'images.json',
+  imageCheck: 'local',
+  issues: []
+};
+
+export async function inspectBundlePlan(bundleDir, target = null) {
+  if (!isTauri()) {
+    return { ...MOCK_BUNDLE_PLAN, bundleDir };
+  }
+  return await invoke('inspect_bundle_plan', {
+    bundleDir,
+    host: target?.host || null,
+    port: target?.port ?? null,
+    user: target?.user || null,
+    keyPath: target?.keyPath || null
+  });
+}
+
+export async function inspectBundleConfig(bundleDir, file, target = null, imageDir = '') {
+  if (!isTauri()) {
+    return { ...MOCK_COMPOSE_VIEW, file, imageDir: imageDir || MOCK_COMPOSE_VIEW.imageDir };
+  }
+  return await invoke('inspect_bundle_config', {
+    bundleDir,
+    file,
+    imageDir: imageDir || null,
+    host: target?.host || null,
+    port: target?.port ?? null,
+    user: target?.user || null,
+    keyPath: target?.keyPath || null
+  });
+}
+
 export async function inspectRemoteDeployment(host, port, user, keyPath, installDir) {
   if (!isTauri()) {
     return {

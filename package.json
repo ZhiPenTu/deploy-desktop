@@ -1,6 +1,6 @@
 {
   "name": "deploy-desktop",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,6 +11,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "dev:app": "bash scripts/dev-app.sh --launch",
+    "dev:app:build": "bash scripts/dev-app.sh",
     "mcp": "node mcp-server/index.mjs",
     "test:mcp": "npm --prefix mcp-server test"
   },

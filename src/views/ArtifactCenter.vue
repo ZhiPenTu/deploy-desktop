@@ -3,7 +3,7 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">制品中心</h2>
-        <p class="page-subtitle">从云效流水线获取构建产物，校验后作为部署与更新使用的交付包</p>
+        <p class="page-subtitle">从云效流水线获取构建产物，校验后作为部署与更新使用的交付包，并展示该包从制品到容器的完整链路</p>
       </div>
       <div class="header-actions">
         <el-tag type="info" effect="plain">当前部署包：{{ currentBundleText }}</el-tag>
@@ -32,13 +32,13 @@
           <span>刷新</span>
         </el-button>
       </div>
-      <span class="empty-hint">令牌保存在系统钥匙串，不写入配置文件</span>
+      <span class="empty-hint">令牌保存在本机应用数据目录，仅当前用户可读</span>
     </div>
 
     <div v-else class="card-surface">
       <div class="card-title-bar">
         <h3>制品源</h3>
-        <span class="hint">令牌保存在系统钥匙串，不写入配置文件</span>
+        <span class="hint">令牌保存在本机应用数据目录，仅当前用户可读</span>
       </div>
       <el-table :data="sources" size="small" class="source-table">
         <el-table-column label="名称" min-width="150">
@@ -108,58 +108,46 @@
       </el-table>
     </div>
 
-    <el-dialog
+    <div v-if="bundleDirText" class="plan-section">
+      <div v-if="planLoading" v-loading="true" class="plan-loading card-surface">
+        <span>正在读取交付包内容</span>
+      </div>
+
+      <el-alert
+        v-else-if="planError"
+        title="当前交付包目录不可读"
+        :description="planError"
+        type="warning"
+        :closable="false"
+        show-icon
+      />
+
+      <BundlePlanPanel
+        v-else-if="plan"
+        :plan="plan"
+        :target="remoteTarget"
+        :image-dir="imageDir"
+      >
+        <template #actions>
+          <el-button size="small" :loading="planLoading" @click="loadPlan">
+            <el-icon><Refresh /></el-icon>
+            <span>重新读取</span>
+          </el-button>
+          <el-button size="small" type="primary" @click="$emit('go-wizard')">
+            进入部署向导
+          </el-button>
+          <el-button size="small" @click="$emit('go-update')">
+            进入服务更新
+          </el-button>
+        </template>
+      </BundlePlanPanel>
+    </div>
+
+    <ArtifactSourceEditor
       v-model="editorVisible"
-      :title="editing ? '编辑制品源' : '新建制品源'"
-      width="580px"
-      :close-on-click-modal="!saving"
-    >
-      <el-form label-width="112px" label-position="left">
-        <el-form-item label="名称">
-          <el-input v-model="form.name" placeholder="例如：生产交付流水线" />
-        </el-form-item>
-        <el-form-item label="类型">
-          <el-select v-model="form.type" style="width: 100%">
-            <el-option label="云效流水线" value="yunxiaoFlow" />
-            <el-option label="直接下载地址" value="url" />
-          </el-select>
-        </el-form-item>
-        <template v-if="form.type === 'yunxiaoFlow'">
-          <el-form-item label="组织 ID">
-            <el-input v-model="form.orgId" placeholder="云效组织 ID" />
-          </el-form-item>
-          <el-form-item label="流水线 ID">
-            <el-input v-model="form.pipelineId" placeholder="数字流水线 ID" />
-          </el-form-item>
-          <el-form-item label="制品名">
-            <el-input v-model="form.artifactName" placeholder="deploy-bundle" />
-          </el-form-item>
-          <el-form-item label="访问令牌">
-            <el-input
-              v-model="tokenInput"
-              type="password"
-              show-password
-              :placeholder="editing && form.hasToken ? '已保存，留空表示不修改' : '云效个人访问令牌'"
-            />
-          </el-form-item>
-          <el-form-item v-if="editing && form.hasToken" label=" ">
-            <el-checkbox v-model="clearToken">清除已保存的令牌</el-checkbox>
-          </el-form-item>
-        </template>
-        <template v-else>
-          <el-form-item label="下载地址">
-            <el-input v-model="form.downloadUrl" placeholder="https://example.com/deploy-bundle.tgz" />
-          </el-form-item>
-        </template>
-      </el-form>
-      <p class="field-hint">
-        令牌只在拉取时使用，保存在系统钥匙串；配置文件只记录组织、流水线与制品名。
-      </p>
-      <template #footer>
-        <el-button @click="editorVisible = false">取消</el-button>
-        <el-button type="primary" :loading="saving" @click="save">保存</el-button>
-      </template>
-    </el-dialog>
+      :source="editing"
+      @saved="loadSources"
+    />
 
     <el-dialog v-model="releaseVisible" title="最新构建" width="640px" :close-on-click-modal="!downloading">
       <div v-if="release" class="release-body">
@@ -223,19 +211,21 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue';
+import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { Box, Plus, Refresh } from '@element-plus/icons-vue';
+import BundlePlanPanel from '../components/BundlePlanPanel.vue';
+import ArtifactSourceEditor from '../components/ArtifactSourceEditor.vue';
 import {
   deleteArtifactSource,
   deleteLocalBundle,
   downloadArtifact,
   fetchArtifactRelease,
   listArtifactSources,
-  openArtifactBundle,
-  saveArtifactSource
+  openArtifactBundle
 } from '../api/artifact.js';
+import { inspectBundlePlan } from '../api/tauri.js';
 
 const props = defineProps({
   connection: {
@@ -244,31 +234,36 @@ const props = defineProps({
   }
 });
 
+defineEmits(['go-wizard', 'go-update']);
+
 const sources = ref([]);
 const loading = ref(false);
 const loadingId = ref('');
 const removingId = ref('');
 const editorVisible = ref(false);
 const editing = ref(null);
-const saving = ref(false);
-const tokenInput = ref('');
-const clearToken = ref(false);
 const releaseVisible = ref(false);
 const release = ref(null);
 const releaseSource = ref(null);
 const downloading = ref(false);
 const bundle = ref(null);
 const progress = reactive({ percent: 0, stage: '' });
+const plan = ref(null);
+const planLoading = ref(false);
+const planError = ref('');
+const imageDir = ref(localStorage.getItem('image-local-dir') || '');
 
-const form = reactive({
-  id: '',
-  name: '',
-  type: 'yunxiaoFlow',
-  orgId: '',
-  pipelineId: '',
-  artifactName: 'deploy-bundle',
-  downloadUrl: '',
-  hasToken: false
+const bundleDirText = computed(() => String(props.connection.bundleDir || '').trim());
+
+const remoteTarget = computed(() => {
+  const connection = props.connection || {};
+  if (connection.mode !== 'remote' || !connection.remoteHost) return null;
+  return {
+    host: connection.remoteHost,
+    port: connection.remotePort,
+    user: connection.remoteUser,
+    keyPath: connection.remoteKey || null
+  };
 });
 
 const currentBundleText = computed(() => {
@@ -302,6 +297,27 @@ function formatTime(ms) {
   return new Date(Number(ms)).toLocaleString();
 }
 
+async function loadPlan() {
+  const dir = bundleDirText.value;
+  if (!dir) {
+    plan.value = null;
+    planError.value = '';
+    return;
+  }
+  planLoading.value = true;
+  planError.value = '';
+  try {
+    plan.value = await inspectBundlePlan(dir, remoteTarget.value);
+  } catch (error) {
+    plan.value = null;
+    planError.value = `读取交付包失败：${error}`;
+  } finally {
+    planLoading.value = false;
+  }
+}
+
+watch(bundleDirText, loadPlan, { immediate: true });
+
 async function loadSources() {
   loading.value = true;
   try {
@@ -315,60 +331,12 @@ async function loadSources() {
 
 function openCreate() {
   editing.value = null;
-  Object.assign(form, {
-    id: '',
-    name: '',
-    type: 'yunxiaoFlow',
-    orgId: '',
-    pipelineId: '',
-    artifactName: 'deploy-bundle',
-    downloadUrl: '',
-    hasToken: false
-  });
-  tokenInput.value = '';
-  clearToken.value = false;
   editorVisible.value = true;
 }
 
 function openEdit(row) {
   editing.value = row;
-  Object.assign(form, {
-    id: row.id,
-    name: row.name,
-    type: row.type || 'yunxiaoFlow',
-    orgId: row.orgId || '',
-    pipelineId: row.pipelineId || '',
-    artifactName: row.artifactName || 'deploy-bundle',
-    downloadUrl: row.downloadUrl || '',
-    hasToken: Boolean(row.hasToken)
-  });
-  tokenInput.value = '';
-  clearToken.value = false;
   editorVisible.value = true;
-}
-
-async function save() {
-  saving.value = true;
-  try {
-    await saveArtifactSource({
-      id: form.id,
-      name: form.name,
-      type: form.type,
-      orgId: form.orgId,
-      pipelineId: form.pipelineId,
-      artifactName: form.artifactName,
-      downloadUrl: form.downloadUrl,
-      token: tokenInput.value ? tokenInput.value : null,
-      clearToken: clearToken.value
-    });
-    editorVisible.value = false;
-    ElMessage.success('制品源已保存');
-    await loadSources();
-  } catch (error) {
-    ElMessage.error(String(error));
-  } finally {
-    saving.value = false;
-  }
 }
 
 function isInUse(row) {
@@ -621,5 +589,20 @@ onMounted(loadSources);
   margin-top: 16px;
   font-size: 11px;
   color: var(--text-faint);
+}
+
+.plan-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.plan-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 140px;
+  font-size: 13px;
+  color: var(--text-muted);
 }
 </style>

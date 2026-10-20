@@ -41,7 +41,7 @@
 </template>
 
 <script setup>
-import { Promotion, Odometer, DataBoard, Document, UploadFilled, Files, Connection, Box } from '@element-plus/icons-vue';
+import { Promotion, Odometer, DataBoard, Document, UploadFilled, Files, Connection, Box, Setting } from '@element-plus/icons-vue';
 
 const appVersion = __APP_VERSION__;
 
@@ -80,7 +80,8 @@ const navGroups = [
   {
     label: '高级',
     items: [
-      { key: 'registry', icon: Connection, title: '镜像仓库' }
+      { key: 'registry', icon: Connection, title: '镜像仓库' },
+      { key: 'settings', icon: Setting, title: '设置' }
     ]
   }
 ];

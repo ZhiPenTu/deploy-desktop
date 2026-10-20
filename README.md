@@ -65,6 +65,18 @@ npx tauri build --bundles appimage,deb   # Linux
 
 产物位于 `src-tauri/target/release/bundle/`。
 
+### macOS 本地运行开发版
+
+直接双击一个手工拼装的 `.app` 时，如果签名之后又覆盖了 `Contents/MacOS` 里的可执行文件，macOS 的 taskgated 会在启动瞬间以 `Code Signature Invalid` 直接杀掉进程（崩溃报告为 `SIGKILL (Code Signature Invalid)`）。因此开发版应用统一用脚本生成，脚本会先写入全部文件，最后再做 ad-hoc 签名并校验：
+
+```bash
+npm run dev:app         # 构建并打开 src-tauri/target/dev-app/DeployDev.app
+npm run dev:app:build   # 只构建不启动
+bash scripts/dev-app.sh --release --offline --launch
+```
+
+`dev:app` 会以 `com.deploydesktop.devtool` 作为 Bundle ID 单独运行，与已安装的 `com.deploydesktop.app` 互不影响。需要更新这个开发版时，重新执行脚本即可，不要手工把 `src-tauri/target/debug/deploy-desktop` 复制进已签名的 `.app`。
+
 ## 镜像清单与仓库
 
 1. 打开“镜像仓库”页面。
@@ -129,8 +141,19 @@ docker buildx imagetools inspect registry.cn-hangzhou.aliyuncs.com/your-namespac
 
 「制品中心」从云效流水线或直接下载地址获取交付包，校验 MD5 与包结构后解包到本地，并用「设为当前部署包」交给部署向导与服务更新使用。
 
-- 云效个人访问令牌只写入系统钥匙串，不落配置文件、不写日志。
+- 云效个人访问令牌保存在应用配置目录的 `artifact-tokens.json`（权限 0600），不写日志；
+  首次启动会尝试从旧钥匙串迁移一次，之后直接在「设置」中维护。
 - 交付包布局、校验规则、目录位置与流水线侧打包要求见 [docs/artifact-source.md](docs/artifact-source.md)。
+
+### 文件模式部署
+
+文件模式交付包（仅含 `app/` 与 `deploy/`）在启动容器栈时会自动：
+
+- 同时识别部署目录根部和 `deploy/` 子目录下的 compose 文件，并叠加 `.env` / `.env.local`；
+- 若 compose 未挂载 `frontend_dist`，生成 `docker-compose.frontend-bind.yml`，用 nginx 只读挂载前端产物；
+- `up -d` 完成后重启后端与网关容器，使 bind mount 的新 jar / classes 立即生效。
+
+上述前端覆盖依赖交付包自带 `deploy/nginx/frontend-*.conf`；缺失时不会静默回退到预构建前端镜像。
 
 ## 应用更新
 

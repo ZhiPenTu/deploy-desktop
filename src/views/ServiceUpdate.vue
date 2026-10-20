@@ -122,20 +122,30 @@
         <el-form-item label="更新包目录">
           <el-input v-model="bundleDir" placeholder="/tmp/deploy-offline-bundle" />
           <div class="field-hint">
-            请填写制品中心下载的交付包目录。镜像模式交付包只含 images/ 与 deploy/，勾选「镜像」即可完成升级。
+            请填写制品中心下载的交付包目录。文件模式交付包含 app/ 与 deploy/，替换产物即可升级；
+            镜像模式交付包含 images/ 与 deploy/，需要同时导入镜像。
           </div>
-          <div v-if="bundleMode !== 'unknown'" class="field-hint">
+          <div v-if="planLoading" class="field-hint">正在读取交付包内容</div>
+          <div v-else-if="planError" class="field-hint text-danger">读取交付包失败：{{ planError }}</div>
+          <div v-else-if="bundleMode !== 'unknown'" class="field-hint">
             已识别为{{ bundleMode === 'image' ? '镜像模式' : '文件模式' }}交付包
             <template v-if="bundleVersion">，版本 {{ bundleVersion }}</template>
             <template v-if="bundleMode === 'image' && bundleImages.length">
               ，包含 {{ bundleImages.length }} 个镜像包
             </template>
+            <template v-else-if="bundlePlan">
+              ，含 app/ {{ bundlePlan.appFiles.length }} 个文件、deploy/ {{ bundlePlan.configFiles.length }} 个文件
+            </template>
           </div>
         </el-form-item>
 
         <el-form-item label="更新组件">
+          <p v-if="bundleMode === 'file'" class="field-hint block-hint">
+            文件模式交付包不含应用镜像：容器直接挂载替换后的 jar、网关 classes 与前端产物，
+            基础镜像保持不变，因此本次不需要导入镜像。
+          </p>
           <el-checkbox-group v-model="selectedComponents" class="component-grid">
-            <el-checkbox value="image" border>
+            <el-checkbox v-if="bundleMode !== 'file'" value="image" border>
               <span class="component-title">镜像</span>
               <span class="component-desc">上传镜像包并 docker load，随后按新镜像重建服务</span>
             </el-checkbox>
@@ -245,7 +255,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { Refresh, UploadFilled } from '@element-plus/icons-vue';
 import {
-  inspectBundleLayout,
+  inspectBundlePlan,
   inspectRemoteDeployment,
   onRemoteUpdateProgress,
   updateRemoteDeployment
@@ -271,31 +281,58 @@ const selectedComponents = ref(['backend', 'gateway', 'frontend']);
 const bundleMode = ref('unknown');
 const bundleVersion = ref('');
 const bundleImages = ref([]);
+const bundlePlan = ref(null);
+const planLoading = ref(false);
+const planError = ref('');
 
-watch(
-  bundleDir,
-  async (value) => {
-    const dir = String(value || '').trim();
-    if (!dir) {
-      bundleMode.value = 'unknown';
-      return;
-    }
-    try {
-      const layout = await inspectBundleLayout(dir);
-      bundleMode.value = layout.mode || 'unknown';
-      bundleVersion.value = layout.version || '';
-      bundleImages.value = layout.images || [];
-      if (layout.mode === 'image') {
-        selectedComponents.value = ['image', 'config'];
-      } else if (layout.mode === 'file') {
-        selectedComponents.value = ['backend', 'gateway', 'frontend'];
-      }
-    } catch {
-      bundleMode.value = 'unknown';
-    }
-  },
-  { immediate: true }
-);
+const KNOWN_COMPONENTS = ['image', 'backend', 'gateway', 'frontend', 'config'];
+
+async function loadBundlePlan(value) {
+  const dir = String(value || '').trim();
+  if (!dir) {
+    bundleMode.value = 'unknown';
+    bundlePlan.value = null;
+    planError.value = '';
+    return;
+  }
+  planLoading.value = true;
+  planError.value = '';
+  try {
+    const remote = isRemote.value && props.connection.remoteHost
+      ? {
+          host: props.connection.remoteHost,
+          port: props.connection.remotePort,
+          user: props.connection.remoteUser,
+          keyPath: props.connection.remoteKey || null
+        }
+      : null;
+    const plan = await inspectBundlePlan(dir, remote);
+    bundlePlan.value = plan;
+    bundleMode.value = plan.mode || 'unknown';
+    bundleVersion.value = plan.version || '';
+    bundleImages.value = (plan.images || []).map((image) => image.imageRef);
+    applyComponentDefaults(plan);
+  } catch (error) {
+    bundlePlan.value = null;
+    bundleMode.value = 'unknown';
+    planError.value = String(error);
+  } finally {
+    planLoading.value = false;
+  }
+}
+
+function applyComponentDefaults(plan) {
+  if (plan.mode === 'image') {
+    selectedComponents.value = ['image', 'config'];
+    return;
+  }
+  const declared = (plan.components || []).filter((key) => KNOWN_COMPONENTS.includes(key));
+  const base = declared.length ? declared : ['backend', 'gateway', 'frontend', 'config'];
+  // 文件模式没有应用镜像，镜像包只在首次部署时准备。
+  selectedComponents.value = base.filter((key) => key !== 'image');
+}
+
+watch(bundleDir, loadBundlePlan, { immediate: true });
 const backup = ref(true);
 const progress = ref([]);
 const result = ref(null);
@@ -598,6 +635,15 @@ onUnmounted(() => {
 .field-hint.inline {
   width: auto;
   margin-top: 0;
+}
+
+.field-hint.block-hint {
+  margin-top: 0;
+  margin-bottom: 8px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--primary-soft);
+  color: var(--text-secondary);
 }
 
 .switch-row {

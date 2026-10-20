@@ -3,7 +3,7 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">离线部署向导</h2>
-        <p class="page-subtitle">按步骤完成目标环境配置、镜像导入、容器启动与数据库迁移</p>
+        <p class="page-subtitle">按步骤完成目标环境配置、交付包分发、容器启动与数据初始化</p>
       </div>
     </div>
 
@@ -64,7 +64,10 @@
           <el-form label-width="120px">
             <el-form-item label="交付包目录">
               <el-input v-model="config.bundleDir" placeholder="如: /opt/deploy/bundle，需包含 app/ 与 deploy/" />
-              <div class="field-hint">来自制品中心下载的交付包：镜像模式含 images/ 与 deploy/，文件模式含 app/ 与 deploy/。</div>
+              <div class="field-hint">
+                来自制品中心下载的交付包：文件模式含 app/ 与 deploy/，镜像模式含 images/ 与 deploy/。
+                <el-button link type="primary" @click="$emit('go-artifacts')">去制品中心选择</el-button>
+              </div>
             </el-form-item>
             <el-form-item label="离线介质目录">
               <el-input v-model="config.mediaDir" placeholder="如: /opt/deploy/bundle，其下需有 images/ 与 docker-engine/" />
@@ -226,60 +229,52 @@
         <div class="step-footer">
           <el-button @click="prevStep">上一步</el-button>
           <el-button type="primary" size="large" @click="nextStep">
-            <span>下一步：加载镜像</span>
+            <span>下一步：{{ isFileMode ? '准备基础镜像' : '导入镜像' }}</span>
             <el-icon class="el-icon--right"><ArrowRight /></el-icon>
           </el-button>
         </div>
       </div>
 
-      <!-- 步骤 3: 镜像加载与产物分发 -->
+      <!-- 步骤 3: 镜像准备与产物分发 -->
       <div v-if="activeStep === 2" class="step-card">
-        <h3>加载离线 Docker 镜像与分发应用产物</h3>
-        <p class="desc">批量加载 {{ profile.images.length }} 个离线镜像包，导入顺序由镜像清单决定。</p>
-        <p class="desc">
-          镜像包目录：
-          <code>{{ bundleImagesPath }}</code>
-          <el-button link type="primary" @click="emit('go-images')">打开镜像包管理</el-button>
+        <h3>{{ isFileMode ? '准备基础镜像并分发交付包' : '导入镜像并分发交付包' }}</h3>
+        <p class="desc" v-if="isFileMode">
+          当前为文件模式交付：容器直接挂载 <code>app/</code> 内的 jar、网关 classes 与前端产物，
+          不构建也不导入应用镜像。目标机只需具备基础镜像，然后分发交付包。
         </p>
-        <p class="desc">
-          镜像模式交付包自带 images/ 镜像包与 deploy/ 配置；文件模式交付包只含 app/ 与 deploy/，需要另行准备镜像包。
+        <p class="desc" v-else>
+          当前为镜像模式交付：先把交付包自带的镜像包导入目标机，再分发 compose 配置。
         </p>
 
-        <div class="action-box">
-          <el-button type="primary" :loading="loadingImages" @click="handleLoadImages">
-            开始批量导入离线镜像包
-          </el-button>
-          <span class="tip" v-if="imageMsg">{{ imageMsg }}</span>
+        <div v-if="!config.bundleDir" class="inline-alert">
+          <span>尚未选择交付包</span>
+          <el-button link type="primary" @click="$emit('go-artifacts')">去制品中心选择</el-button>
         </div>
 
-        <div class="progress-box" v-if="imageProgress">
-          <el-progress
-            :percentage="Math.round((imageProgress.current / imageProgress.total) * 100)"
-            :status="imageProgress.finished ? 'success' : ''"
-          />
-          <div class="prog-text">{{ imageProgress.message }}</div>
+        <div v-else-if="planLoading" v-loading="true" class="plan-placeholder">
+          <span>正在读取交付包内容</span>
         </div>
 
-        <div class="images-list">
-          <h4>预计载入镜像列表</h4>
-          <ul>
-            <li v-for="image in profile.images" :key="image.file">
-              <code>{{ image.imageRef }}</code>
-            </li>
-          </ul>
-        </div>
+        <el-alert
+          v-else-if="planError"
+          :title="planError"
+          type="error"
+          :closable="false"
+          show-icon
+          class="step-alert"
+        />
+
+        <BundlePlanPanel v-else-if="bundlePlan" :plan="bundlePlan" :limit="4" class="step-plan" />
 
         <div class="bundle-distribute">
           <h4>分发交付包到部署目录</h4>
           <p class="desc">
-            将交付包中的 <code>app/</code>、<code>images/</code> 与 <code>deploy/</code> 写入
-            <code>{{ installTarget }}</code>，容器才能读取到新的镜像、jar、网关 classes 与前端产物。
-            目标目录中的同名产物会被覆盖，已有的 <code>.env.local</code> 等未包含文件会保留。
+            将交付包中的 <code>app/</code> 与 <code>deploy/</code>（镜像模式还包括 <code>images/</code>）写入
+            <code>{{ installTarget }}</code>。目标目录中的同名产物会被覆盖，已有的 <code>.env.local</code> 等未包含文件会保留。
           </p>
           <div class="action-box">
             <el-button
               type="primary"
-              plain
               :loading="installingBundle"
               :disabled="!config.bundleDir"
               @click="handleInstallBundle"
@@ -290,6 +285,51 @@
           </div>
           <div v-if="bundleLog" class="terminal-log">
             <pre>{{ bundleLog }}</pre>
+          </div>
+        </div>
+
+        <div class="bundle-images">
+          <h4>{{ isFileMode ? '基础镜像准备（按需）' : '导入离线镜像包' }}</h4>
+          <p class="desc" v-if="isFileMode">
+            基础镜像不随交付包分发，只需在目标机准备一次。上方链路中显示「已具备」时可跳过本段；
+            显示「缺失」时，把镜像包放到下方目录后导入。
+          </p>
+          <p class="desc">
+            镜像包目录：
+            <code>{{ bundleImagesPath }}</code>
+            <el-button link type="primary" @click="emit('go-images')">打开镜像包管理</el-button>
+          </p>
+
+          <div class="action-box">
+            <el-button :type="isFileMode ? 'default' : 'primary'" :loading="loadingImages" @click="handleLoadImages">
+              {{ isFileMode ? '导入基础镜像包' : '批量导入离线镜像包' }}
+            </el-button>
+            <span class="tip" v-if="imageMsg">{{ imageMsg }}</span>
+          </div>
+
+          <div class="progress-box" v-if="imageProgress">
+            <el-progress
+              :percentage="Math.round((imageProgress.current / imageProgress.total) * 100)"
+              :status="imageProgress.finished ? 'success' : ''"
+            />
+            <div class="prog-text">{{ imageProgress.message }}</div>
+          </div>
+
+          <div class="images-list" v-if="plannedImages.length">
+            <h4>{{ isFileMode ? '目标机所需基础镜像' : '预计载入镜像列表' }}</h4>
+            <ul>
+              <li v-for="image in plannedImages" :key="image.imageRef">
+                <code>{{ image.imageRef }}</code>
+                <el-tag
+                  v-if="image.presentLocally !== undefined"
+                  size="small"
+                  :type="image.presentLocally ? 'success' : 'warning'"
+                  effect="plain"
+                >
+                  {{ image.presentLocally ? '已具备' : '缺失' }}
+                </el-tag>
+              </li>
+            </ul>
           </div>
         </div>
 
@@ -328,8 +368,12 @@
 
       <!-- 步骤 5: 数据库初始化与迁移 -->
       <div v-if="activeStep === 4" class="step-card">
-        <h3>OceanBase 数据库初始化与全量数据迁移</h3>
-        <p class="desc">自动探测 OceanBase 健康状态，并导入业务初始化表结构与全量 dump 数据。</p>
+        <h3>{{ isFileMode ? 'OceanBase 数据库初始化' : 'OceanBase 数据库初始化与全量数据迁移' }}</h3>
+        <p class="desc" v-if="isFileMode">
+          后端启动时由 Flyway 自动执行数据库迁移，空库会直接建到最新版本。
+          下面的手工导入只在需要覆盖为历史全量数据时使用。
+        </p>
+        <p class="desc" v-else>自动探测 OceanBase 健康状态，并导入业务初始化表结构与全量 dump 数据。</p>
 
         <div class="ob-probe-box">
           <div class="status-row">
@@ -424,7 +468,7 @@
 </template>
 
 <script setup>
-import { computed, ref, onMounted } from 'vue';
+import { computed, ref, onMounted, watch } from 'vue';
 import {
   ArrowRight,
   Check,
@@ -452,8 +496,10 @@ import {
   testSshConnection,
   setupRemoteSshKey,
   onImageLoadProgress,
-  installBundle
+  installBundle,
+  inspectBundlePlan
 } from '../api/tauri.js';
+import BundlePlanPanel from '../components/BundlePlanPanel.vue';
 import { profileState as profile } from '../config/profile.js';
 
 const props = defineProps({
@@ -463,13 +509,63 @@ const props = defineProps({
   }
 });
 
-const emit = defineEmits(['go-dashboard', 'go-images']);
+const emit = defineEmits(['go-dashboard', 'go-images', 'go-artifacts']);
 
 const activeStep = ref(0);
 
-const steps = ['模式配置', '环境检测', '镜像导入', '启动集群', '数据迁移', '完成验收'];
-
 const config = props.connection;
+
+const bundlePlan = ref(null);
+const planLoading = ref(false);
+const planError = ref('');
+
+const isFileMode = computed(() => (bundlePlan.value?.mode || 'file') === 'file');
+
+const steps = computed(() =>
+  isFileMode.value
+    ? ['模式配置', '环境检测', '交付包分发', '启动集群', '数据初始化', '完成验收']
+    : ['模式配置', '环境检测', '镜像导入', '启动集群', '数据迁移', '完成验收']
+);
+
+const plannedImages = computed(() => {
+  if (bundlePlan.value?.images?.length) {
+    return bundlePlan.value.images;
+  }
+  return profile.images.map((image) => ({ imageRef: image.imageRef }));
+});
+
+async function loadPlan() {
+  const dir = String(config.bundleDir || '').trim();
+  if (!dir) {
+    bundlePlan.value = null;
+    planError.value = '';
+    return;
+  }
+  planLoading.value = true;
+  planError.value = '';
+  try {
+    const remote = config.mode === 'remote' && config.remoteHost
+      ? {
+          host: config.remoteHost,
+          port: config.remotePort,
+          user: config.remoteUser,
+          keyPath: config.remoteKey || null
+        }
+      : null;
+    bundlePlan.value = await inspectBundlePlan(dir, remote);
+  } catch (error) {
+    bundlePlan.value = null;
+    planError.value = `读取交付包失败：${error}`;
+  } finally {
+    planLoading.value = false;
+  }
+}
+
+watch(
+  () => [config.bundleDir, config.mode, config.remoteHost],
+  loadPlan,
+  { immediate: true }
+);
 
 const mediaRoot = computed(() => config.mediaDir || config.bundleDir || '');
 const bundleImagesPath = computed(() => `${String(mediaRoot.value).replace(/\/+$/, '')}/images`);
@@ -1198,10 +1294,57 @@ onMounted(() => {
   border-top: 1px solid var(--border-color);
 }
 
-.bundle-distribute h4 {
+.bundle-distribute h4,
+.bundle-images h4 {
   margin: 0 0 8px;
   font-size: 14px;
   font-weight: 600;
   color: var(--text-main);
+}
+
+.bundle-images {
+  margin-top: 28px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border-color);
+}
+
+.step-plan {
+  margin-bottom: 20px;
+}
+
+.step-alert {
+  margin-bottom: 16px;
+}
+
+.inline-alert {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+  padding: 12px 16px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--panel-subtle);
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.plan-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 120px;
+  margin-bottom: 20px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--panel-subtle);
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.images-list li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 </style>
