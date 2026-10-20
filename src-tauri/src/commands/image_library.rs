@@ -14,7 +14,8 @@ use super::remote_ssh::find_binary;
 
 const SETTINGS_FILE: &str = "image-library-settings.json";
 const MANIFEST_FILE: &str = "images.json";
-const DEFAULT_DIR_NAME: &str = "离线部署助手";
+const DEFAULT_DIR_NAME: &str = "部署舱";
+const LEGACY_DIR_NAME: &str = "离线部署助手";
 const DEFAULT_PACKAGE_DIR: &str = "离线镜像包";
 
 #[derive(Debug, Clone, Serialize)]
@@ -552,7 +553,20 @@ fn default_offline_dir(app: &AppHandle) -> PathBuf {
         .or_else(dirs::document_dir)
         .or_else(|| dirs::home_dir().map(|home| home.join("Documents")))
         .unwrap_or_else(|| PathBuf::from("."));
-    base.join(DEFAULT_DIR_NAME).join(DEFAULT_PACKAGE_DIR)
+    resolve_default_offline_dir(&base)
+}
+
+/// 优先使用新目录名；升级用户已有离线包时继续沿用旧目录，避免丢失既有发现结果。
+fn resolve_default_offline_dir(base: &Path) -> PathBuf {
+    let preferred = base.join(DEFAULT_DIR_NAME).join(DEFAULT_PACKAGE_DIR);
+    if preferred.exists() {
+        return preferred;
+    }
+    let legacy = base.join(LEGACY_DIR_NAME).join(DEFAULT_PACKAGE_DIR);
+    if legacy.exists() {
+        return legacy;
+    }
+    preferred
 }
 
 fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -1264,6 +1278,23 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn default_offline_dir_keeps_legacy_directory_on_upgrade() {
+        let base = temp_dir("offline-dir");
+        let preferred = base.join(DEFAULT_DIR_NAME).join(DEFAULT_PACKAGE_DIR);
+        let legacy = base.join(LEGACY_DIR_NAME).join(DEFAULT_PACKAGE_DIR);
+
+        assert_eq!(resolve_default_offline_dir(&base), preferred);
+
+        fs::create_dir_all(&legacy).unwrap();
+        assert_eq!(resolve_default_offline_dir(&base), legacy);
+
+        fs::create_dir_all(&preferred).unwrap();
+        assert_eq!(resolve_default_offline_dir(&base), preferred);
+
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
