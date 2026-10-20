@@ -4,13 +4,13 @@
       <div>
         <el-button v-if="activeSource" link class="back-button" @click="backToSources">
           <el-icon><ArrowLeft /></el-icon>
-          <span>返回制品源管理</span>
+          <span>返回制品源列表</span>
         </el-button>
-        <h2 class="page-title">{{ activeSource ? '制品列表' : '制品源管理' }}</h2>
+        <h2 class="page-title">{{ activeSource ? '制品列表' : '选择制品源' }}</h2>
         <p class="page-subtitle">
           {{ activeSource
             ? `查看 ${activeSource.name} 的制品、版本号和下载状态`
-            : '选择制品源，查看可下载的制品及对应版本' }}
+            : '选择已配置的制品源，查看可下载的制品及对应版本' }}
         </p>
       </div>
       <div class="header-actions">
@@ -24,10 +24,7 @@
             <el-icon><Refresh /></el-icon>
             <span>刷新</span>
           </el-button>
-          <el-button type="primary" @click="openCreate">
-            <el-icon><Plus /></el-icon>
-            <span>新建制品源</span>
-          </el-button>
+          <el-button @click="goSourceSettings">前往设置</el-button>
         </template>
       </div>
     </div>
@@ -35,13 +32,10 @@
     <template v-if="!activeSource">
       <div v-if="!loading && !sources.length" class="empty-panel card-surface">
         <span class="empty-icon"><el-icon><Box /></el-icon></span>
-        <h3>尚未配置制品源</h3>
-        <p>新建制品源后，可在该来源下查看最新版本与历史版本，下载并校验交付包。</p>
+        <h3>还没有可用的制品源</h3>
+        <p>在设置的“制品设置”中添加云效流水线或直链下载来源后，即可在这里查看版本并下载交付包。</p>
         <div class="empty-actions">
-          <el-button type="primary" @click="openCreate">
-            <el-icon><Plus /></el-icon>
-            <span>新建制品源</span>
-          </el-button>
+          <el-button type="primary" @click="goSourceSettings">前往设置</el-button>
           <el-button :loading="loading" @click="loadSources">
             <el-icon><Refresh /></el-icon>
             <span>刷新</span>
@@ -98,11 +92,9 @@
               </div>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="210">
+          <el-table-column label="操作" width="120">
             <template #default="{ row }">
               <el-button link type="primary" @click="openSource(row)">查看制品</el-button>
-              <el-button link @click="openEdit(row)">编辑</el-button>
-              <el-button link type="danger" @click="remove(row)">删除</el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -160,7 +152,6 @@
           >
             <el-option v-for="source in sources" :key="source.id" :label="source.name" :value="source.id" />
           </el-select>
-          <el-button @click="openEdit(activeSource)">编辑制品源</el-button>
           <el-button
             v-if="activeSource.lastBundleDir"
             type="warning"
@@ -210,7 +201,7 @@
           <div class="alert-actions">
             <span>请检查制品源配置后重试。</span>
             <el-button size="small" @click="loadReleases({ reset: true })">重试</el-button>
-            <el-button size="small" @click="openEdit(activeSource)">编辑制品源</el-button>
+            <el-button size="small" @click="goSourceSettings">前往设置</el-button>
           </div>
         </el-alert>
 
@@ -303,12 +294,6 @@
       </div>
     </template>
 
-    <ArtifactSourceEditor
-      v-model="editorVisible"
-      :source="editing"
-      @saved="handleSourceSaved"
-    />
-
     <el-dialog
       v-model="releaseVisible"
       :title="releaseDialogTitle"
@@ -369,11 +354,9 @@
 <script setup>
 import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { ArrowLeft, Box, Plus, Refresh } from '@element-plus/icons-vue';
+import { ArrowLeft, Box, Refresh } from '@element-plus/icons-vue';
 import BundlePlanPanel from '../components/BundlePlanPanel.vue';
-import ArtifactSourceEditor from '../components/ArtifactSourceEditor.vue';
 import {
-  deleteArtifactSource,
   deleteLocalBundle,
   downloadArtifact,
   listArtifactReleases,
@@ -390,14 +373,12 @@ const props = defineProps({
   }
 });
 
-defineEmits(['go-wizard', 'go-update']);
+const emit = defineEmits(['go-wizard', 'go-update', 'go-settings']);
 
 const sources = ref([]);
 const loading = ref(false);
 const refreshingActive = ref(false);
 const removingId = ref('');
-const editorVisible = ref(false);
-const editing = ref(null);
 const activeSourceId = ref('');
 const releases = ref([]);
 const releasesLoading = ref(false);
@@ -637,23 +618,6 @@ function loadMore() {
   loadReleases({ reset: false });
 }
 
-function openCreate() {
-  editing.value = null;
-  editorVisible.value = true;
-}
-
-function openEdit(row) {
-  editing.value = row;
-  editorVisible.value = true;
-}
-
-async function handleSourceSaved() {
-  await loadSources();
-  if (activeSource.value) {
-    await loadReleases({ reset: true });
-  }
-}
-
 async function removeLocal(row) {
   const inUse = isInUse(row);
   const message = inUse
@@ -684,23 +648,6 @@ async function removeLocal(row) {
     ElMessage.error(String(error));
   } finally {
     removingId.value = '';
-  }
-}
-
-async function remove(row) {
-  try {
-    await ElMessageBox.confirm(`确认删除制品源「${row.name}」？本地已下载的交付包不会被删除。`, '删除制品源', {
-      type: 'warning'
-    });
-  } catch {
-    return;
-  }
-  try {
-    await deleteArtifactSource(row.id);
-    ElMessage.success('已删除');
-    await loadSources();
-  } catch (error) {
-    ElMessage.error(String(error));
   }
 }
 
@@ -766,6 +713,10 @@ async function useExisting(row) {
   } finally {
     loadingVersionKey.value = '';
   }
+}
+
+function goSourceSettings() {
+  emit('go-settings', 'artifacts');
 }
 
 function applyBundle() {

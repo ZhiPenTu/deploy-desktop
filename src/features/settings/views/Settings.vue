@@ -162,13 +162,17 @@ const props = defineProps({
   connection: {
     type: Object,
     required: true
+  },
+  initialSection: {
+    type: String,
+    default: 'artifacts'
   }
 });
 
 defineEmits(['go-artifacts', 'go-images']);
 
 const appVersion = __APP_VERSION__;
-const activeSection = ref('artifacts');
+const activeSection = ref(props.initialSection || 'artifacts');
 const sources = ref([]);
 const loading = ref(false);
 const editorVisible = ref(false);

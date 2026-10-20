@@ -2,7 +2,7 @@
 
 ## 配置与使用
 
-入口为“镜像与离线包”的“镜像源管理”标签，也可在“镜像仓库”页面维护同一组配置。支持兼容 Docker Registry V2 的公开或私有仓库，如 ACR、Harbor、GHCR。
+入口为“设置”的“镜像设置”板块，镜像源列表与清单拉取在同一页面维护。支持兼容 Docker Registry V2 的公开或私有仓库，如 ACR、Harbor、GHCR。
 
 首次打开列表时预置 DaoCloud 加速（`docker.m.daocloud.io`）、毫秒镜像加速（`docker.1ms.run`）和轩辕镜像加速（`docker.xuanyuan.me`）三个国内公共加速源，命名空间预设为 `library`，对应 Docker Hub 官方镜像的路径前缀；拉取组织镜像（如 `bitnami/nginx`）时先清空命名空间。默认源与自行添加的源一致，可编辑或删除；全部删除后不会再次生成。
 

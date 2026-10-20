@@ -58,17 +58,19 @@
           :connection="connection"
           @go-wizard="currentTab = 'wizard'"
           @go-update="currentTab = 'update'"
+          @go-settings="openSettings"
         />
 
         <ImageManager
           v-else-if="currentTab === 'images'"
           :connection="connection"
-          @go-settings="currentTab = 'settings'"
+          @go-settings="openSettings"
         />
 
         <Settings
           v-else-if="currentTab === 'settings'"
           :connection="connection"
+          :initial-section="settingsSection"
           @go-artifacts="currentTab = 'artifacts'"
           @go-images="currentTab = 'images'"
         />
@@ -116,6 +118,11 @@ const pages = {
 };
 
 const currentTab = ref('wizard');
+const settingsSection = ref('artifacts');
+function openSettings(section) {
+  settingsSection.value = section || 'artifacts';
+  currentTab.value = 'settings';
+}
 const isMacDesktop = isDesktopApp() && /mac os x/i.test(navigator.userAgent);
 const wizardBusy = ref(false);
 const updateBusy = ref(false);

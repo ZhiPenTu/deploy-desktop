@@ -34,7 +34,6 @@
               <el-icon><Download /></el-icon>
               <span>拉取镜像</span>
             </el-button>
-            <el-button @click="activeTab = 'sources'">管理镜像源</el-button>
           </div>
 
           <div class="selection-row">
@@ -215,10 +214,6 @@
         </div>
       </el-tab-pane>
 
-      <el-tab-pane label="镜像源管理" name="sources" lazy>
-        <RegistrySourceManager @changed="updateRegistrySources" />
-      </el-tab-pane>
-
       <el-tab-pane v-if="isRemote" label="远程分发" name="remote">
         <RemoteImageDistribution :connection="connection" />
       </el-tab-pane>
@@ -257,7 +252,7 @@
             <el-option label="直接填写完整镜像地址" value="" />
             <el-option v-for="source in registrySources" :key="source.id" :label="`${source.name}（${source.address}）`" :value="source.id" />
           </el-select>
-          <el-button link type="primary" @click="manageSourcesFromPull">管理镜像源</el-button>
+          <el-button link type="primary" @click="goSourceSettings">管理镜像源</el-button>
         </el-form-item>
         <el-form-item label="镜像地址" required>
           <el-input
@@ -301,7 +296,6 @@ import { computed, onMounted, reactive, ref } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { Download, Refresh } from '@element-plus/icons-vue';
 import RemoteImageDistribution from '../components/RemoteImageDistribution.vue';
-import RegistrySourceManager from '../../registry/components/RegistrySourceManager.vue';
 import {
   exportLocalDockerImages,
   getImageLibrarySettings,
@@ -376,10 +370,10 @@ function updateRegistrySources(sources) {
   if (!sources.some((source) => source.id === pullForm.registrySourceId)) pullForm.registrySourceId = '';
 }
 
-function manageSourcesFromPull() {
+function goSourceSettings() {
   if (pulling.value) return;
   closePullDialog();
-  activeTab.value = 'sources';
+  emit('go-settings', 'images');
 }
 
 const refreshing = computed(
@@ -767,7 +761,7 @@ const handleImportPackages = async () => {
 };
 
 const goSettings = () => {
-  emit('go-settings');
+  emit('go-settings', 'images');
 };
 
 useDesktopProgress(onImageLibraryProgress, (payload) => {

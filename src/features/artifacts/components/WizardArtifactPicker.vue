@@ -41,7 +41,7 @@
         </div>
 
         <p v-if="desktopAvailable && !sources.length && !busy" class="field-hint">
-          尚未配置制品源，可前往制品中心添加，或选择本机制品。
+          尚未配置制品源，请先在设置的“制品设置”中添加，或选择本机制品。
         </p>
         <div v-if="selectedSource" class="source-actions">
           <el-button
@@ -290,7 +290,7 @@ function failureText(error, action) {
     if (/目录|交付包/.test(action) && !/下载/.test(action)) {
       return '无法读取所选交付包，请确认文件访问权限后重试。';
     }
-    return '无法访问制品源，请在制品中心检查访问凭证和权限后重试。';
+    return '无法访问制品源，请在设置的“制品设置”中检查访问凭证和权限后重试。';
   }
   if (/非法路径|符号链接|不安全|路径.*越界/.test(reason)) {
     return '交付包包含不安全的路径或链接，已停止解压，请重新获取可信的交付包。';
