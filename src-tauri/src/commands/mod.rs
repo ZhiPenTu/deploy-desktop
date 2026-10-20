@@ -8,6 +8,7 @@ pub mod image_library;
 pub mod image_manager;
 pub mod profile;
 pub mod registry;
+pub mod registry_sources;
 pub mod remote_ssh;
 pub mod remote_update;
 pub mod updater;

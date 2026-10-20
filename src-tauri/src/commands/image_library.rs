@@ -9,6 +9,9 @@ use std::time::UNIX_EPOCH;
 
 use tauri::{AppHandle, Emitter, Manager};
 
+use super::registry_sources::{reference_from_source, source_access, source_credentials};
+use super::remote_ssh::find_binary;
+
 const SETTINGS_FILE: &str = "image-library-settings.json";
 const MANIFEST_FILE: &str = "images.json";
 const DEFAULT_DIR_NAME: &str = "离线部署助手";
@@ -199,12 +202,22 @@ fn parse_docker_image_line(line: &str) -> Option<LocalDockerImage> {
 #[tauri::command]
 pub async fn pull_local_docker_image(
     window: tauri::Window,
+    app: AppHandle,
     reference: String,
     username: Option<String>,
     password: Option<String>,
+    registry_source_id: Option<String>,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let reference = validate_reference(&reference)?;
+        let access = source_access(&app, registry_source_id.as_deref())?;
+        let (reference, username, password) = if let Some(access) = access {
+            let reference = reference_from_source(&access.source, &reference)?;
+            let (username, password) = source_credentials(access, password)?;
+            (reference, username, password)
+        } else {
+            (reference, username, password)
+        };
+        let reference = validate_pull_reference(&reference)?;
         let username = username.unwrap_or_default();
         let username = username.trim().to_string();
         let password = password.unwrap_or_default();
@@ -232,7 +245,7 @@ pub async fn pull_local_docker_image(
         }
 
         emit_progress(&window, "pull", 1, 1, &reference, 20, "正在拉取镜像", false);
-        let mut command = Command::new("docker");
+        let mut command = Command::new(find_binary("docker"));
         command.args(["pull", &reference]);
         if let Some(config) = &temp_config {
             command.env("DOCKER_CONFIG", &config.path);
@@ -240,10 +253,10 @@ pub async fn pull_local_docker_image(
         let output = command.output().map_err(docker_command_error)?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(docker_failure(&stderr));
+            return Err(docker_failure(&redact_secret(&stderr, &password)));
         }
 
-        let message = compact_docker_output(&output.stdout, &output.stderr);
+        let message = redact_secret(&compact_docker_output(&output.stdout, &output.stderr), &password);
         emit_progress(
             &window,
             "pull",
@@ -665,6 +678,24 @@ fn validate_reference(reference: &str) -> Result<String, String> {
     Ok(value.to_string())
 }
 
+fn validate_pull_reference(reference: &str) -> Result<String, String> {
+    let value = validate_reference(reference)?;
+    let Some((repository, digest)) = value.rsplit_once("@sha256:") else {
+        return Err("请使用包含 sha256 摘要的镜像地址，以固定镜像版本".to_string());
+    };
+    if repository.is_empty() || repository.starts_with('/') || repository.contains("..")
+        || repository.contains("//") || repository.contains('@') || repository.contains("://")
+        || digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err("镜像地址无效，请检查仓库路径及 64 位小写 sha256 摘要".to_string());
+    }
+    Ok(value)
+}
+
+fn redact_secret(text: &str, password: &str) -> String {
+    if password.is_empty() { text.to_string() } else { text.replace(password, "[已隐藏]") }
+}
+
 fn registry_for_reference(reference: &str) -> String {
     let first = reference.split('/').next().unwrap_or("");
     if reference.contains('/')
@@ -676,13 +707,13 @@ fn registry_for_reference(reference: &str) -> String {
     }
 }
 
-fn login_docker(
+pub(super) fn login_docker(
     registry: &str,
     username: &str,
     password: &str,
     docker_config: &Path,
 ) -> Result<(), String> {
-    let mut command = Command::new("docker");
+    let mut command = Command::new(find_binary("docker"));
     command
         .args(["login", registry, "-u", username, "--password-stdin"])
         .env("DOCKER_CONFIG", docker_config)
@@ -699,18 +730,17 @@ fn login_docker(
         .wait_with_output()
         .map_err(|e| format!("等待 Docker 登录失败：{e}"))?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("镜像仓库登录失败：{}", stderr.trim()));
+        return Err("镜像源登录失败，请检查用户名、密码、网络和仓库证书".to_string());
     }
     Ok(())
 }
 
-struct TempDockerConfig {
-    path: PathBuf,
+pub(super) struct TempDockerConfig {
+    pub(super) path: PathBuf,
 }
 
 impl TempDockerConfig {
-    fn create() -> Result<Self, String> {
+    pub(super) fn create() -> Result<Self, String> {
         let stamp = std::time::SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_nanos())
@@ -1240,6 +1270,15 @@ mod tests {
         );
         assert_eq!(archive_name_for("../../etc/passwd"), "_.._etc_passwd.tar");
         assert!(!archive_name_for("a/b:c").contains('/'));
+    }
+
+    #[test]
+    fn pulls_require_a_fixed_digest() {
+        let digest = "a".repeat(64);
+        assert!(validate_pull_reference(&format!("registry.example.com/demo/app@sha256:{digest}")).is_ok());
+        assert!(validate_pull_reference("demo/app:latest").is_err());
+        assert!(validate_pull_reference("demo/app@sha256:abc").is_err());
+        assert!(validate_pull_reference(&format!("https://registry.example.com/app@sha256:{digest}")).is_err());
     }
 
     #[test]

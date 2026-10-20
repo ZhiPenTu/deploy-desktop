@@ -3,14 +3,14 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">镜像仓库</h2>
-        <p class="page-subtitle">可选高级能力：按清单从镜像仓库拉取镜像；标准交付在制品中心与“镜像与离线包”页面完成</p>
+        <p class="page-subtitle">管理镜像源，按清单拉取指定版本的镜像并导出离线包</p>
       </div>
       <div class="header-actions">
         <el-tag v-if="isRemote" type="primary" effect="plain">
           远程 {{ connection.remoteHost || '未配置主机' }}
         </el-tag>
         <el-tag v-else type="info" effect="plain">本地部署</el-tag>
-        <el-button :loading="loading" @click="loadManifest">
+        <el-button :loading="loading" :disabled="pulling" @click="loadManifest">
           <el-icon><DocumentChecked /></el-icon>
           <span>加载清单</span>
         </el-button>
@@ -18,13 +18,15 @@
     </div>
 
     <el-alert
-      :title="isRemote ? '远程模式在目标机执行 docker login 与 docker pull' : '本地模式在当前机器执行 docker login 与 docker pull'"
-      description="标准离线交付无需配置镜像仓库。仅在需要从远端仓库补充镜像时使用；凭据只保存在本次运行内存中，清单必须用 sha256 摘要固定版本。"
+      :title="isRemote ? '镜像将拉取到当前目标机' : '镜像将拉取到本机 Docker'"
+      description="可选择已保存的镜像源，或使用清单中的仓库地址。请确认镜像地址与拉取目标，镜像版本使用 sha256 摘要固定。"
       type="info"
       :closable="false"
       show-icon
       class="mode-alert"
     />
+
+    <RegistrySourceManager :disabled="pulling || loading" @changed="updateRegistrySources" />
 
     <div class="card-surface registry-card">
       <div class="card-title-bar">
@@ -32,13 +34,21 @@
         <span class="hint">支持 HTTP(S) 地址、本地 YAML 或 JSON 文件，最大 5 MB</span>
       </div>
 
-      <el-form label-width="110px">
+      <el-form label-width="110px" :disabled="pulling || loading">
+        <el-form-item label="镜像源">
+          <el-select v-model="registrySourceId" clearable placeholder="使用清单中的仓库" style="width: 100%" @change="resetManifest">
+            <el-option label="使用清单中的仓库" value="" />
+            <el-option v-for="source in registrySources" :key="source.id" :label="`${source.name}（${source.address}）`" :value="source.id" />
+          </el-select>
+          <div class="field-hint">选择镜像源后将使用其仓库地址；已填写的命名空间会替换清单中的命名空间。请重新加载清单并确认镜像地址。</div>
+        </el-form-item>
         <el-form-item label="清单来源">
           <div class="source-row">
             <el-input
               v-model="manifestSource"
               placeholder="https://example.com/manifest.yaml 或 /path/to/manifest.yaml"
               clearable
+              @input="resetManifest"
               @keyup.enter="loadManifest"
             />
             <el-button @click="pickManifestFile">选择文件</el-button>
@@ -111,20 +121,23 @@
 
     <div class="card-surface registry-card">
       <div class="card-title-bar">
-        <h3>仓库凭据与离线导出</h3>
-        <span class="hint">凭据可留空，适用于公开仓库或目标机已登录的仓库</span>
+        <h3>镜像访问与离线导出</h3>
+        <span class="hint">未选择镜像源时，可填写仅供本次拉取使用的凭据</span>
       </div>
 
-      <el-form label-width="110px">
-        <el-form-item label="仓库用户名">
-          <el-input v-model="registryUser" placeholder="阿里云 ACR 用户名" autocomplete="off" clearable />
+      <el-form label-width="110px" :disabled="pulling">
+        <el-form-item v-if="selectedRegistrySource" label="访问方式">
+          <span>{{ selectedRegistrySource.username ? `${selectedRegistrySource.username}（${selectedRegistrySource.hasPassword ? '使用已保存的密码' : '请填写本次密码'}）` : '无需登录' }}</span>
         </el-form-item>
-        <el-form-item label="仓库密码">
+        <el-form-item v-else label="仓库用户名">
+          <el-input v-model="registryUser" placeholder="公开仓库可留空" autocomplete="off" clearable />
+        </el-form-item>
+        <el-form-item v-if="!selectedRegistrySource || (selectedRegistrySource.username && !selectedRegistrySource.hasPassword)" label="密码或令牌">
           <el-input
             v-model="registryPassword"
             type="password"
             show-password
-            placeholder="仅保存在当前运行内存中"
+            placeholder="仅用于本次拉取，不会保存"
             autocomplete="new-password"
           />
         </el-form-item>
@@ -138,7 +151,7 @@
             <el-button v-if="!isRemote" @click="pickExportDir">选择目录</el-button>
           </div>
           <div class="field-hint">
-            填写导出目录后，每个镜像会在拉取完成后执行 docker save 生成 tar 包；留空则只拉取到 Docker。
+            填写目录后，镜像拉取完成会自动导出为 tar 离线包；留空则只拉取到 Docker。
           </div>
         </el-form-item>
       </el-form>
@@ -209,6 +222,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue';
 import { ElMessage } from 'element-plus';
 import { DocumentChecked, Download } from '@element-plus/icons-vue';
 import { open } from '@tauri-apps/plugin-dialog';
+import RegistrySourceManager from '../components/RegistrySourceManager.vue';
 import {
   loadImageManifest,
   onRegistryProgress,
@@ -236,7 +250,24 @@ const results = ref([]);
 const resultLog = ref('');
 const loading = ref(false);
 const pulling = ref(false);
+const registrySourceId = ref('');
+const registrySources = ref([]);
+const selectedRegistrySource = computed(() => registrySources.value.find((source) => source.id === registrySourceId.value));
 let unlistenProgress = null;
+
+function resetManifest() {
+  summary.value = null;
+  selectedNames.value = [];
+  registryUser.value = '';
+  registryPassword.value = '';
+}
+
+function updateRegistrySources(sources) {
+  const selected = sources.find((source) => source.id === registrySourceId.value);
+  if (JSON.stringify(selected) !== JSON.stringify(selectedRegistrySource.value)) resetManifest();
+  registrySources.value = sources;
+  if (!selected) registrySourceId.value = '';
+}
 
 const registryPath = computed(() => {
   if (!summary.value) {
@@ -291,6 +322,7 @@ const pickManifestFile = async () => {
     });
     if (typeof selected === 'string' && selected) {
       manifestSource.value = selected;
+      resetManifest();
     }
   } catch (e) {
     ElMessage.error(`选择清单文件失败: ${e}`);
@@ -309,6 +341,7 @@ const pickExportDir = async () => {
 };
 
 const loadManifest = async () => {
+  if (loading.value || pulling.value) return;
   const source = manifestSource.value.trim();
   if (!source) {
     ElMessage.warning('请填写清单地址或选择本地文件');
@@ -321,7 +354,7 @@ const loadManifest = async () => {
   progress.value = [];
   selectedNames.value = [];
   try {
-    summary.value = await loadImageManifest(source);
+    summary.value = await loadImageManifest(source, registrySourceId.value || null);
     manifestSource.value = summary.value.source;
     await nextTick();
     const table = imageTable.value;
@@ -337,8 +370,13 @@ const loadManifest = async () => {
 };
 
 const validateCredentials = () => {
-  if (registryPassword.value && !registryUser.value.trim()) {
+  const source = selectedRegistrySource.value;
+  if (!source && registryPassword.value && !registryUser.value.trim()) {
     ElMessage.warning('已填写仓库密码，请同时填写仓库用户名');
+    return false;
+  }
+  if ((source?.username && !source.hasPassword && !registryPassword.value) || (!source && registryUser.value.trim() && !registryPassword.value)) {
+    ElMessage.warning('请填写仓库密码或访问令牌');
     return false;
   }
   if (isRemote.value && !props.connection.remoteHost) {
@@ -349,6 +387,7 @@ const validateCredentials = () => {
 };
 
 const startPull = async () => {
+  if (pulling.value || loading.value) return;
   if (!summary.value) {
     ElMessage.warning('请先加载镜像清单');
     return;
@@ -365,7 +404,7 @@ const startPull = async () => {
   progress.value = [];
   results.value = [];
   resultLog.value = '';
-  const username = registryUser.value.trim() || null;
+  const username = selectedRegistrySource.value ? null : registryUser.value.trim() || null;
   const password = registryPassword.value ? registryPassword.value : null;
   const targetExportDir = exportDir.value.trim() || null;
 
@@ -380,7 +419,8 @@ const startPull = async () => {
         username,
         password,
         selectedNames.value,
-        targetExportDir
+        targetExportDir,
+        registrySourceId.value || null
       );
     } else {
       results.value = await pullManifestImagesLocal(
@@ -388,7 +428,8 @@ const startPull = async () => {
         username,
         password,
         selectedNames.value,
-        targetExportDir
+        targetExportDir,
+        registrySourceId.value || null
       );
     }
     resultLog.value = results.value
@@ -399,6 +440,7 @@ const startPull = async () => {
     resultLog.value = String(e);
     ElMessage.error('镜像拉取失败，请查看执行结果');
   } finally {
+    registryPassword.value = '';
     pulling.value = false;
   }
 };

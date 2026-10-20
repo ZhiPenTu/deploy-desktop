@@ -1,15 +1,17 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
-use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use tauri::Emitter;
+use tauri::{AppHandle, Emitter};
+
+use super::image_library::{login_docker, TempDockerConfig};
+use super::registry_sources::{source_access, source_credentials, RegistrySourceAccess};
 
 use super::remote_ssh::{
-    explain_ssh_failure, find_binary, resolve_existing_key, run_ssh_script, shell_quote,
+    find_binary, resolve_existing_key, run_ssh_script, shell_quote,
 };
 
 const MANIFEST_API_VERSION: &str = "deploy.desktop/v1";
@@ -133,13 +135,15 @@ pub struct RegistryProgress {
 }
 
 #[tauri::command]
-pub fn load_image_manifest(source: String) -> Result<ManifestSummary, String> {
-    load_and_resolve(&source)
+pub fn load_image_manifest(app: AppHandle, source: String, registry_source_id: Option<String>) -> Result<ManifestSummary, String> {
+    let access = source_access(&app, registry_source_id.as_deref())?;
+    resolve_with_source(load_and_resolve(&source)?, access.as_ref())
 }
 
 #[tauri::command]
 pub async fn pull_manifest_images_remote(
     window: tauri::Window,
+    app: AppHandle,
     host: String,
     port: u16,
     user: String,
@@ -149,15 +153,22 @@ pub async fn pull_manifest_images_remote(
     password: Option<String>,
     image_names: Vec<String>,
     export_dir: Option<String>,
+    registry_source_id: Option<String>,
 ) -> Result<Vec<ImagePullResult>, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let access = source_access(&app, registry_source_id.as_deref())?;
+        let summary = resolve_with_source(load_and_resolve(&source)?, access.as_ref())?;
+        let (username, password) = match access {
+            Some(access) => source_credentials(access, password)?,
+            None => (username, password),
+        };
         pull_remote_blocking(
             &window,
             &host,
             port,
             &user,
             key_path,
-            &source,
+            summary,
             username,
             password,
             image_names,
@@ -171,16 +182,24 @@ pub async fn pull_manifest_images_remote(
 #[tauri::command]
 pub async fn pull_manifest_images_local(
     window: tauri::Window,
+    app: AppHandle,
     source: String,
     username: Option<String>,
     password: Option<String>,
     image_names: Vec<String>,
     export_dir: Option<String>,
+    registry_source_id: Option<String>,
 ) -> Result<Vec<ImagePullResult>, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let access = source_access(&app, registry_source_id.as_deref())?;
+        let summary = resolve_with_source(load_and_resolve(&source)?, access.as_ref())?;
+        let (username, password) = match access {
+            Some(access) => source_credentials(access, password)?,
+            None => (username, password),
+        };
         pull_local_blocking(
             &window,
-            &source,
+            summary,
             username,
             password,
             image_names,
@@ -189,6 +208,18 @@ pub async fn pull_manifest_images_local(
     })
     .await
     .map_err(|e| format!("拉取镜像任务失败: {e}"))?
+}
+
+fn resolve_with_source(mut summary: ManifestSummary, access: Option<&RegistrySourceAccess>) -> Result<ManifestSummary, String> {
+    if let Some(access) = access {
+        summary.manifest.spec.registry = access.source.address.clone();
+        if !access.source.namespace.is_empty() {
+            summary.manifest.spec.namespace = Some(access.source.namespace.clone());
+        }
+        validate_manifest(&summary.manifest)?;
+        summary.images = resolve_images(&summary.manifest)?;
+    }
+    Ok(summary)
 }
 
 fn load_and_resolve(source: &str) -> Result<ManifestSummary, String> {
@@ -492,7 +523,7 @@ fn pull_remote_blocking(
     port: u16,
     user: &str,
     key_path: Option<String>,
-    source: &str,
+    summary: ManifestSummary,
     username: Option<String>,
     password: Option<String>,
     image_names: Vec<String>,
@@ -501,12 +532,11 @@ fn pull_remote_blocking(
     if host.trim().is_empty() {
         return Err("请先在连接配置中填写目标主机".to_string());
     }
-    let summary = load_and_resolve(source)?;
     let selected = select_images(&summary, &image_names)?;
     let key = resolve_existing_key(key_path, host)?;
     let registry = normalize_registry(&summary.manifest.spec.registry)?;
 
-    login_remote(host, port, user, key.as_deref(), &registry, username, password)?;
+    let login_script = remote_login_script(&registry, username.as_deref(), password.as_deref())?;
 
     let total = selected.len();
     let mut results = Vec::with_capacity(total);
@@ -522,19 +552,19 @@ fn pull_remote_blocking(
             false,
         );
 
-        let script = if let Some(platform) = image.platform.as_deref() {
+        let pull_script = if let Some(platform) = image.platform.as_deref() {
             format!(
-                "set -e\ndocker pull --platform {} {}\n",
+                "docker pull --platform {} {}\n",
                 shell_quote(platform),
                 shell_quote(&image.reference)
             )
         } else {
-            format!("set -e\ndocker pull {}\n", shell_quote(&image.reference))
+            format!("docker pull {}\n", shell_quote(&image.reference))
         };
+        let script = format!("set -e\n{login_script}{pull_script}");
         let output = run_ssh_script(host, port, user, key.as_deref(), &script)?;
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            return Err(format!("拉取镜像 {} 失败: {stderr}", image.name));
+            return Err(format!("拉取镜像 {} 失败，请检查镜像摘要、仓库权限、目标机网络和 Docker 状态", image.name));
         }
 
         verify_remote_digest(host, port, user, key.as_deref(), image)?;
@@ -615,37 +645,27 @@ fn pull_remote_blocking(
     Ok(results)
 }
 
-fn login_remote(
-    host: &str,
-    port: u16,
-    user: &str,
-    key: Option<&str>,
+fn remote_login_script(
     registry: &str,
-    username: Option<String>,
-    password: Option<String>,
-) -> Result<(), String> {
-    let Some(username) = username.as_deref().map(str::trim).filter(|value| !value.is_empty()) else {
-        return Ok(());
+    username: Option<&str>,
+    password: Option<&str>,
+) -> Result<String, String> {
+    let Some(username) = username.map(str::trim).filter(|value| !value.is_empty()) else {
+        if password.is_some_and(|value| !value.is_empty()) {
+            return Err("已填写仓库密码，请同时填写仓库用户名".to_string());
+        }
+        return Ok(String::new());
     };
     let password = password.unwrap_or_default();
     if password.is_empty() {
         return Err("已填写仓库用户名，请同时填写密码".to_string());
     }
-    let script = format!(
-        "set -e\nprintf '%s' {} | docker login {} -u {} --password-stdin >/dev/null\n",
-        shell_quote(&password),
+    Ok(format!(
+        "umask 077\nDOCKER_CONFIG=$(mktemp -d)\nexport DOCKER_CONFIG\ntrap 'rm -rf \"$DOCKER_CONFIG\"' EXIT\nprintf '%s' {} | docker login {} -u {} --password-stdin >/dev/null\n",
+        shell_quote(password),
         shell_quote(registry),
         shell_quote(username)
-    );
-    let output = run_ssh_script(host, port, user, key, &script)?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(format!(
-            "镜像仓库登录失败: {}",
-            explain_ssh_failure(&stderr, key)
-        ));
-    }
-    Ok(())
+    ))
 }
 
 fn verify_remote_digest(
@@ -676,17 +696,16 @@ fn verify_remote_digest(
 
 fn pull_local_blocking(
     window: &tauri::Window,
-    source: &str,
+    summary: ManifestSummary,
     username: Option<String>,
     password: Option<String>,
     image_names: Vec<String>,
     export_dir: Option<String>,
 ) -> Result<Vec<ImagePullResult>, String> {
-    let summary = load_and_resolve(source)?;
     let selected = select_images(&summary, &image_names)?;
     let registry = normalize_registry(&summary.manifest.spec.registry)?;
 
-    login_local(&registry, username, password)?;
+    let config = login_local(&registry, username, password)?;
 
     let docker = find_binary("docker");
     let total = selected.len();
@@ -709,7 +728,8 @@ fn pull_local_blocking(
             args.push(platform.to_string());
         }
         args.push(image.reference.clone());
-        run_local(&docker, &args, None).map_err(|e| format!("拉取镜像 {} 失败: {e}", image.name))?;
+        run_local(&docker, &args, config.as_ref().map(|config| config.path.as_path()))
+            .map_err(|_| format!("拉取镜像 {} 失败，请检查镜像摘要、仓库权限和网络", image.name))?;
 
         verify_local_digest(&docker, image)?;
 
@@ -789,35 +809,20 @@ fn login_local(
     registry: &str,
     username: Option<String>,
     password: Option<String>,
-) -> Result<(), String> {
+) -> Result<Option<TempDockerConfig>, String> {
     let Some(username) = username.as_deref().map(str::trim).filter(|value| !value.is_empty()) else {
-        return Ok(());
+        if password.as_deref().is_some_and(|value| !value.is_empty()) {
+            return Err("已填写仓库密码，请同时填写仓库用户名".to_string());
+        }
+        return Ok(None);
     };
     let password = password.unwrap_or_default();
     if password.is_empty() {
         return Err("已填写仓库用户名，请同时填写密码".to_string());
     }
-    let docker = find_binary("docker");
-    let mut child = Command::new(&docker)
-        .args(["login", registry, "-u", username, "--password-stdin"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("启动 docker login 失败: {e}"))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(password.as_bytes())
-            .map_err(|e| format!("写入仓库密码失败: {e}"))?;
-    }
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("等待 docker login 失败: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(format!("镜像仓库登录失败: {stderr}"));
-    }
-    Ok(())
+    let config = TempDockerConfig::create()?;
+    login_docker(registry, username, &password, &config.path)?;
+    Ok(Some(config))
 }
 
 fn verify_local_digest(docker: &str, image: &ResolvedImage) -> Result<(), String> {
@@ -845,22 +850,16 @@ fn verify_local_digest(docker: &str, image: &ResolvedImage) -> Result<(), String
     Ok(())
 }
 
-fn run_local(docker: &str, args: &[String], stdin: Option<&str>) -> Result<String, String> {
+fn run_local(docker: &str, args: &[String], config: Option<&Path>) -> Result<String, String> {
     let mut command = Command::new(docker);
     command.args(args);
-    if stdin.is_some() {
-        command.stdin(Stdio::piped());
+    if let Some(config) = config {
+        command.env("DOCKER_CONFIG", config);
     }
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = command
+    let child = command
         .spawn()
         .map_err(|e| format!("启动 docker 命令失败: {e}"))?;
-    if let Some(value) = stdin {
-        if let Some(mut pipe) = child.stdin.take() {
-            pipe.write_all(value.as_bytes())
-                .map_err(|e| format!("写入 docker 标准输入失败: {e}"))?;
-        }
-    }
     let output = child
         .wait_with_output()
         .map_err(|e| format!("等待 docker 命令失败: {e}"))?;
@@ -989,5 +988,35 @@ spec:
         assert!(version_lt("0.1.0", "0.2.0"));
         assert!(!version_lt("1.2.0", "1.2.0"));
         assert!(!version_lt("1.3.0", "1.2.9"));
+    }
+
+    #[test]
+    fn selected_source_rewrites_only_registry_and_optional_namespace() {
+        let manifest = sample_manifest();
+        let original_digest = manifest.spec.images[0].digest.clone();
+        let summary = ManifestSummary {
+            images: resolve_images(&manifest).unwrap(), manifest, source: "manifest.yaml".to_string(), total_size_bytes: 1024, warnings: Vec::new(),
+        };
+        let mut access = RegistrySourceAccess {
+            source: super::super::registry_sources::RegistrySource { address: "private.example.com:5000".to_string(), ..Default::default() }, password: None,
+        };
+        let resolved = resolve_with_source(summary, Some(&access)).unwrap();
+        assert!(resolved.images[0].reference.starts_with("private.example.com:5000/demo/backend@sha256:"));
+        access.source.namespace = "mirror/project".to_string();
+        let resolved = resolve_with_source(resolved, Some(&access)).unwrap();
+        assert!(resolved.images[0].reference.starts_with("private.example.com:5000/mirror/project/backend@sha256:"));
+        assert_eq!(resolved.manifest.spec.images[0].digest, original_digest);
+        assert_eq!(resolved.images[0].platform.as_deref(), Some("linux/amd64"));
+    }
+
+    #[test]
+    fn remote_login_uses_disposable_config_and_rejects_incomplete_credentials() {
+        let script = remote_login_script("registry.example.com", Some("reader"), Some("test'password")).unwrap();
+        assert!(script.contains("DOCKER_CONFIG=$(mktemp -d)"));
+        assert!(script.contains("trap 'rm -rf \"$DOCKER_CONFIG\"' EXIT"));
+        assert!(script.contains("--password-stdin"));
+        assert!(script.contains(&shell_quote("test'password")));
+        assert!(remote_login_script("registry.example.com", None, Some("test-password")).is_err());
+        assert!(remote_login_script("registry.example.com", Some("reader"), None).is_err());
     }
 }

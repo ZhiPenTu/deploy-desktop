@@ -249,11 +249,31 @@ export async function listLocalDockerImages() {
   return await invoke("list_local_docker_images");
 }
 
-export async function pullLocalDockerImage(reference, username = null, password = null) {
+export async function pullLocalDockerImage(reference, username = null, password = null, registrySourceId = null) {
   if (!isTauri()) {
-    return `已拉取 ${reference} (模拟)`;
+    throw new Error('当前环境暂不可用，请在桌面应用中拉取镜像。');
   }
-  return await invoke("pull_local_docker_image", { reference, username, password });
+  return await invoke("pull_local_docker_image", { reference, username, password, registrySourceId });
+}
+
+export async function listRegistrySources() {
+  if (!isTauri()) return [];
+  return await invoke('list_registry_sources');
+}
+
+export async function saveRegistrySource(source) {
+  if (!isTauri()) throw new Error('当前环境暂不可用，请在桌面应用中保存镜像源。');
+  return await invoke('save_registry_source', { source });
+}
+
+export async function deleteRegistrySource(id) {
+  if (!isTauri()) throw new Error('当前环境暂不可用，请在桌面应用中删除镜像源。');
+  return await invoke('delete_registry_source', { id });
+}
+
+export async function testRegistrySource(id) {
+  if (!isTauri()) throw new Error('当前环境暂不可用，请在桌面应用中测试镜像源。');
+  return await invoke('test_registry_source', { id });
 }
 
 export async function removeLocalDockerImages(references) {
@@ -726,7 +746,7 @@ export function onImageManagerProgress(callback) {
 const MOCK_MANIFEST_DIGEST =
   "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
-export async function loadImageManifest(source) {
+export async function loadImageManifest(source, registrySourceId = null) {
   if (!isTauri()) {
     return {
       source,
@@ -789,7 +809,7 @@ export async function loadImageManifest(source) {
       warnings: ["清单未包含 signature，建议在正式发布时附加签名"]
     };
   }
-  return await invoke("load_image_manifest", { source });
+  return await invoke("load_image_manifest", { source, registrySourceId });
 }
 
 export async function pullManifestImagesRemote(
@@ -801,18 +821,11 @@ export async function pullManifestImagesRemote(
   username,
   password,
   imageNames,
-  exportDir = null
+  exportDir = null,
+  registrySourceId = null
 ) {
   if (!isTauri()) {
-    return imageNames.map((name) => ({
-      name,
-      reference: `registry.example.com/demo/${name}@${MOCK_MANIFEST_DIGEST}`,
-      digest: MOCK_MANIFEST_DIGEST,
-      platform: "linux/amd64",
-      exported_path: exportDir ? `${exportDir}/${name}.tar` : null,
-      size_bytes: 1024 * 1024,
-      message: exportDir ? "已拉取并导出" : "已拉取"
-    }));
+    throw new Error('当前环境暂不可用，请在桌面应用中拉取镜像。');
   }
   return await invoke("pull_manifest_images_remote", {
     host,
@@ -823,7 +836,8 @@ export async function pullManifestImagesRemote(
     username,
     password,
     imageNames,
-    exportDir
+    exportDir,
+    registrySourceId
   });
 }
 
@@ -832,25 +846,19 @@ export async function pullManifestImagesLocal(
   username,
   password,
   imageNames,
-  exportDir = null
+  exportDir = null,
+  registrySourceId = null
 ) {
   if (!isTauri()) {
-    return imageNames.map((name) => ({
-      name,
-      reference: `registry.example.com/demo/${name}@${MOCK_MANIFEST_DIGEST}`,
-      digest: MOCK_MANIFEST_DIGEST,
-      platform: "linux/amd64",
-      exported_path: exportDir ? `${exportDir}/${name}.tar` : null,
-      size_bytes: 1024 * 1024,
-      message: exportDir ? "已拉取并导出" : "已拉取"
-    }));
+    throw new Error('当前环境暂不可用，请在桌面应用中拉取镜像。');
   }
   return await invoke("pull_manifest_images_local", {
     source,
     username,
     password,
     imageNames,
-    exportDir
+    exportDir,
+    registrySourceId
   });
 }
 

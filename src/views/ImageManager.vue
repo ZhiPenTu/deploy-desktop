@@ -34,6 +34,7 @@
               <el-icon><Download /></el-icon>
               <span>拉取镜像</span>
             </el-button>
+            <el-button @click="activeTab = 'sources'">管理镜像源</el-button>
           </div>
 
           <div class="selection-row">
@@ -214,6 +215,10 @@
         </div>
       </el-tab-pane>
 
+      <el-tab-pane label="镜像源管理" name="sources" lazy>
+        <RegistrySourceManager @changed="updateRegistrySources" />
+      </el-tab-pane>
+
       <el-tab-pane v-if="isRemote" label="远程分发" name="remote">
         <RemoteImageDistribution :connection="connection" />
       </el-tab-pane>
@@ -245,20 +250,27 @@
       <pre class="output-log">{{ resultLog }}</pre>
     </div>
 
-    <el-dialog v-model="pullDialogVisible" title="拉取镜像" width="560px" :close-on-click-modal="!pulling">
-      <el-form label-width="96px" @submit.prevent>
+    <el-dialog v-model="pullDialogVisible" title="拉取镜像" width="600px" style="max-width: calc(100vw - 32px)" :close-on-click-modal="!pulling" :close-on-press-escape="!pulling" :show-close="!pulling" @closed="pullForm.password = ''">
+      <el-form label-width="100px" :disabled="pulling" @submit.prevent>
+        <el-form-item label="镜像源">
+          <el-select v-model="pullForm.registrySourceId" :loading="loadingSources" placeholder="直接填写完整镜像地址" clearable style="width: 100%" @change="resetPullCredentials">
+            <el-option label="直接填写完整镜像地址" value="" />
+            <el-option v-for="source in registrySources" :key="source.id" :label="`${source.name}（${source.address}）`" :value="source.id" />
+          </el-select>
+          <el-button link type="primary" @click="manageSourcesFromPull">管理镜像源</el-button>
+        </el-form-item>
         <el-form-item label="镜像地址" required>
           <el-input
             v-model="pullForm.reference"
-            placeholder="例如 registry.example.com/demo/app:1.0.0"
+            :placeholder="selectedRegistrySource ? '仓库内路径，例如 app@sha256:…' : '例如 registry.example.com/demo/app@sha256:…'"
             clearable
             @keyup.enter="handlePull"
           />
         </el-form-item>
-        <el-form-item label="仓库用户名">
+        <el-form-item v-if="!selectedRegistrySource" label="仓库用户名">
           <el-input v-model="pullForm.username" placeholder="公开镜像可留空" autocomplete="off" clearable />
         </el-form-item>
-        <el-form-item label="仓库密码">
+        <el-form-item v-if="!selectedRegistrySource || (selectedRegistrySource.username && !selectedRegistrySource.hasPassword)" label="密码或令牌">
           <el-input
             v-model="pullForm.password"
             type="password"
@@ -267,13 +279,17 @@
             autocomplete="new-password"
           />
         </el-form-item>
+        <el-form-item v-if="selectedRegistrySource" label="访问方式">
+          <span>{{ selectedRegistrySource.username ? `${selectedRegistrySource.username}（${selectedRegistrySource.hasPassword ? '使用已保存的密码' : '请填写本次密码'}）` : '无需登录' }}</span>
+        </el-form-item>
       </el-form>
       <div class="dialog-hint">
-        镜像拉取到本机 Docker 后，可在镜像列表勾选并导出为离线包。
+        使用 sha256 摘要固定镜像版本。镜像拉取到本机 Docker 后，可导出为离线包。
+        <div v-if="pullForm.reference.trim()">拉取地址：{{ resolvedPullReference }}</div>
       </div>
       <template #footer>
         <el-button :disabled="pulling" @click="closePullDialog">取消</el-button>
-        <el-button type="primary" :loading="pulling" @click="handlePull">开始拉取</el-button>
+        <el-button type="primary" :loading="pulling" :disabled="loadingSources" @click="handlePull">开始拉取</el-button>
       </template>
     </el-dialog>
   </div>
@@ -284,11 +300,13 @@ import { computed, onMounted, onUnmounted, reactive, ref } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { Download, Refresh } from '@element-plus/icons-vue';
 import RemoteImageDistribution from '../components/RemoteImageDistribution.vue';
+import RegistrySourceManager from '../components/RegistrySourceManager.vue';
 import {
   exportLocalDockerImages,
   getImageLibrarySettings,
   importOfflinePackages,
   listLocalDockerImages,
+  listRegistrySources,
   onImageLibraryProgress,
   pullLocalDockerImage,
   removeLocalDockerImages,
@@ -328,12 +346,41 @@ const resultTitle = ref('');
 const pullDialogVisible = ref(false);
 const imageTable = ref(null);
 const packageTable = ref(null);
+const registrySources = ref([]);
+const loadingSources = ref(false);
 const pullForm = reactive({
   reference: '',
+  registrySourceId: '',
   username: '',
   password: ''
 });
 let unlistenProgress = null;
+
+const selectedRegistrySource = computed(() => registrySources.value.find((source) => source.id === pullForm.registrySourceId));
+const resolvedPullReference = computed(() => {
+  const reference = pullForm.reference.trim();
+  const source = selectedRegistrySource.value;
+  if (!source) return reference;
+  const first = reference.split('/')[0];
+  if (reference.includes('/') && (first.includes('.') || first.includes(':') || first === 'localhost')) return reference;
+  return [source.address, source.namespace, reference].filter(Boolean).join('/');
+});
+
+function resetPullCredentials() {
+  pullForm.username = '';
+  pullForm.password = '';
+}
+
+function updateRegistrySources(sources) {
+  registrySources.value = sources;
+  if (!sources.some((source) => source.id === pullForm.registrySourceId)) pullForm.registrySourceId = '';
+}
+
+function manageSourcesFromPull() {
+  if (pulling.value) return;
+  closePullDialog();
+  activeTab.value = 'sources';
+}
 
 const refreshing = computed(
   () => loadingImages.value || loadingPackages.value || loadingSettings.value
@@ -479,11 +526,20 @@ const handlePackageSelection = (rows) => {
   packageSelection.value = rows;
 };
 
-const openPullDialog = () => {
+const openPullDialog = async () => {
   pullForm.reference = '';
   pullForm.username = '';
   pullForm.password = '';
+  pullForm.registrySourceId = '';
   pullDialogVisible.value = true;
+  loadingSources.value = true;
+  try {
+    updateRegistrySources(await listRegistrySources());
+  } catch (error) {
+    ElMessage.error(String(error));
+  } finally {
+    loadingSources.value = false;
+  }
 };
 
 const closePullDialog = () => {
@@ -495,12 +551,25 @@ const closePullDialog = () => {
 };
 
 const handlePull = async () => {
-  if (pulling.value) {
+  if (pulling.value || loadingSources.value) {
     return;
   }
   const reference = pullForm.reference.trim();
   if (!reference) {
     ElMessage.warning('请填写要拉取的镜像地址');
+    return;
+  }
+  if (!/@sha256:[a-f0-9]{64}$/.test(reference)) {
+    ElMessage.warning('请填写包含 64 位小写 sha256 摘要的镜像地址');
+    return;
+  }
+  const source = selectedRegistrySource.value;
+  if ((source?.username && !source.hasPassword && !pullForm.password) || (!source && pullForm.username.trim() && !pullForm.password)) {
+    ElMessage.warning('请填写仓库密码或访问令牌');
+    return;
+  }
+  if (!source && pullForm.password && !pullForm.username.trim()) {
+    ElMessage.warning('已填写仓库密码，请同时填写仓库用户名');
     return;
   }
   pulling.value = true;
@@ -509,11 +578,12 @@ const handlePull = async () => {
   try {
     const output = await pullLocalDockerImage(
       reference,
-      pullForm.username.trim() || null,
-      pullForm.password || null
+      source ? null : pullForm.username.trim() || null,
+      pullForm.password || null,
+      pullForm.registrySourceId || null
     );
     resultLog.value = output;
-    resultTitle.value = `已拉取 ${reference}`;
+    resultTitle.value = `已拉取 ${resolvedPullReference.value}`;
     ElMessage.success('镜像拉取完成');
     pullDialogVisible.value = false;
     pullForm.password = '';
@@ -523,6 +593,7 @@ const handlePull = async () => {
     resultTitle.value = '镜像拉取失败';
     ElMessage.error('镜像拉取失败');
   } finally {
+    pullForm.password = '';
     pulling.value = false;
   }
 };

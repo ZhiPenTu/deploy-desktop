@@ -94,9 +94,12 @@ spec:
 
 ## 拉取行为
 
-1. 如填写仓库用户名，先在目标机执行 `docker login --password-stdin`。
-2. 对每个选中镜像执行 `docker pull [--platform <platform>] <reference>`。
-3. 执行 `docker image inspect` 校验 `RepoDigests` 是否包含清单中的 digest。
-4. 如填写导出目录，执行 `docker save -o <dir>/<name>.tar <reference>`。
+1. 可选从已保存镜像源替换仓库地址和命名空间，重新预览实际镜像引用；版本摘要与平台不变。
+2. 如填写仓库用户名或选择有凭据的镜像源，使用临时 Docker 配置执行 `docker login --password-stdin`。
+3. 对每个选中镜像执行 `docker pull [--platform <platform>] <reference>`。
+4. 执行 `docker image inspect` 校验 `RepoDigests` 是否包含清单中的 digest。
+5. 如填写导出目录，执行 `docker save -o <dir>/<name>.tar <reference>`。
 
 远程模式通过 SSH 在目标机执行以上命令；本地模式在当前机器执行。
+
+镜像源配置、密码与测试范围见 [镜像源管理](registry-sources.md)。
