@@ -12,7 +12,7 @@ pub struct BundleLayout {
     pub has_compose: bool,
 }
 
-/// 读取本地交付包布局，供服务更新页自动判断是镜像模式还是文件模式。
+/// 读取本地交付包布局，供部署向导自动判断是镜像模式还是文件模式。
 #[tauri::command]
 pub fn inspect_bundle_layout(bundle_dir: String) -> Result<BundleLayout, String> {
     let root = PathBuf::from(bundle_dir.trim());

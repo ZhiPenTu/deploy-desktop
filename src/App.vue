@@ -46,18 +46,10 @@
           @view-log="handleViewLog"
         />
 
-        <ServiceUpdate
-          v-else-if="currentTab === 'update'"
-          :connection="connection"
-          @busy-change="updateBusy = $event"
-          @go-dashboard="navigateTab('dashboard')"
-        />
-
         <ArtifactCenter
           v-else-if="currentTab === 'artifacts'"
           :connection="connection"
           @go-wizard="currentTab = 'wizard'"
-          @go-update="currentTab = 'update'"
           @go-settings="openSettings"
         />
 
@@ -97,7 +89,6 @@ import Hosts from './features/connections/views/Hosts.vue';
 import InstallWizard from './features/deployment/views/InstallWizard.vue';
 import EnvCheck from './features/monitoring/views/EnvCheck.vue';
 import Dashboard from './features/monitoring/views/Dashboard.vue';
-import ServiceUpdate from './features/deployment/views/ServiceUpdate.vue';
 import ImageManager from './features/images/views/ImageManager.vue';
 import ArtifactCenter from './features/artifacts/views/ArtifactCenter.vue';
 import Settings from './features/settings/views/Settings.vue';
@@ -110,7 +101,6 @@ const pages = {
   wizard: { title: '部署向导', group: '部署' },
   'host-status': { title: '主机状态', group: '连接' },
   dashboard: { title: '集群监控', group: '运行' },
-  update: { title: '服务更新', group: '运行' },
   logs: { title: '日志诊断', group: '运行' },
   artifacts: { title: '制品中心', group: '资源' },
   images: { title: '镜像与离线包', group: '资源' },
@@ -125,11 +115,10 @@ function openSettings(section) {
 }
 const isMacDesktop = isDesktopApp() && /mac os x/i.test(navigator.userAgent);
 const wizardBusy = ref(false);
-const updateBusy = ref(false);
 const selectedStatusHostId = ref('');
 const selectedStatusHost = computed(() => hostById(selectedStatusHostId.value));
 function navigateTab(tab) {
-  if (wizardBusy.value || updateBusy.value) { ElMessage.warning('当前操作正在进行，请等待完成后切换页面。'); return; }
+  if (wizardBusy.value) { ElMessage.warning('当前操作正在进行，请等待完成后切换页面。'); return; }
   currentTab.value = tab;
 }
 const activeLogContainer = ref(getDefaultContainer());

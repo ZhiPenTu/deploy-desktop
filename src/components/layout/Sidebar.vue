@@ -44,7 +44,6 @@ import {
   Promotion,
   DataBoard,
   Document,
-  UploadFilled,
   Files,
   Box,
   Setting,
@@ -82,7 +81,6 @@ const navGroups = [
     label: '运行',
     items: [
       { key: 'dashboard', icon: DataBoard, title: '集群监控' },
-      { key: 'update', icon: UploadFilled, title: '服务更新' },
       { key: 'logs', icon: Document, title: '日志诊断' }
     ]
   },

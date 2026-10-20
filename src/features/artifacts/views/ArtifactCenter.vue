@@ -119,9 +119,6 @@
             <el-button size="small" type="primary" @click="$emit('go-wizard')">
               进入部署向导
             </el-button>
-            <el-button size="small" @click="$emit('go-update')">
-              进入服务更新
-            </el-button>
           </template>
         </BundlePlanPanel>
       </div>
@@ -373,7 +370,7 @@ const props = defineProps({
   }
 });
 
-const emit = defineEmits(['go-wizard', 'go-update', 'go-settings']);
+const emit = defineEmits(['go-wizard', 'go-settings']);
 
 const sources = ref([]);
 const loading = ref(false);

@@ -11,7 +11,7 @@ src/
     connections/                主机、凭证及当前连接状态
     artifacts/                  制品来源、版本选择、交付包和 Compose 预览
     deployment/
-      views/                    部署向导与服务更新界面
+      views/                    部署向导界面
       composables/              向导状态、确认与界面反馈
       domain/                   路径、组件、目标快照、就绪判定和诊断脱敏
       services/                 本机 / SSH 更新的调用与结果检查

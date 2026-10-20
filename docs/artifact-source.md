@@ -1,6 +1,6 @@
 # 制品源与交付包
 
-「制品中心」用于从流水线获取交付包，校验后作为部署向导与服务更新的输入。交付包必须由目标项目按约定布局产出，桌面端只消费、不生成。
+「制品中心」用于从流水线获取交付包，校验后作为部署向导的输入。交付包必须由目标项目按约定布局产出，桌面端只消费、不生成。
 
 ## 交付包布局
 
@@ -45,7 +45,7 @@ deploy/
 | `file` | `app/` + `deploy/` | 产物通过 bind mount 挂进容器，交付包不含应用镜像 |
 | `image` | `images/` + `deploy/` | 交付包自带 `docker save` 镜像包，需先导入再启动 |
 
-`components` 决定「服务更新」默认勾选哪些组件（`backend` / `gateway` / `frontend` / `config`，镜像模式额外有 `image`）。
+`components` 决定部署向导「增量更新」默认勾选哪些组件（`backend` / `gateway` / `frontend` / `config`，镜像模式额外有 `image`）。
 
 ## 预制流程说明
 
@@ -97,7 +97,7 @@ deploy/
 - `artifact-sources.json`：制品源列表。
 - `bundles/<sourceId>/<version>/`：解包后的交付包。
 
-点击「设为当前部署包」会把该目录写入当前会话的 `bundleDir`，部署向导与服务更新随即使用这个交付包。
+点击「设为当前部署包」会把该目录写入当前会话的 `bundleDir`，部署向导随即使用这个交付包。
 
 ## 交付包与镜像包
 
