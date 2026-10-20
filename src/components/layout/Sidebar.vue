@@ -97,7 +97,6 @@ const navGroups = [
   {
     label: '高级',
     items: [
-      { key: 'registry', icon: Connection, title: '镜像仓库' },
       { key: 'settings', icon: Setting, title: '设置' }
     ]
   }
