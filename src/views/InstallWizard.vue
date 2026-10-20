@@ -84,21 +84,21 @@
             <div class="saved-host-copy">
               <span class="saved-host-title">已保存主机</span>
               <el-select
-                v-if="connectionInventory.hosts.length"
-                :model-value="config.activeHostId"
+                v-if="remoteHosts.length"
+                :model-value="selectedRemoteHostId"
                 :loading="selectingHost"
                 placeholder="选择主机并带入登录信息"
                 class="saved-host-select"
                 @change="handleManagedHostChange"
               >
                 <el-option
-                  v-for="host in connectionInventory.hosts"
+                  v-for="host in remoteHosts"
                   :key="host.id"
                   :label="`${host.name} · ${host.address}`"
                   :value="host.id"
                 />
               </el-select>
-              <span v-else class="saved-host-empty">尚未保存主机，可直接填写下方连接信息</span>
+              <span v-else class="saved-host-empty">尚未保存远程主机，可直接填写下方连接信息</span>
             </div>
             <el-button @click="$emit('go-hosts')">管理主机</el-button>
           </div>
@@ -130,7 +130,7 @@
             <el-form-item label="本地私钥路径">
               <el-input v-model="config.remoteKey" placeholder="留空自动使用 ~/.ssh/id_ed25519_<host>" />
             </el-form-item>
-            <p v-if="config.activeHostId" class="field-hint host-hint">
+            <p v-if="selectedRemoteHostId" class="field-hint host-hint">
               当前参数来自已保存主机。临时修改只用于本次操作，不会更新主机管理中的配置。
             </p>
             <el-form-item>
@@ -607,6 +607,15 @@ const settingKey = ref(false);
 const selectingHost = ref(false);
 const sshMsg = ref('');
 const sshOk = ref(false);
+
+const remoteHosts = computed(() =>
+  connectionInventory.hosts.filter((host) => host.kind !== 'local')
+);
+const selectedRemoteHostId = computed(() =>
+  remoteHosts.value.some((host) => host.id === config.activeHostId)
+    ? config.activeHostId
+    : ''
+);
 
 // 环境与 Docker
 const envData = ref(null);

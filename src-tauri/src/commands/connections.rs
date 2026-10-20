@@ -10,6 +10,12 @@ use super::remote_ssh::{setup_remote_ssh_key, test_ssh_connection, SshTestResult
 
 const CONNECTIONS_FILE: &str = "connections.json";
 const SECRETS_FILE: &str = "connection-secrets.json";
+const HOST_KIND_LOCAL: &str = "local";
+const HOST_KIND_SSH: &str = "ssh";
+
+fn default_host_kind() -> String {
+    HOST_KIND_SSH.to_string()
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -41,6 +47,8 @@ fn default_ssh_port() -> u16 {
 #[serde(rename_all = "camelCase", default)]
 pub struct ManagedHost {
     pub id: String,
+    #[serde(default = "default_host_kind")]
+    pub kind: String,
     pub name: String,
     pub address: String,
     pub port: u16,
@@ -54,6 +62,7 @@ impl Default for ManagedHost {
     fn default() -> Self {
         Self {
             id: String::new(),
+            kind: default_host_kind(),
             name: String::new(),
             address: String::new(),
             port: default_ssh_port(),
@@ -69,6 +78,7 @@ impl Default for ManagedHost {
 #[serde(rename_all = "camelCase", default)]
 pub struct ManagedHostInput {
     pub id: String,
+    pub kind: String,
     pub name: String,
     pub address: String,
     pub port: u16,
@@ -92,6 +102,8 @@ struct ConnectionsFile {
     credentials: Vec<SshCredential>,
     hosts: Vec<ManagedHost>,
     active_host_id: String,
+    #[serde(default)]
+    default_local_host_added: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -146,12 +158,28 @@ fn write_private_file(path: &Path, content: &str) -> Result<(), String> {
 
 fn load_store(dir: &Path) -> Result<ConnectionsFile, String> {
     let path = connections_path(dir);
-    if !path.exists() {
-        return Ok(ConnectionsFile::default());
+    let mut store: ConnectionsFile = if path.exists() {
+        let content = fs::read_to_string(&path).map_err(|e| format!("读取连接配置失败：{e}"))?;
+        serde_json::from_str(&content).map_err(|e| format!("解析连接配置失败：{e}"))?
+    } else {
+        ConnectionsFile::default()
+    };
+
+    let mut changed = false;
+    for host in &mut store.hosts {
+        if host.kind.trim().is_empty() {
+            host.kind = default_host_kind();
+            changed = true;
+        }
     }
-    let content = fs::read_to_string(&path).map_err(|e| format!("读取连接配置失败：{e}"))?;
-    let mut store: ConnectionsFile =
-        serde_json::from_str(&content).map_err(|e| format!("解析连接配置失败：{e}"))?;
+    if !store.default_local_host_added {
+        if !store.hosts.iter().any(|host| host.kind == HOST_KIND_LOCAL) {
+            let local = default_local_host(&store);
+            store.hosts.insert(0, local);
+        }
+        store.default_local_host_added = true;
+        changed = true;
+    }
 
     if !store.active_host_id.is_empty()
         && !store
@@ -166,7 +194,32 @@ fn load_store(dir: &Path) -> Result<ConnectionsFile, String> {
             store.active_host_id = host.id.clone();
         }
     }
+    if changed {
+        store_connections(dir, &store)?;
+    }
     Ok(store)
+}
+
+fn default_local_host(store: &ConnectionsFile) -> ManagedHost {
+    let mut name = "本机".to_string();
+    let mut sequence = 2;
+    while store.hosts.iter().any(|host| same_name(&host.name, &name)) {
+        name = format!("本机 {sequence}");
+        sequence += 1;
+    }
+    ManagedHost {
+        id: next_id("host", |candidate| {
+            store.hosts.iter().any(|host| host.id == candidate)
+        }),
+        kind: HOST_KIND_LOCAL.to_string(),
+        name,
+        address: String::new(),
+        port: default_ssh_port(),
+        credential_id: String::new(),
+        deploy_dir: String::new(),
+        notes: String::new(),
+        updated_at: now_millis(),
+    }
 }
 
 fn store_connections(dir: &Path, store: &ConnectionsFile) -> Result<(), String> {
@@ -322,29 +375,42 @@ fn delete_credential_at(dir: &Path, id: &str) -> Result<(), String> {
 
 fn save_host_at(dir: &Path, input: ManagedHostInput) -> Result<ManagedHost, String> {
     let input = input.with_default_port();
+    let kind = match input.kind.trim() {
+        "" => HOST_KIND_SSH,
+        HOST_KIND_LOCAL => HOST_KIND_LOCAL,
+        HOST_KIND_SSH => HOST_KIND_SSH,
+        _ => return Err("主机类型无效，请重新选择".to_string()),
+    };
     let name = input.name.trim().to_string();
-    let address = input.address.trim().to_string();
     if name.is_empty() {
         return Err("请填写主机名称".to_string());
     }
-    if address.is_empty() {
-        return Err("请填写主机地址".to_string());
-    }
-    if address.chars().any(char::is_whitespace) {
-        return Err("主机地址不能包含空格".to_string());
-    }
-    if address.starts_with('-') {
-        return Err("主机地址不能以 - 开头".to_string());
-    }
-    if input.port == 0 {
-        return Err("SSH 端口需在 1 到 65535 之间".to_string());
-    }
+
+    let (address, port, credential_id) = if kind == HOST_KIND_LOCAL {
+        (String::new(), default_ssh_port(), String::new())
+    } else {
+        let address = input.address.trim().to_string();
+        if address.is_empty() {
+            return Err("请填写主机地址".to_string());
+        }
+        if address.chars().any(char::is_whitespace) {
+            return Err("主机地址不能包含空格".to_string());
+        }
+        if address.starts_with('-') {
+            return Err("主机地址不能以 - 开头".to_string());
+        }
+        if input.port == 0 {
+            return Err("SSH 端口需在 1 到 65535 之间".to_string());
+        }
+        (address, input.port, input.credential_id.trim().to_string())
+    };
 
     let mut store = load_store(dir)?;
-    if !store
-        .credentials
-        .iter()
-        .any(|credential| credential.id == input.credential_id)
+    if kind == HOST_KIND_SSH
+        && !store
+            .credentials
+            .iter()
+            .any(|credential| credential.id == credential_id)
     {
         return Err("所选凭证不存在，请重新选择".to_string());
     }
@@ -361,6 +427,14 @@ fn save_host_at(dir: &Path, input: ManagedHostInput) -> Result<ManagedHost, Stri
     }) {
         return Err(format!("已存在名为「{name}」的主机"));
     }
+    if kind == HOST_KIND_LOCAL
+        && store.hosts.iter().any(|item| {
+            item.kind == HOST_KIND_LOCAL
+                && Some(item.id.as_str()) != existing.map(|index| store.hosts[index].id.as_str())
+        })
+    {
+        return Err("本机主机已存在，请直接编辑现有主机".to_string());
+    }
 
     let id = if requested_id.is_empty() {
         next_id("host", |candidate| {
@@ -372,10 +446,11 @@ fn save_host_at(dir: &Path, input: ManagedHostInput) -> Result<ManagedHost, Stri
 
     let record = ManagedHost {
         id: id.clone(),
+        kind: kind.to_string(),
         name,
         address,
-        port: input.port,
-        credential_id: input.credential_id,
+        port,
+        credential_id,
         deploy_dir: input.deploy_dir.trim().to_string(),
         notes: input.notes.trim().to_string(),
         updated_at: now_millis(),
@@ -427,6 +502,9 @@ fn host_connection_at(dir: &Path, id: &str) -> Result<(ManagedHost, SshCredentia
         .find(|host| host.id == id)
         .cloned()
         .ok_or_else(|| "主机不存在或已被删除".to_string())?;
+    if host.kind == HOST_KIND_LOCAL {
+        return Err("本机主机无需配置 SSH 连接".to_string());
+    }
     let credential = store
         .credentials
         .iter()
@@ -528,10 +606,20 @@ mod tests {
 
     fn host(name: &str, credential_id: &str) -> ManagedHostInput {
         ManagedHostInput {
+            kind: HOST_KIND_SSH.to_string(),
             name: name.to_string(),
             address: "192.0.2.10".to_string(),
             port: 22,
             credential_id: credential_id.to_string(),
+            deploy_dir: "/opt/deploy".to_string(),
+            ..ManagedHostInput::default()
+        }
+    }
+
+    fn local_host(name: &str) -> ManagedHostInput {
+        ManagedHostInput {
+            kind: HOST_KIND_LOCAL.to_string(),
+            name: name.to_string(),
             deploy_dir: "/opt/deploy".to_string(),
             ..ManagedHostInput::default()
         }
@@ -580,23 +668,121 @@ mod tests {
         let second = save_host_at(&dir, host("备用主机", &saved_credential.id)).unwrap();
 
         let inventory = inventory_at(&dir).unwrap();
-        assert_eq!(inventory.active_host_id, first.id);
+        let local = inventory
+            .hosts
+            .iter()
+            .find(|host| host.kind == HOST_KIND_LOCAL)
+            .cloned()
+            .expect("默认本机主机");
+        assert_eq!(inventory.active_host_id, local.id);
 
         let inventory = set_active_host_at(&dir, &second.id).unwrap();
         assert_eq!(inventory.active_host_id, second.id);
 
         let inventory = delete_host_at(&dir, &second.id).unwrap();
-        assert_eq!(inventory.active_host_id, first.id);
+        assert_eq!(inventory.active_host_id, local.id);
+
+        set_active_host_at(&dir, &first.id).unwrap();
 
         let error = delete_credential_at(&dir, &saved_credential.id).unwrap_err();
         assert!(error.contains("仍关联主机"));
 
-        delete_host_at(&dir, &first.id).unwrap();
+        let inventory = delete_host_at(&dir, &first.id).unwrap();
+        assert_eq!(inventory.active_host_id, local.id);
+        delete_host_at(&dir, &local.id).unwrap();
         delete_credential_at(&dir, &saved_credential.id).unwrap();
         let inventory = inventory_at(&dir).unwrap();
         assert!(inventory.credentials.is_empty());
         assert!(inventory.hosts.is_empty());
         assert!(inventory.active_host_id.is_empty());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn seeds_a_local_host_only_once() {
+        let dir = temp_dir("default-local");
+        let inventory = inventory_at(&dir).unwrap();
+        assert_eq!(inventory.hosts.len(), 1);
+        let local = &inventory.hosts[0];
+        assert_eq!(local.kind, HOST_KIND_LOCAL);
+        assert_eq!(local.name, "本机");
+        assert_eq!(inventory.active_host_id, local.id);
+
+        let inventory = delete_host_at(&dir, &local.id).unwrap();
+        assert!(inventory.hosts.is_empty());
+        assert!(inventory.active_host_id.is_empty());
+
+        let inventory = inventory_at(&dir).unwrap();
+        assert!(inventory.hosts.is_empty());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn local_host_needs_no_credentials_and_is_unique() {
+        let dir = temp_dir("local-host");
+        let inventory = inventory_at(&dir).unwrap();
+        delete_host_at(&dir, &inventory.hosts[0].id).unwrap();
+
+        let saved = save_host_at(
+            &dir,
+            ManagedHostInput {
+                kind: HOST_KIND_LOCAL.to_string(),
+                name: "现场本机".to_string(),
+                address: "ignored.example.com".to_string(),
+                port: 2222,
+                credential_id: "missing-credential".to_string(),
+                deploy_dir: "/srv/deploy".to_string(),
+                ..ManagedHostInput::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(saved.kind, HOST_KIND_LOCAL);
+        assert!(saved.address.is_empty());
+        assert_eq!(saved.port, 22);
+        assert!(saved.credential_id.is_empty());
+        assert_eq!(saved.deploy_dir, "/srv/deploy");
+
+        let error = save_host_at(&dir, local_host("另一台本机")).unwrap_err();
+        assert!(error.contains("本机"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn existing_configuration_gets_a_local_host_without_losing_active_host() {
+        let dir = temp_dir("local-migration");
+        let mut store = ConnectionsFile::default();
+        store.credentials.push(SshCredential {
+            id: "cred-remote".to_string(),
+            name: "远程账号".to_string(),
+            username: "root".to_string(),
+            private_key_path: String::new(),
+            has_password: false,
+            updated_at: 1,
+        });
+        store.hosts.push(ManagedHost {
+            id: "host-remote".to_string(),
+            kind: HOST_KIND_SSH.to_string(),
+            name: "远程主机".to_string(),
+            address: "192.0.2.20".to_string(),
+            port: 22,
+            credential_id: "cred-remote".to_string(),
+            deploy_dir: "/opt/deploy".to_string(),
+            notes: String::new(),
+            updated_at: 1,
+        });
+        store.active_host_id = "host-remote".to_string();
+        store_connections(&dir, &store).unwrap();
+
+        let inventory = inventory_at(&dir).unwrap();
+        assert_eq!(inventory.active_host_id, "host-remote");
+        assert!(inventory
+            .hosts
+            .iter()
+            .any(|host| host.kind == HOST_KIND_LOCAL));
+        assert!(inventory
+            .hosts
+            .iter()
+            .any(|host| host.id == "host-remote" && host.kind == HOST_KIND_SSH));
         fs::remove_dir_all(dir).unwrap();
     }
 

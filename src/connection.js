@@ -48,6 +48,10 @@ export function hostById(id) {
   return connectionInventory.hosts.find((host) => host.id === id) || null;
 }
 
+export function isLocalHost(host) {
+  return host?.kind === 'local';
+}
+
 export function credentialLabel(id) {
   const credential = credentialById(id);
   if (!credential) return '凭证不可用';
@@ -56,15 +60,25 @@ export function credentialLabel(id) {
 
 export function applyManagedHostToConnection(host) {
   if (!host) return;
-  const credential = credentialById(host.credentialId);
-  connection.mode = 'remote';
   connection.activeHostId = host.id;
-  connection.remoteHost = host.address;
-  connection.remotePort = host.port || 22;
-  connection.remoteUser = credential?.username || connection.remoteUser || 'root';
-  connection.remoteKey = credential?.privateKeyPath || '';
-  connection.remoteCredentialId = host.credentialId;
-  connection.remotePassword = '';
+  if (isLocalHost(host)) {
+    connection.mode = 'local';
+    connection.remoteHost = '';
+    connection.remotePort = 22;
+    connection.remoteUser = 'root';
+    connection.remoteKey = '';
+    connection.remoteCredentialId = '';
+    connection.remotePassword = '';
+  } else {
+    const credential = credentialById(host.credentialId);
+    connection.mode = 'remote';
+    connection.remoteHost = host.address;
+    connection.remotePort = host.port || 22;
+    connection.remoteUser = credential?.username || connection.remoteUser || 'root';
+    connection.remoteKey = credential?.privateKeyPath || '';
+    connection.remoteCredentialId = host.credentialId;
+    connection.remotePassword = '';
+  }
   if (host.deployDir) {
     connection.deployDir = host.deployDir;
     connection.installDir = host.deployDir;
@@ -75,7 +89,6 @@ export function applyManagedHostToConnection(host) {
 }
 
 export function applyConnectionInventory(inventory) {
-  const previousActiveId = connection.activeHostId;
   connectionInventory.credentials = Array.isArray(inventory?.credentials)
     ? inventory.credentials
     : [];
@@ -86,8 +99,9 @@ export function applyConnectionInventory(inventory) {
   const activeHost = hostById(connectionInventory.activeHostId);
   if (activeHost) {
     applyManagedHostToConnection(activeHost);
-  } else if (previousActiveId) {
+  } else {
     connection.activeHostId = '';
+    connection.mode = 'local';
     connection.remoteHost = '';
     connection.remotePort = 22;
     connection.remoteUser = 'root';

@@ -3,7 +3,7 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">主机管理</h2>
-        <p class="page-subtitle">集中保存目标服务器与登录身份，部署、更新和诊断共用当前主机</p>
+        <p class="page-subtitle">集中保存本机与远程服务器目标，部署、更新和诊断共用当前主机</p>
       </div>
       <div class="header-actions">
         <el-button @click="$emit('go-credentials')">管理凭证</el-button>
@@ -14,7 +14,7 @@
       <div class="card-title-bar">
         <div>
           <h3>目标主机</h3>
-          <p class="card-subtitle">当前主机决定远程部署、服务更新、监控与日志诊断使用的连接</p>
+          <p class="card-subtitle">当前主机决定部署、更新、监控与日志诊断在本机还是远程服务器执行</p>
         </div>
         <el-tag size="small" effect="plain">{{ hosts.length }} 台主机</el-tag>
       </div>
@@ -36,10 +36,13 @@
           :class="{ 'is-active': row.id === connectionInventory.activeHostId }"
         >
           <div class="host-head">
-            <span class="host-tile"><el-icon><Monitor /></el-icon></span>
+            <span class="host-tile">
+              <el-icon><Monitor v-if="isLocalHost(row)" /><Connection v-else /></el-icon>
+            </span>
             <div class="host-ident">
               <div class="host-name-line">
                 <span class="host-name">{{ row.name }}</span>
+                <el-tag v-if="isLocalHost(row)" size="small" type="info" effect="plain">本机</el-tag>
                 <el-tag v-if="row.id === connectionInventory.activeHostId" size="small" type="success" effect="plain">
                   当前主机
                 </el-tag>
@@ -57,17 +60,29 @@
           </div>
 
           <div class="host-body">
-            <div class="info-row">
-              <span class="k">SSH 地址</span>
-              <span class="v code">{{ row.address }}:{{ row.port }}</span>
-            </div>
-            <div class="info-row">
-              <span class="k">登录凭证</span>
-              <div class="v credential-value">
-                <span>{{ credentialLabel(row.credentialId) }}</span>
-                <span class="credential-key">{{ credentialKeyText(row.credentialId) }}</span>
+            <template v-if="isLocalHost(row)">
+              <div class="info-row">
+                <span class="k">目标位置</span>
+                <span class="v">当前电脑</span>
               </div>
-            </div>
+              <div class="info-row">
+                <span class="k">连接方式</span>
+                <span class="v">本机直接执行</span>
+              </div>
+            </template>
+            <template v-else>
+              <div class="info-row">
+                <span class="k">SSH 地址</span>
+                <span class="v code">{{ row.address }}:{{ row.port }}</span>
+              </div>
+              <div class="info-row">
+                <span class="k">登录凭证</span>
+                <div class="v credential-value">
+                  <span>{{ credentialLabel(row.credentialId) }}</span>
+                  <span class="credential-key">{{ credentialKeyText(row.credentialId) }}</span>
+                </div>
+              </div>
+            </template>
             <div class="info-row">
               <span class="k">部署目录</span>
               <span class="v" :class="row.deployDir ? 'code' : 'muted'">
@@ -83,12 +98,14 @@
           <div class="host-foot">
             <div class="foot-actions">
               <el-button
+                v-if="!isLocalHost(row)"
                 size="small"
                 text
                 :loading="busyKey === `test:${row.id}`"
                 @click="testHost(row)"
               >测试连接</el-button>
               <el-button
+                v-if="!isLocalHost(row)"
                 size="small"
                 text
                 :loading="busyKey === `setup:${row.id}`"
@@ -101,18 +118,13 @@
         </article>
       </div>
 
-      <div v-else-if="!credentials.length" class="empty-state">
-        <span class="empty-title">先创建 SSH 凭证</span>
-        <span class="empty-hint">主机需要绑定登录用户名和私钥位置，凭据准备后再添加目标服务器。</span>
-        <el-button type="primary" @click="$emit('go-credentials')">前往凭证管理</el-button>
-      </div>
       <div v-else class="empty-state">
         <span class="empty-title">还没有保存的主机</span>
-        <span class="empty-hint">添加主机后可重复用于部署、更新、监控和日志诊断。</span>
+        <span class="empty-hint">可添加本机（当前电脑）或通过 SSH 连接局域网服务器，保存后用于部署、更新、监控和日志诊断。</span>
       </div>
 
       <div class="card-actions">
-        <el-button type="primary" :disabled="!credentials.length" @click="openCreate">
+        <el-button type="primary" @click="openCreate">
           <el-icon><Plus /></el-icon>
           <span>新增主机</span>
         </el-button>
@@ -127,6 +139,7 @@
       v-model="editorVisible"
       :host="editing"
       :credentials="credentials"
+      :hosts="hosts"
       :default-deploy-dir="connection.deployDir"
       @saved="load"
     />
@@ -146,7 +159,7 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { CircleCheck, CircleClose, Monitor, Plus, Refresh } from '@element-plus/icons-vue';
+import { CircleCheck, CircleClose, Connection, Monitor, Plus, Refresh } from '@element-plus/icons-vue';
 import HostEditor from '../components/HostEditor.vue';
 import {
   applyConnectionInventory,
@@ -154,6 +167,7 @@ import {
   connectionInventory,
   credentialById,
   credentialLabel,
+  isLocalHost,
   refreshConnectionInventory,
   useManagedHost
 } from '../connection.js';
@@ -264,7 +278,7 @@ async function setupAccess(row) {
 async function remove(row) {
   try {
     await ElMessageBox.confirm(
-      `确认删除主机「${row.name}」？\n\n不会影响目标服务器上已部署的服务；删除当前主机会自动切换到其他已保存主机。`,
+      `确认删除主机「${row.name}」？\n\n不会影响已部署的服务；删除当前主机后会自动切换到其他已保存主机，没有其他主机时回到本机部署。`,
       '删除主机',
       { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
     );
