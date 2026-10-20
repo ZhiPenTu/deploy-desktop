@@ -1,4 +1,4 @@
-# deploy-desktop
+# 部署舱（deploy-desktop）
 
 面向 Docker Compose 项目的桌面部署助手，支持本机与 SSH 主机的离线部署、制品更新、镜像管理和运行诊断。另提供独立的 stdio MCP 服务，供支持 MCP 的客户端调用。
 

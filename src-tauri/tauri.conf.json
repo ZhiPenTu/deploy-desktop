@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "离线部署助手",
+        "title": "部署舱",
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
         "width": 1180,

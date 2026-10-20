@@ -2,11 +2,9 @@
   <aside class="app-sidebar">
     <div class="sidebar-drag" data-tauri-drag-region></div>
     <div class="brand-block" data-tauri-drag-region="deep">
-      <span class="brand-mark">
-        <el-icon :size="18"><Connection /></el-icon>
-      </span>
+      <img class="brand-mark" :src="appIcon" alt="" />
       <div class="brand-copy">
-        <h1>离线部署助手</h1>
+        <h1>部署舱</h1>
         <p>Deployment Console</p>
       </div>
     </div>
@@ -48,12 +46,12 @@ import {
   Document,
   UploadFilled,
   Files,
-  Connection,
   Box,
   Setting,
   Key,
   Monitor
 } from '@element-plus/icons-vue';
+import appIcon from '../../assets/app-icon.png';
 
 const appVersion = __APP_VERSION__;
 
@@ -141,12 +139,8 @@ const navGroups = [
   width: 34px;
   height: 34px;
   flex: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 10px;
-  color: #ffffff;
-  background: linear-gradient(135deg, #4f74ff 0%, #2f4fe0 100%);
+  display: block;
+  border-radius: 9px;
   box-shadow: 0 6px 16px rgba(51, 92, 255, 0.35);
 }
 
