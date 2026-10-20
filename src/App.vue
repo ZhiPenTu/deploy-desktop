@@ -44,6 +44,7 @@
           v-else-if="currentTab === 'dashboard'"
           :connection="connection"
           @view-log="handleViewLog"
+          @go-hosts="navigateTab('hosts')"
         />
 
         <ArtifactCenter

@@ -7,6 +7,29 @@
       </div>
 
       <div class="header-actions">
+        <div class="host-switch">
+          <span class="host-switch-label">监控主机</span>
+          <el-select
+            :model-value="activeHostId || undefined"
+            :loading="switchingHost"
+            :disabled="operating || switchingHost || !hosts.length"
+            placeholder="暂无可用主机"
+            class="host-select"
+            aria-label="监控主机"
+            @change="handleHostChange"
+          >
+            <el-option
+              v-for="host in hosts"
+              :key="host.id"
+              :value="host.id"
+              :label="hostOptionLabel(host)"
+            />
+          </el-select>
+          <el-button v-if="!hosts.length" text type="primary" @click="emit('go-hosts')">
+            管理主机
+          </el-button>
+        </div>
+        <span class="action-divider" aria-hidden="true"></span>
         <el-button type="primary" :loading="operating" @click="handleStackAction('up')">
           <el-icon><VideoPlay /></el-icon>
           <span>启动全栈</span>
@@ -84,7 +107,12 @@
       <span>{{ runningCount }} 个运行中，共 {{ containers.length }} 个服务</span>
     </div>
 
-    <div class="containers-grid">
+    <div
+      class="containers-grid"
+      :class="{ 'is-loading': loading }"
+      v-loading="loading"
+      element-loading-text="正在读取容器状态"
+    >
       <div
         v-for="c in containers"
         :key="c.name"
@@ -118,7 +146,7 @@
         </div>
 
         <div class="c-foot">
-          <el-button size="small" text @click="handleRestartService(c.service_key)">
+          <el-button size="small" text :disabled="switchingHost" @click="handleRestartService(c.service_key)">
             重启服务
           </el-button>
           <el-button size="small" text type="primary" @click="$emit('view-log', c.name)">
@@ -126,6 +154,13 @@
           </el-button>
         </div>
       </div>
+    </div>
+
+    <div v-if="!containers.length && !loading" class="cluster-empty">
+      <span class="cluster-empty-title">未读取到服务实例</span>
+      <span class="cluster-empty-hint">
+        {{ readError ? '请确认监控主机可连接后重试。' : '请刷新状态重试，若仍无数据，请确认该主机已完成部署。' }}
+      </span>
     </div>
   </div>
 </template>
@@ -153,6 +188,7 @@ import {
   remoteDockerComposeAction
 } from '../../../api/tauri.js';
 import { defaultCluster } from '../../../config/cluster.js';
+import { connectionInventory, useManagedHost } from '../../connections/state.js';
 
 const props = defineProps({
   connection: {
@@ -161,18 +197,26 @@ const props = defineProps({
   }
 });
 
-defineEmits(['view-log']);
+const emit = defineEmits(['view-log', 'go-hosts']);
 
 const isRemote = computed(() => props.connection.mode === 'remote');
 const targetIp = computed(() => (isRemote.value ? props.connection.remoteHost : '127.0.0.1'));
 const deployDir = computed(() => props.connection.deployDir || '/opt/deploy');
+const activeHostId = computed(() => props.connection.activeHostId);
+const hosts = computed(() => connectionInventory.hosts);
 
 const loading = ref(false);
 const operating = ref(false);
+const switchingHost = ref(false);
 const containers = ref([]);
 const readError = ref('');
 const statusRequests = createRequestScope();
 onScopeDispose(() => statusRequests.dispose());
+
+const hostOptionLabel = (host) => {
+  if (host.kind === 'local') return host.name === '本机' ? '本机' : `${host.name}（本机）`;
+  return `${host.name}（${host.address}）`;
+};
 
 const roleMap = Object.fromEntries(
   defaultCluster.services.map((service) => [service.serviceKey, service.description])
@@ -297,6 +341,24 @@ const handleRestartService = async (serviceKey) => {
   }
 };
 
+const handleHostChange = async (id) => {
+  if (!id || id === activeHostId.value) return;
+  statusRequests.begin();
+  switchingHost.value = true;
+  loading.value = false;
+  containers.value = [];
+  readError.value = '';
+  try {
+    await useManagedHost(id);
+    await fetchStatus();
+  } catch (e) {
+    ElMessage.error('切换监控主机失败，请检查主机配置后重试。');
+    await fetchStatus();
+  } finally {
+    switchingHost.value = false;
+  }
+};
+
 onMounted(fetchStatus);
 </script>
 
@@ -310,7 +372,31 @@ onMounted(fetchStatus);
 .header-actions {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
+}
+
+.host-switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.host-switch-label {
+  flex: none;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.host-select {
+  width: 210px;
+}
+
+.action-divider {
+  width: 1px;
+  height: 20px;
+  background: var(--border-color);
+  margin: 0 2px;
 }
 
 .endpoint-grid {
@@ -467,6 +553,35 @@ a.endpoint-card:hover .endpoint-arrow {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 14px;
+}
+
+.containers-grid.is-loading {
+  min-height: 120px;
+}
+
+.cluster-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 120px;
+  padding: 24px;
+  text-align: center;
+  background: var(--panel-bg);
+  border: 1px dashed var(--border-color);
+  border-radius: var(--radius-md);
+}
+
+.cluster-empty-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.cluster-empty-hint {
+  font-size: 12px;
+  color: var(--text-muted);
 }
 
 .container-card {
