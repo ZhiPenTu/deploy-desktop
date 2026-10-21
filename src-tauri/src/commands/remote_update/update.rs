@@ -3,7 +3,7 @@ use super::inspect::{inspect_remote_deployment_inner, remote_free_kb};
 use super::models::RemoteUpdateResult;
 use super::progress::emit_progress;
 use super::transfer::{create_remote_backup, upload_dir_replace, upload_file_replace};
-use crate::commands::bundle::{ArtifactKind, Bundle};
+use crate::commands::bundle::{ArtifactKind, ArtifactRoot, Bundle};
 use crate::commands::projects;
 use crate::commands::remote_ssh::{
     explain_ssh_failure, resolve_existing_key, run_ssh_script, shell_quote,
@@ -294,8 +294,23 @@ fn selected_services(bundle: &Bundle, components: &[String]) -> Vec<String> {
     services
 }
 
+/// 目标机上实际使用的 Compose 文件（相对部署目录）。
+fn compose_file_on_target(bundle: &Bundle) -> String {
+    let source = bundle.effective_compose();
+    match bundle.artifact_for_source(source) {
+        Some(artifact) if artifact.root == ArtifactRoot::Deploy => artifact.path.trim().to_string(),
+        _ => Path::new(source)
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| source.to_string()),
+    }
+}
+
 fn is_config_selected(bundle: &Bundle, components: &[String]) -> bool {
-    let compose = bundle.descriptor.runtime.compose.trim();
+    let compose_sources = [
+        bundle.descriptor.runtime.compose.trim().to_string(),
+        bundle.effective_compose().to_string(),
+    ];
     components.iter().any(|key| {
         if key == "image" {
             return false;
@@ -306,7 +321,7 @@ fn is_config_selected(bundle: &Bundle, components: &[String]) -> bool {
                 component.artifacts.iter().any(|artifact| {
                     bundle
                         .artifact(artifact)
-                        .map(|spec| spec.source == compose)
+                        .map(|spec| compose_sources.iter().any(|source| spec.source == *source))
                         .unwrap_or(false)
                 })
             })
@@ -362,16 +377,14 @@ fn apply_remote_update(
         restart_services.clone()
     };
 
+    let compose_file = compose_file_on_target(bundle);
     let mut script = format!(
         r#"set -euo pipefail
 DEPLOY={deploy}
 cd "$DEPLOY"
-if [ -f docker-compose.lan.yml ]; then
-  COMPOSE_FILE=docker-compose.lan.yml
-elif [ -f docker-compose.yml ]; then
-  COMPOSE_FILE=docker-compose.yml
-else
-  echo "部署目录缺少 docker-compose.yml" >&2
+COMPOSE_FILE={compose_file}
+if [ ! -f "$COMPOSE_FILE" ]; then
+  echo "部署目录缺少 {compose_file}，请先完成首次安装" >&2
   exit 4
 fi
 compose() {{
@@ -382,18 +395,19 @@ compose() {{
   fi
 }}
 "#,
-        deploy = shell_quote(deploy_dir)
+        deploy = shell_quote(deploy_dir),
+        compose_file = shell_quote(&compose_file)
     );
 
     if config_selected {
         script.push_str(
-            "echo \"==> 应用部署配置 (docker compose up -d)\"\ncompose up -d --pull never --no-build\n",
+            "echo \"==> 应用部署配置 (docker compose up -d)\"\ncompose up -d --pull never --no-build --remove-orphans\n",
         );
     }
 
     if !restart_services.is_empty() {
         let action = if components.iter().any(|item| item == "image") {
-            "up -d --pull never --no-build"
+            "up -d --pull never --no-build --remove-orphans"
         } else {
             "restart"
         };

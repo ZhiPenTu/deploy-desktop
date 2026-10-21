@@ -103,7 +103,8 @@ fn review_blocking(
         .map_err(|_| "无法访问交付包目录，请重新选择并解压制品".to_string())?;
     let bundle = crate::commands::bundle::Bundle::load(&root)?;
     bundle.ensure_compatible()?;
-    let compose_path = bundle.descriptor.runtime.compose.trim().to_string();
+    // 声明的变体清单才是目标环境实际运行的清单，比对与执行必须保持一致。
+    let compose_path = bundle.effective_compose().to_string();
     if bundle.artifact_for_source(&compose_path).is_none() {
         return Err("交付包未声明 Docker Compose 清单，请重新选择制品".to_string());
     }

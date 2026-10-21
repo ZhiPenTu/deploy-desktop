@@ -36,6 +36,8 @@ struct UpdatePlan {
     deploy_dir: PathBuf,
     compose: PathBuf,
     bundle_compose: PathBuf,
+    /// 交付包声明的变体清单（如局域网覆盖文件），执行时优先使用。
+    variant: Option<PathBuf>,
     components: Vec<String>,
     replacements: Vec<Replacement>,
     images: Vec<PathBuf>,
@@ -144,7 +146,7 @@ fn run_update(
         check_images_available(effective_config)?;
     }
     let compose_for_env = if plan.config_selected {
-        preferred_compose(&plan.deploy_dir)?
+        preferred_compose(&plan.deploy_dir, plan.variant.as_deref())?
     } else {
         plan.compose.clone()
     };
@@ -194,7 +196,7 @@ fn run_update(
             docker_output(&["load", "-i", &image.to_string_lossy()], "导入镜像")?;
         }
         let effective = if plan.config_selected {
-            preferred_compose(&plan.deploy_dir)?
+            preferred_compose(&plan.deploy_dir, plan.variant.as_deref())?
         } else {
             plan.compose.clone()
         };
@@ -212,7 +214,7 @@ fn run_update(
             compose_output(
                 &plan,
                 &effective,
-                &["up", "-d", "--pull", "never", "--no-build"],
+                &["up", "-d", "--pull", "never", "--no-build", "--remove-orphans"],
             )?;
         }
         if !plan.services.is_empty() {
@@ -230,6 +232,22 @@ fn run_update(
     })();
     let error = execution.err();
     let success = error.is_none();
+    if success {
+        // 部署记录用于状态展示，写入失败不影响部署结果。
+        if let Ok(bundle_root) = existing_directory(bundle_dir, "交付包目录") {
+            if let Ok(bundle) = Bundle::load(&bundle_root) {
+                let project_id = super::projects::active_project()
+                    .map(|project| project.id)
+                    .unwrap_or_default();
+                let record = bundle.deployed_record(&project_id);
+                if let Err(write_error) =
+                    super::bundle::write_deployed_record(&plan.root, &record)
+                {
+                    log::warn!("写入本机部署记录失败: {write_error}");
+                }
+            }
+        }
+    }
     progress(
         window,
         if success {
@@ -333,7 +351,10 @@ fn validate_destination(root: &Path, path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn preferred_compose(dir: &Path) -> Result<PathBuf, String> {
+fn preferred_compose(dir: &Path, variant: Option<&Path>) -> Result<PathBuf, String> {
+    if let Some(path) = variant.map(|name| dir.join(name)).filter(|path| path.is_file()) {
+        return Ok(path);
+    }
     ["docker-compose.lan.yml", "docker-compose.yml"]
         .iter()
         .map(|name| dir.join(name))
@@ -384,9 +405,40 @@ fn build_plan(
         .ok_or_else(|| "交付包未声明 Compose 清单，请重新获取制品".to_string())?;
     let compose = deploy_dir.join(compose_spec.path.trim());
     if !compose.is_file() {
-        return Err("未找到 Compose 清单，请检查部署目录".to_string());
+        if root.join(compose_spec.path.trim()).is_file() {
+            let parent = root.parent().map(|path| path.to_string_lossy().to_string());
+            return Err(match parent {
+                Some(parent) => format!(
+                    "项目部署目录指向了 Compose 清单所在目录，请改为安装根目录：{parent}"
+                ),
+                None => "项目部署目录指向了 Compose 清单所在目录，请改为安装根目录".to_string(),
+            });
+        }
+        return Err(format!(
+            "交付包中的 Compose 清单未落到部署目录（{}），请确认项目部署目录与制品版本",
+            compose.display()
+        ));
     }
-    let bundle_compose = bundle.root.join(bundle.descriptor.runtime.compose.trim());
+    // 声明的变体清单才是目标环境实际运行的清单；服务集合、配置校验与执行必须使用同一份文件。
+    let variant_rel = bundle.descriptor.runtime.variant.trim().to_string();
+    let variant_name = Path::new(&variant_rel)
+        .file_name()
+        .map(PathBuf::from)
+        .filter(|_| !variant_rel.is_empty() && bundle.artifact_for_source(&variant_rel).is_some());
+    let (compose, bundle_compose, config_source, variant) = match variant_name {
+        Some(name) if deploy_dir.join(&name).is_file() => (
+            deploy_dir.join(&name),
+            bundle.root.join(&variant_rel),
+            variant_rel,
+            Some(name),
+        ),
+        _ => (
+            compose,
+            bundle.root.join(bundle.descriptor.runtime.compose.trim()),
+            bundle.descriptor.runtime.compose.trim().to_string(),
+            None,
+        ),
+    };
 
     reject_symlinks(&compose)?;
     reject_symlinks(&bundle_compose)?;
@@ -397,7 +449,6 @@ fn build_plan(
         return Err("交付包与当前部署的服务不匹配，请确认所选主机和制品".to_string());
     }
 
-    let config_source = bundle.descriptor.runtime.compose.trim().to_string();
     let config_selected = components.iter().any(|key| {
         bundle
             .component(key)
@@ -504,6 +555,7 @@ fn build_plan(
         deploy_dir,
         compose,
         bundle_compose,
+        variant,
         components,
         replacements,
         images,
@@ -1011,6 +1063,7 @@ mod tests {
     struct BundleSpec {
         root: PathBuf,
         compose: String,
+        variant: String,
         services: Vec<serde_json::Value>,
         artifacts: Vec<serde_json::Value>,
         components: Vec<serde_json::Value>,
@@ -1022,11 +1075,17 @@ mod tests {
             Self {
                 root,
                 compose: compose.to_string(),
+                variant: String::new(),
                 services: Vec::new(),
                 artifacts: Vec::new(),
                 components: Vec::new(),
                 images: Vec::new(),
             }
+        }
+
+        fn variant(mut self, path: &str) -> Self {
+            self.variant = path.to_string();
+            self
         }
 
         fn service(mut self, key: &str) -> Self {
@@ -1063,6 +1122,7 @@ mod tests {
                 "metadata": { "product": "demo", "displayName": "演示", "version": "1-a",
                     "commit": "deadbeef", "commitShort": "deadbee", "branch": "main", "builtAt": "" },
                 "runtime": { "type": "compose", "compose": &self.compose,
+                    "variant": &self.variant,
                     "containerPrefix": "demo", "services": self.services },
                 "components": self.components,
                 "artifacts": self.artifacts,
@@ -1177,6 +1237,83 @@ mod tests {
     }
 
     #[test]
+    fn reports_project_directory_pointing_at_compose_directory() {
+        let compose = "services:\n  api:\n    image: nginx\n";
+        let fixture = Fixture::new();
+        fixture.write("target/deploy/docker-compose.yml", compose);
+        fixture.write("bundle/deploy/docker-compose.yml", compose);
+        let bundle_dir = fixture
+            .spec("bundle", "deploy/docker-compose.yml")
+            .service("api")
+            .artifact("compose", "deploy/docker-compose.yml", "deploy", "docker-compose.yml", "file")
+            .component("config", &["compose"], &[])
+            .write();
+        let error = build_plan(
+            bundle_dir.to_str().unwrap(),
+            fixture.0.join("target/deploy").to_str().unwrap(),
+            &["config".to_string()],
+        )
+        .err()
+        .unwrap();
+        assert!(error.contains("安装根目录"), "{error}");
+        assert!(error.contains("target"), "{error}");
+    }
+
+    #[test]
+    fn uses_declared_variant_compose_for_execution() {
+        let compose = "services:\n  api:\n    image: nginx\n";
+        let fixture = Fixture::new();
+        fixture.write("target/deploy/docker-compose.yml", compose);
+        fixture.write("target/deploy/docker-compose.lan.yml", compose);
+        fixture.write("bundle/deploy/docker-compose.yml", compose);
+        fixture.write("bundle/deploy/docker-compose.lan.yml", compose);
+        let bundle_dir = fixture
+            .spec("bundle", "deploy/docker-compose.yml")
+            .variant("deploy/docker-compose.lan.yml")
+            .service("api")
+            .artifact("compose", "deploy/docker-compose.yml", "deploy", "docker-compose.yml", "file")
+            .artifact("compose-lan", "deploy/docker-compose.lan.yml", "deploy", "docker-compose.lan.yml", "file")
+            .component("config", &["compose", "compose-lan"], &[])
+            .write();
+        let plan = build_plan(
+            bundle_dir.to_str().unwrap(),
+            fixture.0.join("target").to_str().unwrap(),
+            &["config".to_string()],
+        )
+        .unwrap();
+        let chosen = preferred_compose(&plan.deploy_dir, plan.variant.as_deref()).unwrap();
+        assert_eq!(chosen.file_name().unwrap(), "docker-compose.lan.yml");
+        assert_eq!(plan.compose.file_name().unwrap(), "docker-compose.lan.yml");
+        assert_eq!(plan.bundle_compose.file_name().unwrap(), "docker-compose.lan.yml");
+    }
+
+    #[test]
+    fn variant_services_follow_the_runtime_compose_not_the_default_one() {
+        let default = "services:\n  kafka:\n    image: nginx\n  cloudflared:\n    image: nginx\n";
+        let lan = "services:\n  kafka:\n    image: nginx\n";
+        let fixture = Fixture::new();
+        fixture.write("target/deploy/docker-compose.yml", default);
+        fixture.write("target/deploy/docker-compose.lan.yml", lan);
+        fixture.write("bundle/deploy/docker-compose.yml", default);
+        fixture.write("bundle/deploy/docker-compose.lan.yml", lan);
+        let bundle_dir = fixture
+            .spec("bundle", "deploy/docker-compose.yml")
+            .variant("deploy/docker-compose.lan.yml")
+            .service("kafka")
+            .artifact("compose", "deploy/docker-compose.yml", "deploy", "docker-compose.yml", "file")
+            .artifact("compose-lan", "deploy/docker-compose.lan.yml", "deploy", "docker-compose.lan.yml", "file")
+            .component("config", &["compose", "compose-lan"], &[])
+            .write();
+        let plan = build_plan(
+            bundle_dir.to_str().unwrap(),
+            fixture.0.join("target").to_str().unwrap(),
+            &["config".to_string()],
+        )
+        .unwrap();
+        assert_eq!(plan.all_services, vec!["kafka".to_string()]);
+    }
+
+    #[test]
     fn backups_preserve_configuration_and_replacement_removes_stale_files() {
         let fixture = Fixture::new();
         for folder in ["target", "bundle"] {
@@ -1287,6 +1424,7 @@ mod tests {
             root,
             compose: PathBuf::new(),
             bundle_compose: PathBuf::new(),
+            variant: None,
             components: vec!["frontend".to_string()],
             replacements: Vec::new(),
             images: Vec::new(),
@@ -1313,6 +1451,7 @@ mod tests {
             root: plan.root.clone(),
             compose: PathBuf::new(),
             bundle_compose: PathBuf::new(),
+            variant: None,
             components: vec!["config".to_string()],
             replacements: Vec::new(),
             images: Vec::new(),

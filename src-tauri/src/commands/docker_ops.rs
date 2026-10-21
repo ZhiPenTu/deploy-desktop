@@ -40,7 +40,38 @@ const COMPOSE_CANDIDATES: [&str; 4] = [
     "deploy/docker-compose.yml",
 ];
 
+/// 当前项目交付包声明的 Compose 清单，返回相对部署目录的路径。
+///
+/// 部署与监控必须使用同一份清单：交付包声明了变体（如局域网覆盖文件）时，
+/// 变体才是目标环境实际运行的文件。
+pub(crate) fn active_compose_relative() -> Option<String> {
+    let bundle = crate::commands::projects::active_bundle()?;
+    let spec = bundle.artifact_for_source(bundle.effective_compose())?;
+    let path = spec.path.trim().trim_start_matches("./").to_string();
+    if spec.root == crate::commands::bundle::ArtifactRoot::Deploy {
+        return Some(path);
+    }
+    let deploy_prefix = bundle.deploy_source_rel().trim_matches('/').to_string();
+    if deploy_prefix.is_empty() {
+        Some(path)
+    } else {
+        path.strip_prefix(&format!("{deploy_prefix}/"))
+            .map(str::to_string)
+            .or(Some(path))
+    }
+}
+
 pub fn resolve_compose_file(root: &Path) -> Option<std::path::PathBuf> {
+    if let Some(relative) = active_compose_relative() {
+        let declared = root.join(&relative);
+        if declared.is_file() {
+            return Some(declared);
+        }
+        let nested = root.join("deploy").join(&relative);
+        if nested.is_file() {
+            return Some(nested);
+        }
+    }
     COMPOSE_CANDIDATES
         .iter()
         .map(|name| root.join(name))
@@ -84,6 +115,44 @@ pub fn resolve_env_files_for(install_dir: &Path, deploy_dir: &Path) -> Vec<std::
         }
     }
     files
+}
+
+/// 本机 Compose 操作可能从安装根目录或部署目录发起；环境变量文件要按
+/// 「安装根目录 + 部署目录」一起解析，否则 Compose 插值会因为缺少必填变量直接失败。
+pub fn resolve_env_files_for_dir(dir: &Path) -> Vec<std::path::PathBuf> {
+    // 部署目录取自 Compose 清单实际所在位置，调用方传安装根目录或部署目录都成立。
+    let deploy_dir = resolve_compose_file(dir)
+        .and_then(|file| file.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| dir.to_path_buf());
+    let install_dir = match deploy_dir.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => deploy_dir.clone(),
+    };
+    let mut files = resolve_env_files_for(&install_dir, &deploy_dir);
+    if files.is_empty() {
+        files = resolve_env_files(dir);
+    }
+    files
+}
+
+/// Compose 的原始输出不直接抛给用户，这里给出可操作的中文提示。
+fn compose_failure_hint(stderr: &str) -> String {
+    let first = stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+    if first.contains("is missing a value") || first.contains("is not set") {
+        return "Compose 配置缺少必填环境变量，请在部署目录的 .env 或 .env.local 中补全后重试"
+            .to_string();
+    }
+    if first.contains("no such service") {
+        return "Compose 清单中没有该服务，请确认所选服务与部署清单一致".to_string();
+    }
+    if first.contains("permission denied") {
+        return "Docker 权限不足，请确认已允许当前用户访问 Docker".to_string();
+    }
+    "命令未执行成功，请检查部署目录与服务配置后重试".to_string()
 }
 
 /// 交付包通过 bind mount 替换产物，compose 不会因此重建容器；
@@ -262,7 +331,7 @@ pub fn docker_compose_action(
         )
     })?;
     let mut args = vec!["compose".to_string()];
-    for env_file in resolve_env_files(root) {
+    for env_file in resolve_env_files_for_dir(root) {
         args.push("--env-file".to_string());
         args.push(env_file.to_string_lossy().to_string());
     }
@@ -273,6 +342,10 @@ pub fn docker_compose_action(
         "up" => {
             args.push("up".to_string());
             args.push("-d".to_string());
+            // 交付包里已删除的服务需要一并回收，否则旧容器会继续占用端口与资源。
+            if service.is_none() {
+                args.push("--remove-orphans".to_string());
+            }
             if let Some(s) = service {
                 args.push(s);
             }
@@ -348,7 +421,7 @@ pub fn docker_compose_action(
                 Ok(ComposeActionResult {
                     success: false,
                     output: combined,
-                    error: Some("命令返回非零退出码".to_string()),
+                    error: Some(compose_failure_hint(&stderr)),
                 })
             }
         }
@@ -426,6 +499,27 @@ mod tests {
             assert_eq!(lines[1], expected.parent().unwrap().to_str().unwrap());
         }
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn compose_env_files_cover_install_root_and_deploy_dir() {
+        let root = temp_root("env-files");
+        fs::create_dir_all(root.join("deploy")).unwrap();
+        fs::write(root.join("deploy/docker-compose.lan.yml"), "services: {}\n").unwrap();
+        fs::write(root.join("deploy/.env"), "TUNNEL_TOKEN=\n").unwrap();
+        fs::write(root.join(".env.local"), "OB_TENANT_PASSWORD=x\n").unwrap();
+
+        let from_deploy = resolve_env_files_for_dir(&root.join("deploy"));
+        assert_eq!(
+            from_deploy,
+            vec![root.join("deploy/.env"), root.join(".env.local")],
+            "从部署目录发起时也要带上安装根目录的环境变量文件"
+        );
+
+        let from_root = resolve_env_files_for_dir(&root);
+        assert_eq!(from_root, from_deploy);
+
+        fs::remove_dir_all(&root).ok();
     }
 
 }

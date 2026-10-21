@@ -871,6 +871,7 @@ fn remote_compose_action(
         .unwrap_or_default();
     let action_arg = match action {
         "ps" => "ps".to_string(),
+        "up" if service_arg.is_empty() => "up -d --remove-orphans".to_string(),
         "up" => format!("up -d{service_arg}"),
         "stop" => format!("stop{service_arg}"),
         "restart" => format!("restart{service_arg}"),
@@ -878,19 +879,43 @@ fn remote_compose_action(
         other => return Err(format!("不支持的 Compose 操作: {other}")),
     };
 
+    // 优先使用交付包声明的清单，找不到时再按常见文件名回退。
+    let mut candidates: Vec<String> = Vec::new();
+    if let Some(declared) = crate::commands::docker_ops::active_compose_relative() {
+        candidates.push(declared.clone());
+        candidates.push(format!("deploy/{declared}"));
+    }
+    for name in [
+        "docker-compose.lan.yml",
+        "docker-compose.yml",
+        "deploy/docker-compose.lan.yml",
+        "deploy/docker-compose.yml",
+    ] {
+        candidates.push(name.to_string());
+    }
+    let mut unique: Vec<String> = Vec::new();
+    for name in candidates {
+        if !unique.contains(&name) {
+            unique.push(name);
+        }
+    }
+    let list = unique
+        .iter()
+        .map(|name| shell_quote(name))
+        .collect::<Vec<_>>()
+        .join(" ");
     let script = format!(
         r#"set -e
-cd {}
-if [ -f docker-compose.lan.yml ]; then
-  COMPOSE_FILE=docker-compose.lan.yml
-elif [ -f docker-compose.yml ]; then
-  COMPOSE_FILE=docker-compose.yml
-elif [ -f deploy/docker-compose.lan.yml ]; then
-  COMPOSE_FILE=deploy/docker-compose.lan.yml
-elif [ -f deploy/docker-compose.yml ]; then
-  COMPOSE_FILE=deploy/docker-compose.yml
-else
-  echo "目标目录及其 deploy/ 子目录未找到 docker-compose.lan.yml 或 docker-compose.yml" >&2
+cd {deploy}
+COMPOSE_FILE=""
+for candidate in {list}; do
+  if [ -f "$candidate" ]; then
+    COMPOSE_FILE="$candidate"
+    break
+  fi
+done
+if [ -z "$COMPOSE_FILE" ]; then
+  echo "目标目录及其 deploy/ 子目录未找到可用的 Compose 清单" >&2
   exit 3
 fi
 ENV_ARGS=""
@@ -901,14 +926,14 @@ for f in .env deploy/.env .env.local deploy/.env.local; do
 done
 COMPOSE_ARGS="-f $COMPOSE_FILE"
 if docker compose version >/dev/null 2>&1; then
-  docker compose $ENV_ARGS $COMPOSE_ARGS {}
+  docker compose $ENV_ARGS $COMPOSE_ARGS {action}
 else
-  docker-compose $ENV_ARGS $COMPOSE_ARGS {}
+  docker-compose $ENV_ARGS $COMPOSE_ARGS {action}
 fi
 "#,
-        shell_quote(deploy_dir),
-        action_arg,
-        action_arg
+        deploy = shell_quote(deploy_dir),
+        list = list,
+        action = action_arg
     );
 
     let output = run_ssh_script(host, port, user, key, &script)?;

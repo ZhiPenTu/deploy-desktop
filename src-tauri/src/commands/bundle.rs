@@ -312,6 +312,21 @@ impl Bundle {
             .find(|item| item.source.trim() == source)
     }
 
+    /// 部署内容文件数：以描述符声明为准，与部署计划中的文件数保持一致。
+    pub fn payload_file_count(&self) -> usize {
+        self.descriptor.files.len()
+    }
+
+    /// 目标环境实际执行的 Compose 清单：声明了可用变体时用变体，否则用主清单。
+    pub fn effective_compose(&self) -> &str {
+        let variant = self.descriptor.runtime.variant.trim();
+        if !variant.is_empty() && self.artifact_for_source(variant).is_some() {
+            variant
+        } else {
+            self.descriptor.runtime.compose.trim()
+        }
+    }
+
     pub fn service(&self, key: &str) -> Option<&ServiceSpec> {
         self.descriptor.runtime.services.iter().find(|item| item.key == key)
     }
@@ -1008,6 +1023,47 @@ mod tests {
         assert_eq!(resolved[0].target, Path::new("/srv/demo/stack/site"));
         assert_eq!(resolved[1].target, Path::new("/srv/demo/bin"));
         assert_eq!(default_components(&bundle), vec!["site", "cli", "config"]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn effective_compose_prefers_declared_variant_only_when_packaged() {
+        let root = temp_dir("variant");
+        write_file(&root, "app/web/index.html", "<h1>hi</h1>");
+        write_file(&root, "stack/docker-compose.yml", "services:\n  web:\n    image: nginx:1.27\n");
+        write_file(
+            &root,
+            "stack/docker-compose.lan.yml",
+            "services:\n  web:\n    image: nginx:1.27\n    ports: [\"8080:80\"]\n",
+        );
+        let mut manifest = base_manifest(
+            &root,
+            "stack/docker-compose.yml",
+            json!([
+                { "key": "web", "label": "网页产物", "source": "app/web", "root": "deploy",
+                  "path": "site", "type": "dir" },
+                { "key": "compose", "label": "部署配置", "source": "stack/docker-compose.yml",
+                  "root": "deploy", "path": "docker-compose.yml", "type": "file" },
+                { "key": "compose-lan", "label": "局域网配置",
+                  "source": "stack/docker-compose.lan.yml", "root": "deploy",
+                  "path": "docker-compose.lan.yml", "type": "file" }
+            ]),
+            json!([{ "key": "site", "label": "网站", "artifacts": ["web", "compose", "compose-lan"],
+                     "services": ["web"] }]),
+        );
+        manifest["files"] = json!(files_of(&root));
+        manifest["runtime"]["variant"] = json!("stack/docker-compose.lan.yml");
+        write_manifest(&root, &manifest);
+
+        let bundle = Bundle::load(&root).unwrap();
+        assert_eq!(bundle.effective_compose(), "stack/docker-compose.lan.yml");
+        assert_eq!(bundle.artifact_for_source(bundle.effective_compose()).unwrap().path,
+                   "docker-compose.lan.yml");
+
+        manifest["runtime"]["variant"] = json!("stack/docker-compose.missing.yml");
+        write_manifest(&root, &manifest);
+        let bundle = Bundle::load(&root).unwrap();
+        assert_eq!(bundle.effective_compose(), "stack/docker-compose.yml");
         fs::remove_dir_all(root).unwrap();
     }
 

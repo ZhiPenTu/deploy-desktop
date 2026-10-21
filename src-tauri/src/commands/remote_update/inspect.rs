@@ -177,10 +177,11 @@ fn probes_from_record(record: &DeployedRecord, install_dir: &Path) -> Vec<Artifa
 fn compose_and_deploy(install_dir: &Path, bundle: Option<&Bundle>) -> Option<(PathBuf, PathBuf)> {
     let bundle = bundle?;
     let deploy = deploy_root(install_dir, Some(bundle));
+    let source = bundle.effective_compose();
     let compose = bundle
-        .artifact_for_source(&bundle.descriptor.runtime.compose)
+        .artifact_for_source(source)
         .map(|artifact| deploy.join(artifact.path.trim()))
-        .unwrap_or_else(|| deploy.join(bundle.descriptor.runtime.compose.trim()));
+        .unwrap_or_else(|| deploy.join(source));
     Some((compose, deploy))
 }
 

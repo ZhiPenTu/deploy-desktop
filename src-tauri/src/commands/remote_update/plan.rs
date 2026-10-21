@@ -183,6 +183,9 @@ pub fn inspect_bundle_plan_blocking(
         )
     };
 
+    // 目标环境实际运行的是声明的变体清单（如局域网覆盖文件），这里展示同一份文件。
+    let compose_in_use = bundle.effective_compose();
+
     let has_offline_images = bundle.has_bundle_images();
     let mut steps = vec![
         PlanStep {
@@ -227,7 +230,7 @@ pub fn inspect_bundle_plan_blocking(
         PlanStep {
             key: "start".to_string(),
             title: "启动容器栈".to_string(),
-            detail: format!("docker compose -f {} up -d", descriptor.runtime.compose.trim()),
+            detail: format!("docker compose -f {compose_in_use} up -d"),
             state: "ready".to_string(),
             hint: String::new(),
         },
@@ -252,7 +255,7 @@ pub fn inspect_bundle_plan_blocking(
         branch: descriptor.metadata.branch.clone(),
         built_at: descriptor.metadata.built_at.clone(),
         runtime: descriptor.runtime.runtime_type.clone(),
-        compose: descriptor.runtime.compose.clone(),
+        compose: compose_in_use.to_string(),
         variant: descriptor.runtime.variant.clone(),
         components,
         services,
@@ -399,7 +402,7 @@ fn collect_plan_images(bundle: &crate::commands::bundle::Bundle, local: &[String
     }
 
     if entries.is_empty() {
-        let compose_path = bundle.root.join(bundle.descriptor.runtime.compose.trim());
+        let compose_path = bundle.root.join(bundle.effective_compose());
         if let Ok(text) = fs::read_to_string(&compose_path) {
             for line in text.lines() {
                 let trimmed = line.trim_start();

@@ -772,14 +772,18 @@ fn release_from_local_bundle(source: &ArtifactSource, dir: &Path) -> Option<Arti
     let meta: Value = fs::read_to_string(dir.join("bundle.json"))
         .ok()
         .and_then(|content| serde_json::from_str(&content).ok())?;
-    let version = validate_artifact_version(json_str(&meta, "version")).ok()?.to_string();
+    // 只识别当前格式的交付包；旧格式目录不再展示，也无法直接使用。
+    let metadata = meta.get("metadata")?;
+    let version = validate_artifact_version(json_str(metadata, "version"))
+        .ok()?
+        .to_string();
     Some(ArtifactRelease {
         run_status: "cached".to_string(),
         version,
-        commit: json_str(&meta, "commit").to_string(),
-        commit_short: json_str(&meta, "commitShort").to_string(),
-        branch: json_str(&meta, "branch").to_string(),
-        built_at: parse_rfc3339_millis(json_str(&meta, "builtAt")).unwrap_or_default(),
+        commit: json_str(metadata, "commit").to_string(),
+        commit_short: json_str(metadata, "commitShort").to_string(),
+        branch: json_str(metadata, "branch").to_string(),
+        built_at: parse_rfc3339_millis(json_str(metadata, "builtAt")).unwrap_or_default(),
         artifact_name: source.artifact_name.clone(),
         size_bytes: bundle_meta_size(&meta),
         local_dir: dir.to_string_lossy().to_string(),
@@ -1244,8 +1248,9 @@ fn install_artifact_archive(
 ) -> Result<ArtifactBundle, String> {
     let staged = dest.with_file_name(format!(".unpack-{}-{}", std::process::id(), now_millis()));
     let result = (|| {
-        let files = safe_extract(archive, &staged)?;
+        safe_extract(archive, &staged)?;
         let (bundle_version, commit) = validate_layout(&staged)?;
+        let files = payload_file_count(&staged);
         if bundle_version != version {
             return Err(format!("交付包版本不匹配：选择的版本为 {version}，包内版本为 {bundle_version}，请重新选择或重新构建"));
         }
@@ -1375,6 +1380,14 @@ fn count_files(dir: &Path) -> usize {
     total
 }
 
+/// 部署内容文件数：交给界面的数字与部署计划保持一致，不含描述文件本身。
+fn payload_file_count(dir: &Path) -> usize {
+    match crate::commands::bundle::Bundle::load(dir) {
+        Ok(bundle) => bundle.payload_file_count(),
+        Err(_) => count_files(dir),
+    }
+}
+
 // 本地目录与压缩包共用同一结构检查；不跟随符号链接，避免部署时访问包外文件。
 fn inspect_local_tree(dir: &Path, depth: usize) -> Result<(usize, u64), String> {
     if depth > 128 {
@@ -1434,8 +1447,9 @@ fn prepare_local_bundle(path: &Path, cache_root: &Path) -> Result<ArtifactBundle
     };
     let dir = extracted.as_deref().unwrap_or(&source);
     let result = (|| {
-        let (files, bytes) = inspect_local_tree(dir, 0)?;
+        let (_, bytes) = inspect_local_tree(dir, 0)?;
         let (version, commit) = validate_layout(dir)?;
+        let files = payload_file_count(dir);
         Ok(ArtifactBundle {
             dir: dir.to_string_lossy().to_string(), version, commit,
             md5: String::new(), size_bytes: bytes, files,
@@ -1546,7 +1560,7 @@ pub fn open_artifact_bundle(app: AppHandle, id: String) -> Result<ArtifactBundle
         commit,
         md5: String::new(),
         size_bytes: 0,
-        files: count_files(&dir),
+        files: payload_file_count(&dir),
     })
 }
 
@@ -1598,7 +1612,7 @@ pub fn open_artifact_bundle_version(
         commit,
         md5: String::new(),
         size_bytes: 0,
-        files: count_files(&dir),
+        files: payload_file_count(&dir),
     })
 }
 
@@ -1699,7 +1713,7 @@ mod tests {
         assert!(Command::new("tar").arg("-czf").arg(&archive).arg("-C").arg(&source).arg(".").status().unwrap().success());
         let prepared = prepare_local_bundle(&archive, &root.join("cache")).unwrap();
         assert_eq!(prepared.version, "2");
-        assert_eq!(prepared.files, 4);
+        assert_eq!(prepared.files, 3);
         assert!(Path::new(&prepared.dir).join("deploy/docker-compose.yml").is_file());
         assert_eq!(fs::read_to_string(source.join("app/server.jar")).unwrap(), "artifact");
         let cache_count = fs::read_dir(root.join("cache")).unwrap().count();
@@ -2026,7 +2040,14 @@ mod tests {
         fs::create_dir_all(&local).unwrap();
         fs::write(
             local.join("bundle.json"),
-            r#"{"version":"8","commit":"abcdef0123","commitShort":"abcdef0","branch":"master","builtAt":"2026-10-19T00:00:00Z","files":[{"path":"a","size":2048}]}"#,
+            r#"{"metadata":{"version":"8","commit":"abcdef0123","commitShort":"abcdef0","branch":"master","builtAt":"2026-10-19T00:00:00Z"},"files":[{"path":"a","size":2048}]}"#,
+        )
+        .unwrap();
+        let legacy = root.join("bundles").join(&source.id).join("6");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(
+            legacy.join("bundle.json"),
+            r#"{"schemaVersion":1,"version":"6","builtAt":"2026-10-18T00:00:00Z"}"#,
         )
         .unwrap();
 
@@ -2037,6 +2058,7 @@ mod tests {
         assert_eq!(cached.items[0].commit_short, "abcdef0");
         assert_eq!(cached.items[0].size_bytes, 2048);
         assert_eq!(cached.items[0].built_at, 1_792_368_000_000);
+        assert!(cached.items.iter().all(|item| item.version != "6"));
         assert_eq!(cached.items[1].version, "7");
         assert_eq!(cached.items[1].download_url, "");
         assert!(cached.has_more);
