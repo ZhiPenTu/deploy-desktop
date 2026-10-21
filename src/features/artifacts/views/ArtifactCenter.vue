@@ -369,6 +369,7 @@ import {
   inspectBundlePlan,
   openArtifactRunUrl
 } from '../../../api/tauri.js';
+import { applyProjectBundle, reloadProjectState } from '../../connections/state.js';
 
 const props = defineProps({
   connection: {
@@ -656,7 +657,7 @@ async function removeLocal(row) {
   try {
     const result = await deleteLocalBundle(row.id);
     if (inUse) {
-      props.connection.bundleDir = '';
+      await reloadProjectState();
     }
     ElMessage.success(`已清理本地交付包，释放 ${formatSize(result.freedBytes)}`);
     await loadSources();
@@ -721,7 +722,7 @@ async function useExisting(row) {
   loadingVersionKey.value = releaseKey(row);
   try {
     const result = await openArtifactBundleVersion(source.id, row.version || 'manual');
-    props.connection.bundleDir = result.dir;
+    await applyProjectBundle(result.dir, result.version || row.version || '');
     ElMessage.success(`已使用本地交付包 ${versionText(result)}`.trim());
     await loadSources();
     if (activeSource.value) {
@@ -738,9 +739,14 @@ function goSourceSettings() {
   emit('go-settings', 'artifacts');
 }
 
-function applyBundle() {
+async function applyBundle() {
   if (!bundle.value) return;
-  props.connection.bundleDir = bundle.value.dir;
+  try {
+    await applyProjectBundle(bundle.value.dir, bundle.value.version);
+  } catch (error) {
+    ElMessage.error(String(error));
+    return;
+  }
   ElMessage.success('已设为当前部署包');
   releaseVisible.value = false;
 }

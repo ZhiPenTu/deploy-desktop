@@ -1,15 +1,21 @@
 use crate::commands::docker_ops::ContainerStatusItem;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
+/// 目标机上单个产物的实际状态，字段来自交付包描述符，不再固定为 jar / classes / dist。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RemoteArtifactInfo {
+#[serde(rename_all = "camelCase")]
+pub struct RemoteArtifactStatus {
+    pub key: String,
+    pub label: String,
+    pub root: String,
+    pub path: String,
     pub exists: bool,
     pub size_bytes: u64,
     pub modified: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RemoteDeploymentStatus {
     pub deployed: bool,
     pub install_dir: String,
@@ -18,10 +24,9 @@ pub struct RemoteDeploymentStatus {
     pub docker_available: bool,
     pub docker_running: bool,
     pub compose_available: bool,
-    pub server_jar: RemoteArtifactInfo,
-    pub gateway_classes: RemoteArtifactInfo,
-    pub gateway_lib: RemoteArtifactInfo,
-    pub frontend_dist: RemoteArtifactInfo,
+    pub artifacts: Vec<RemoteArtifactStatus>,
+    pub record_version: String,
+    pub record_missing: bool,
     pub containers: Vec<ContainerStatusItem>,
     pub running_containers: usize,
     pub total_containers: usize,
@@ -45,16 +50,4 @@ pub struct RemoteUpdateResult {
     pub output: String,
     pub duration_secs: u64,
     pub status: Option<RemoteDeploymentStatus>,
-}
-
-pub(super) struct BundlePaths {
-    pub(super) server_jar: Option<PathBuf>,
-    pub(super) gateway_classes: Option<PathBuf>,
-    pub(super) gateway_lib: Option<PathBuf>,
-    pub(super) frontend_dist: Option<PathBuf>,
-    pub(super) compose_file: Option<PathBuf>,
-    pub(super) compose_lan_file: Option<PathBuf>,
-    pub(super) nginx_dir: Option<PathBuf>,
-    pub(super) oceanbase_dir: Option<PathBuf>,
-    pub(super) image_files: Vec<PathBuf>,
 }

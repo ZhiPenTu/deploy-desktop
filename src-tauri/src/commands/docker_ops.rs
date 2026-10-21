@@ -74,74 +74,14 @@ pub fn resolve_env_files(root: &Path) -> Vec<std::path::PathBuf> {
     .collect()
 }
 
-const FRONTEND_OVERRIDE: &str = r#"services:
-  frontend:
-    image: nginx:1.27-alpine
-    volumes:
-      - ./frontend_dist:/usr/share/nginx/html:ro
-      - ./nginx/frontend-main.conf:/etc/nginx/nginx.conf:ro
-      - ./nginx/frontend-upstream.conf:/etc/nginx/conf.d/00-upstream.conf:ro
-      - ./nginx/frontend-default.conf:/etc/nginx/conf.d/default.conf:ro
-"#;
-
-/// 文件模式交付包把前端产物写入 deploy/frontend_dist。若 compose 仍使用
-/// 预构建镜像而不挂载该目录，交付的新前端不会生效；此时生成一个覆盖文件。
-pub fn ensure_frontend_override(compose_file: &Path) -> Option<std::path::PathBuf> {
-    let compose_dir = compose_file.parent()?;
-    if !compose_dir.join("frontend_dist").is_dir()
-        || !compose_dir.join("nginx/frontend-main.conf").is_file()
-    {
-        return None;
-    }
-    let text = fs::read_to_string(compose_file).ok()?;
-    if text.contains("frontend_dist") {
-        return None;
-    }
-    let override_path = compose_dir.join("docker-compose.frontend-bind.yml");
-    fs::write(&override_path, FRONTEND_OVERRIDE).ok()?;
-    Some(override_path)
-}
-
-/// 文件模式交付包已有 frontend_dist，但 compose 未挂载且缺少 nginx 配置时，
-/// 直接报错，避免静默使用旧的前端镜像。
-pub fn frontend_override_issue(compose_file: &Path) -> Option<String> {
-    let compose_dir = compose_file.parent()?;
-    if !compose_dir.join("frontend_dist").is_dir() {
-        return None;
-    }
-    let text = fs::read_to_string(compose_file).ok()?;
-    if text.contains("frontend_dist") {
-        return None;
-    }
-    let missing: Vec<&str> = [
-        "frontend-main.conf",
-        "frontend-upstream.conf",
-        "frontend-default.conf",
-    ]
-    .iter()
-    .copied()
-    .filter(|name| !compose_dir.join("nginx").join(name).is_file())
-    .collect();
-    if missing.is_empty() {
-        None
-    } else {
-        Some(format!(
-            "交付包缺少 deploy/nginx/{}，文件模式前端无法挂载；请补齐交付包中的 nginx 配置后再启动。",
-            missing.join("、")
-        ))
-    }
-}
-
-/// 交付包通过 bind mount 替换 jar / 网关 classes / 前端产物，compose 不会因此
-/// 重建容器；这里返回需要重启才能加载新产物的容器名。
+/// 交付包通过 bind mount 替换产物，compose 不会因此重建容器；
+/// 这里返回需要重启才能加载新产物的容器名。
 pub fn artifact_containers() -> Vec<String> {
     let profile = super::profile::deployment_profile();
     profile
-        .components
-        .backend
+        .restart_services
         .iter()
-        .chain(profile.components.gateway.iter())
-        .map(|service| format!("{}-{}", profile.container_prefix, service))
+        .map(|service| profile.container_name(service))
         .collect()
 }
 
@@ -309,10 +249,6 @@ pub fn docker_compose_action(
             "{deploy_dir} 及其 deploy/ 子目录下均未找到 docker-compose.lan.yml 或 docker-compose.yml"
         )
     })?;
-    if let Some(issue) = frontend_override_issue(&compose_file) {
-        return Err(issue);
-    }
-
     let mut args = vec!["compose".to_string()];
     for env_file in resolve_env_files(root) {
         args.push("--env-file".to_string());
@@ -320,10 +256,6 @@ pub fn docker_compose_action(
     }
     args.push("-f".to_string());
     args.push(compose_file.to_string_lossy().to_string());
-    if let Some(override_path) = ensure_frontend_override(&compose_file) {
-        args.push("-f".to_string());
-        args.push(override_path.to_string_lossy().to_string());
-    }
 
     match action.as_str() {
         "up" => {
@@ -484,57 +416,4 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
     }
 
-    #[test]
-    fn writes_frontend_override_for_file_mode_bundle() {
-        let root = temp_root("override");
-        let deploy = root.join("deploy");
-        fs::create_dir_all(deploy.join("nginx")).unwrap();
-        fs::create_dir_all(deploy.join("frontend_dist")).unwrap();
-        fs::write(deploy.join("nginx/frontend-main.conf"), "events {}\n").unwrap();
-        let compose = deploy.join("docker-compose.lan.yml");
-        fs::write(
-            &compose,
-            "services:\n  frontend:\n    image: app-frontend:dev\n",
-        )
-        .unwrap();
-
-        let override_path = ensure_frontend_override(&compose).expect("override");
-        let text = fs::read_to_string(&override_path).unwrap();
-        assert!(text.contains("nginx:1.27-alpine"));
-        assert!(text.contains("frontend_dist:/usr/share/nginx/html"));
-
-        fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn skips_override_when_compose_already_mounts_frontend_dist() {
-        let root = temp_root("no-override");
-        let deploy = root.join("deploy");
-        fs::create_dir_all(deploy.join("nginx")).unwrap();
-        fs::create_dir_all(deploy.join("frontend_dist")).unwrap();
-        fs::write(deploy.join("nginx/frontend-main.conf"), "events {}\n").unwrap();
-        let compose = deploy.join("docker-compose.yml");
-        fs::write(&compose, "services:\n  frontend:\n    volumes:\n      - ./frontend_dist:/usr/share/nginx/html:ro\n")
-            .unwrap();
-
-        assert!(ensure_frontend_override(&compose).is_none());
-
-        fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn reports_missing_nginx_config_instead_of_silent_fallback() {
-        let root = temp_root("missing-conf");
-        let deploy = root.join("deploy");
-        fs::create_dir_all(deploy.join("nginx")).unwrap();
-        fs::create_dir_all(deploy.join("frontend_dist")).unwrap();
-        let compose = deploy.join("docker-compose.lan.yml");
-        fs::write(&compose, "services:\n  frontend:\n    image: app-frontend:dev\n").unwrap();
-
-        let issue = frontend_override_issue(&compose).expect("issue");
-        assert!(issue.contains("frontend-main.conf"));
-        assert!(issue.contains("frontend-default.conf"));
-
-        fs::remove_dir_all(&root).ok();
-    }
 }

@@ -4,9 +4,7 @@
       <div class="plan-heading">
         <h3>交付包链路</h3>
         <div class="plan-meta">
-          <el-tag size="small" :type="mode === 'file' ? 'success' : 'primary'" effect="plain">
-            {{ modeLabel }}
-          </el-tag>
+          <el-tag size="small" type="success" effect="plain">{{ runtimeLabel }}</el-tag>
           <span v-if="plan.version">版本 {{ plan.version }}</span>
           <span v-if="plan.branch">分支 {{ plan.branch }}</span>
           <span v-if="plan.commitShort">提交 {{ plan.commitShort }}</span>
@@ -35,81 +33,72 @@
       </div>
     </div>
 
-    <div class="plan-blocks">
-      <div class="plan-block">
-        <div class="block-head">
-          <h4>应用产物 app/</h4>
-          <span class="block-count">{{ plan.appFiles.length }} 个文件</span>
-        </div>
-        <div v-if="!plan.appFiles.length" class="block-empty">
-          交付包内没有 app/ 目录，请确认制品类型
-        </div>
-        <ul v-else class="file-list">
-          <li v-for="file in visibleAppFiles" :key="file.path">
-            <code>{{ file.path }}</code>
-            <span>{{ formatSize(file.sizeBytes) }}</span>
-          </li>
-          <li v-if="plan.appFiles.length > limit && !expanded" class="more-row">
-            <el-button link type="primary" @click="expanded = true">
-              展开其余 {{ plan.appFiles.length - limit }} 个文件
-            </el-button>
-          </li>
-        </ul>
+    <div class="plan-block">
+      <div class="block-head">
+        <h4>部署内容</h4>
+        <span class="block-count">{{ artifactCount }} 个产物 · {{ plan.fileCount }} 个文件 · {{ formatSize(plan.totalBytes) }}</span>
       </div>
-
-      <div class="plan-block">
-        <div class="block-head">
-          <h4>部署配置 deploy/</h4>
-          <span class="block-count">{{ plan.configFiles.length }} 个文件</span>
-        </div>
-        <div v-if="!plan.configFiles.length" class="block-empty">
-          交付包内没有 deploy/ 目录，无法启动容器栈
-        </div>
-        <ul v-else class="file-list">
-          <li v-for="file in visibleConfigFiles" :key="file.path" class="config-row">
-            <button type="button" class="file-button" @click="openConfig(file.path)">
-              <el-icon><Document /></el-icon>
-              <code>{{ file.path }}</code>
-            </button>
+      <div v-if="!components.length" class="block-empty">交付包未声明可更新的组件</div>
+      <div v-else class="component-list">
+        <section v-for="component in components" :key="component.key" class="component-group">
+          <div class="component-head">
+            <span class="component-name">{{ component.label }}</span>
             <el-tag
-              v-if="isComposeFile(file.path)"
+              v-for="service in component.services"
+              :key="service"
               size="small"
-              type="success"
               effect="plain"
-              class="file-badge"
-            >
-              清单
-            </el-tag>
-            <span>{{ formatSize(file.sizeBytes) }}</span>
-          </li>
-          <li v-if="plan.configFiles.length > limit && !expanded" class="more-row">
-            <el-button link type="primary" @click="expanded = true">
-              展开其余 {{ plan.configFiles.length - limit }} 个文件
-            </el-button>
-          </li>
-        </ul>
+              type="info"
+            >{{ serviceLabel(service) }}</el-tag>
+          </div>
+          <ul v-if="component.artifacts.length" class="artifact-list">
+            <li v-for="artifact in component.artifacts" :key="artifact.key">
+              <div class="artifact-flow">
+                <code>{{ artifact.source }}</code>
+                <span class="flow-arrow">写入</span>
+                <code>{{ targetLabel(artifact) }}</code>
+              </div>
+              <span class="artifact-meta">{{ kindLabel(artifact.kind) }} · {{ formatSize(artifact.sizeBytes) }}</span>
+            </li>
+          </ul>
+          <div v-else class="block-empty">该组件只更新容器配置</div>
+        </section>
+      </div>
+    </div>
+
+    <div class="plan-block">
+      <div class="block-head">
+        <h4>运行服务</h4>
+        <span class="block-count">{{ plan.services.length }} 个服务</span>
+      </div>
+      <div v-if="!plan.services.length" class="block-empty">交付包未声明运行服务</div>
+      <ul v-else class="service-list">
+        <li v-for="service in plan.services" :key="service.key">
+          <code>{{ service.container }}</code>
+          <span class="service-meta">
+            {{ service.label }}
+            <template v-if="service.port"> · {{ service.port }}/{{ service.protocol }}</template>
+          </span>
+        </li>
+      </ul>
+      <div v-if="plan.database" class="block-tip">
+        数据库 {{ plan.database.name }}（{{ plan.database.client }}，端口 {{ plan.database.port }}）
       </div>
     </div>
 
     <div class="plan-block images-block">
       <div class="block-head">
-        <h4>{{ mode === 'file' ? '依赖基础镜像' : '随包镜像' }}</h4>
+        <h4>镜像准备</h4>
         <span class="block-count">{{ imageCheckLabel }}</span>
       </div>
       <p class="block-tip">
-        <template v-if="mode === 'file'">
-          文件模式交付包只含 app/ 与 deploy/，容器直接挂载这些产物。
-          这里的镜像不随包分发，是目标机运行容器所需的基础镜像，首次部署时准备一次即可。
-        </template>
-        <template v-else>
-          镜像模式交付包自带 images/ 镜像包，必须先导入目标机，容器才能用新镜像重建。
-        </template>
+        随包镜像会在部署时导入目标机；标注为基础镜像的条目由 Compose 清单引用，首次部署前准备一次即可。
       </p>
       <div v-if="!plan.images.length" class="block-empty">交付包未声明镜像需求</div>
       <ul v-else class="image-list">
         <li v-for="image in plan.images" :key="image.imageRef">
           <code>{{ image.imageRef }}</code>
-          <span class="image-source">{{ sourceLabel(image.source) }}</span>
+          <span class="image-source">{{ roleLabel(image) }}</span>
           <el-tag
             size="small"
             :type="image.presentLocally ? 'success' : (imageCheck === 'unavailable' ? 'info' : 'warning')"
@@ -124,7 +113,7 @@
     <ComposeInspector
       v-model="configVisible"
       :bundle-dir="plan.bundleDir"
-      :file="configFile"
+      :file="plan.compose"
       :target="target"
       :image-dir="imageDir"
     />
@@ -154,25 +143,23 @@ const props = defineProps({
   }
 });
 
-const expanded = ref(false);
 const configVisible = ref(false);
-const configFile = ref('');
 
-function isComposeFile(path) {
-  return /(^|\/)docker-compose[^/]*\.ya?ml$/i.test(String(path || ''));
-}
+const components = computed(() =>
+  (Array.isArray(props.plan.components) ? props.plan.components : [])
+    .map((component) => ({
+      ...component,
+      artifacts: Array.isArray(component.artifacts) ? component.artifacts : []
+    }))
+);
 
-function openConfig(path) {
-  configFile.value = String(path || '');
-  configVisible.value = true;
-}
+const artifactCount = computed(() =>
+  components.value.reduce((total, component) => total + component.artifacts.length, 0)
+);
 
-const mode = computed(() => props.plan.mode || 'unknown');
-
-const modeLabel = computed(() => {
-  if (mode.value === 'file') return '文件模式';
-  if (mode.value === 'image') return '镜像模式';
-  return '模式未识别';
+const runtimeLabel = computed(() => {
+  if (props.plan.runtime === 'compose') return 'Compose 部署';
+  return props.plan.runtime || '运行时未声明';
 });
 
 const builtAtText = computed(() => {
@@ -191,14 +178,6 @@ const imageCheckLabel = computed(() => {
   return '已检查本机';
 });
 
-const visibleAppFiles = computed(() =>
-  expanded.value ? props.plan.appFiles : props.plan.appFiles.slice(0, props.limit)
-);
-
-const visibleConfigFiles = computed(() =>
-  expanded.value ? props.plan.configFiles : props.plan.configFiles.slice(0, props.limit)
-);
-
 function stateLabel(state) {
   if (state === 'ready') return '就绪';
   if (state === 'optional') return '按需';
@@ -206,11 +185,26 @@ function stateLabel(state) {
   return state;
 }
 
-function sourceLabel(source) {
-  if (source === 'bundle') return '随包镜像';
-  if (source === 'declared') return '基础镜像清单';
-  if (source === 'compose') return 'compose 推导';
-  return source;
+function rootLabel(root) {
+  return root === 'install' ? '安装目录' : '部署目录';
+}
+
+function targetLabel(artifact) {
+  return `${rootLabel(artifact.root)}/${artifact.target}`;
+}
+
+function kindLabel(kind) {
+  return kind === 'dir' ? '目录' : '文件';
+}
+
+function roleLabel(image) {
+  const role = image.role === 'base' ? '基础镜像' : '应用镜像';
+  return image.required ? `${role} · 必需` : role;
+}
+
+function serviceLabel(key) {
+  const service = (props.plan.services || []).find((item) => item.key === key);
+  return service?.label || key;
 }
 
 function presenceLabel(present) {
@@ -231,7 +225,6 @@ function formatSize(bytes) {
   return `${size.toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
 }
 </script>
-
 <style scoped>
 .plan-panel {
   padding: 18px 20px 20px;
@@ -429,7 +422,8 @@ function formatSize(bytes) {
   color: var(--text-faint);
 }
 
-.file-list,
+.service-list,
+.artifact-list,
 .image-list {
   list-style: none;
   display: flex;
@@ -437,7 +431,7 @@ function formatSize(bytes) {
   gap: 6px;
 }
 
-.file-list li,
+.service-list li,
 .image-list li {
   display: flex;
   align-items: center;
@@ -447,7 +441,7 @@ function formatSize(bytes) {
   min-width: 0;
 }
 
-.file-list li code,
+.service-list li code,
 .image-list li code {
   flex: 1;
   min-width: 0;
@@ -456,13 +450,82 @@ function formatSize(bytes) {
   white-space: nowrap;
   font-size: 11.5px;
   color: var(--text-main);
-  background: transparent;
 }
 
-.file-list li > span {
+.service-meta {
   flex: none;
-  color: var(--text-faint);
   font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+.component-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.component-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--panel-bg);
+}
+
+.component-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.component-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.artifact-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.artifact-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.artifact-flow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 11.5px;
+}
+
+.artifact-flow code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-main);
+}
+
+.flow-arrow {
+  flex: none;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.artifact-meta {
+  flex: none;
+  font-size: 11px;
+  color: var(--text-faint);
 }
 
 .image-source {
@@ -471,55 +534,4 @@ function formatSize(bytes) {
   color: var(--text-faint);
 }
 
-.more-row {
-  justify-content: flex-start;
-}
-
-.config-row {
-  gap: 8px;
-}
-
-.file-button {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: 1;
-  min-width: 0;
-  padding: 2px 4px;
-  margin-left: -4px;
-  border: none;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  cursor: pointer;
-  text-align: left;
-}
-
-.file-button:hover {
-  background: var(--primary-soft);
-}
-
-.file-button:hover code {
-  color: var(--primary-color);
-}
-
-.file-button .el-icon {
-  flex: none;
-  font-size: 12px;
-  color: var(--text-faint);
-}
-
-.file-button code {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 11.5px;
-  color: var(--text-main);
-  background: transparent;
-}
-
-.file-badge {
-  flex: none;
-}
 </style>

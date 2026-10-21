@@ -1,7 +1,7 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { ElMessageBox } from 'element-plus';
 import { selectLocalPath as open } from '../../../api/tauri.js';
-import { connectionInventory, useManagedHost } from '../../connections/state.js';
+import { connectionInventory } from '../../connections/state.js';
 import {
   checkLocalEnv,
   checkRemoteEnv,
@@ -21,7 +21,12 @@ import {
   importRemoteImageBundle,
 } from '../../../api/tauri.js';
 import { validInstallDir, createDeploymentContext, contextTarget } from '../domain/context.js';
-import { componentLabels, deploymentComponents, servicesAreReady } from '../domain/components.js';
+import {
+  componentLabels,
+  componentOptions as planComponentOptions,
+  deploymentComponents,
+  servicesAreReady
+} from '../domain/components.js';
 import { safeText, failureText } from '../domain/errors.js';
 import { invokeIncremental } from '../services/operations.js';
 
@@ -54,8 +59,7 @@ export function useDeploymentWizard(config, emit) {
     )
   );
 
-  const selectingHost = ref(false),
-    testingSsh = ref(false),
+  const testingSsh = ref(false),
     settingKey = ref(false),
     sshMessage = ref(''),
     sshOk = ref(false);
@@ -93,7 +97,6 @@ export function useDeploymentWizard(config, emit) {
 
   const busy = computed(
     () =>
-      selectingHost.value ||
       testingSsh.value ||
       settingKey.value ||
       checkingEnv.value ||
@@ -109,7 +112,8 @@ export function useDeploymentWizard(config, emit) {
     Boolean(envData.value?.docker_running && envData.value?.compose_installed && !envError.value)
   );
 
-  const componentOptions = computed(() => deploymentComponents(bundlePlan.value).map((key) => ({ key, label: componentLabels[key] })));
+  const componentOptions = computed(() => planComponentOptions(bundlePlan.value));
+  const componentLabelMap = computed(() => componentLabels(bundlePlan.value));
 
   const canExecute = computed(
     () =>
@@ -127,7 +131,7 @@ export function useDeploymentWizard(config, emit) {
     disposed = false;
 
   // Read-only SSH checks may continue after leaving; destructive work keeps its guard.
-  const navigationBlocked = computed(() => selectingHost.value || settingKey.value ||
+  const navigationBlocked = computed(() => settingKey.value ||
     installingDocker.value || artifactBusy.value || importingImages.value ||
     executing.value || preflighting.value);
   watch(navigationBlocked, (value) => emit('busy-change', value), { flush: 'sync' });
@@ -200,7 +204,6 @@ export function useDeploymentWizard(config, emit) {
       envError.value = '';
       sshMessage.value = '';
       if (activeStep.value > 0) activeStep.value = 0;
-      config.deployDir = config.installDir;
     }
   );
 
@@ -215,19 +218,6 @@ export function useDeploymentWizard(config, emit) {
   function artifactPrepared(value) {
     preparedBundle.value = value;
     clearReview();
-  }
-
-  async function selectHost(id) {
-    if (busy.value) return;
-    selectingHost.value = true;
-    try {
-      await useManagedHost(id);
-    } catch (error) {
-      sshOk.value = false;
-      sshMessage.value = failureText(error, '切换主机');
-    } finally {
-      selectingHost.value = false;
-    }
   }
 
   async function testConnection() {
@@ -494,7 +484,7 @@ export function useDeploymentWizard(config, emit) {
     const scope =
       context.action === 'first'
         ? '写入交付包并启动全部清单服务'
-        : `替换${context.components.map((key) => componentLabels[key]).join('、')}并重启受影响的服务${
+        : `替换${context.components.map((key) => componentLabelMap.value[key] || key).join('、')}并重启受影响的服务${
             context.backup ? '，更新前保留备份' : '，本次不备份'
           }`;
     executing.value = true;
@@ -581,8 +571,9 @@ export function useDeploymentWizard(config, emit) {
   function executionContext() {
     return createDeploymentContext({ connection: config, remote: isRemote.value, bundle: preparedBundle.value,
       components: selectedComponents.value, backup: backup.value, action: deploymentAction.value,
-      label: targetLabel.value, imageDir: imageMediaDir.value });
+      label: targetLabel.value, imageDir: imageMediaDir.value,
+      allowedComponents: deploymentComponents(bundlePlan.value) });
   }
 
-  return { steps, activeStep, selectedHost, isRemote, targetLabel, hostReady, selectingHost, testingSsh, settingKey, sshMessage, sshOk, envData, envError, checkingEnv, installingDocker, artifactPicker, candidate, preparedBundle, artifactBusy, review, reviewError, checkingReview, reviewTab, imageMediaDir, importingImages, deploymentAction, selectedComponents, backup, executing, preflighting, preflightPassed, phase, operationError, diagnostics, result, busy, environmentReady, componentOptions, canExecute, changeLabel, stateLabel, artifactChosen, artifactPrepared, selectHost, testConnection, setupAccess, checkEnvironment, installDocker, nextStep, previousStep, loadReview, pickImageDirectory, prepareImages, runPreflight, executeDeployment };
+  return { steps, activeStep, selectedHost, isRemote, targetLabel, hostReady, testingSsh, settingKey, sshMessage, sshOk, envData, envError, checkingEnv, installingDocker, artifactPicker, candidate, preparedBundle, artifactBusy, review, reviewError, checkingReview, reviewTab, imageMediaDir, importingImages, deploymentAction, selectedComponents, backup, executing, preflighting, preflightPassed, phase, operationError, diagnostics, result, busy, environmentReady, componentOptions, canExecute, changeLabel, stateLabel, artifactChosen, artifactPrepared, testConnection, setupAccess, checkEnvironment, installDocker, nextStep, previousStep, loadReview, pickImageDirectory, prepareImages, runPreflight, executeDeployment };
 }

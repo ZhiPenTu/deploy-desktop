@@ -4,13 +4,13 @@ import 'element-plus/dist/index.css';
 import * as ElementPlusIconsVue from '@element-plus/icons-vue';
 
 import App from './App.vue';
-import { initProfile } from './config/profile.js';
-import { initConnectionInventory, syncConnectionFromProfile } from './features/connections/state.js';
+import { initProjects } from './config/project.js';
+import { initConnectionInventory, syncConnectionFromProject } from './features/connections/state.js';
 import './style.css';
 
 async function bootstrap() {
-  await initProfile();
-  syncConnectionFromProfile();
+  await initProjects();
+  syncConnectionFromProject();
   await initConnectionInventory();
 
   const app = createApp(App);

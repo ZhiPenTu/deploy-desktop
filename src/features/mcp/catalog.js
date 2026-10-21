@@ -2,10 +2,9 @@
 // mcp-server/test/catalog.test.mjs checks coverage and safety labels against registration.
 export const mcpCategories = [
   {
-    id: 'profile', title: '部署配置', description: '查看与调整部署所需的基础配置',
+    id: 'profile', title: '部署配置', description: '查看当前项目与交付包提供的部署配置',
     tools: [
-      { id: 'deploy_profile_get', title: '读取部署配置', description: '查看当前容器、服务端口、数据库与镜像包配置。', access: 'read' },
-      { id: 'deploy_profile_update', title: '修改部署配置', description: '预览配置变更，确认后保存容器、端口与数据库设置。', access: 'write', confirmation: '保存时需确认' }
+      { id: 'deploy_profile_get', title: '读取当前部署目标', description: '查看当前项目绑定的主机、部署目录与交付包中的服务、数据库与镜像。', access: 'read' }
     ]
   },
   {

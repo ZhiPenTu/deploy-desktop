@@ -89,16 +89,17 @@ export function registerImagesTools(register) {
     inputSchema: {
       target: targetSchema,
       ...remoteFields,
-      bundleDir: z.string().min(1).describe('镜像包根目录（读取其 images/ 子目录）'),
+      bundleDir: z.string().optional().describe('交付包目录（读取其 images/ 子目录）；默认使用当前项目绑定的交付包'),
       files: z.array(z.string()).optional().describe('指定文件名；为空表示全部')
     },
     annotations: mutating
   }, async (args) => {
+    const bundleDir = args.bundleDir || (await loadProfile()).profile.bundleDir;
     if (args.target === 'remote') {
       const host = await hostFrom(args);
-      return { target: 'remote', loaded: await loadRemoteImages(host, args.bundleDir, args.files || []) };
+      return { target: 'remote', loaded: await loadRemoteImages(host, bundleDir, args.files || []) };
     }
-    return { target: 'local', loaded: await loadLocalImages(args.bundleDir, args.files || []) };
+    return { target: 'local', loaded: await loadLocalImages(bundleDir, args.files || []) };
   });
 
   register('deploy_image_list', {

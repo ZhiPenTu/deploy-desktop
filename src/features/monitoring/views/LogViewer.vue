@@ -63,11 +63,11 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onScopeDispose, nextTick } from 'vue';
+import { ref, computed, onMounted, onScopeDispose, nextTick, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 import { CopyDocument, Refresh, Search } from '@element-plus/icons-vue';
 import { getServiceLogs, getRemoteServiceLogs } from '../../../api/tauri.js';
-import { getDefaultContainer, serviceOptions } from '../../../config/cluster.js';
+import { serviceOptions } from '../../../config/cluster.js';
 import { createRequestScope } from '../../../shared/async/requestScope.js';
 
 const props = defineProps({
@@ -83,9 +83,9 @@ const props = defineProps({
 
 const isRemote = computed(() => props.connection.mode === 'remote');
 
-const containerOptions = serviceOptions();
+const containerOptions = computed(() => serviceOptions());
 
-const selectedContainer = ref(props.initialContainer || getDefaultContainer());
+const selectedContainer = ref(props.initialContainer || '');
 const tailLines = ref(300);
 const searchKeyword = ref('');
 const rawLogs = ref('');
@@ -94,6 +94,21 @@ const autoRefresh = ref(false);
 const termBody = ref(null);
 let timer = null;
 const logRequests = createRequestScope();
+
+watch(
+  [containerOptions, () => props.initialContainer],
+  ([options, initial]) => {
+    const preferred = String(initial || '').trim();
+    if (preferred && options.some((option) => option.name === preferred)) {
+      selectedContainer.value = preferred;
+      return;
+    }
+    if (!options.some((option) => option.name === selectedContainer.value)) {
+      selectedContainer.value = options[0]?.name || '';
+    }
+  },
+  { immediate: true }
+);
 
 const filteredLogs = computed(() => {
   if (!searchKeyword.value.trim()) return rawLogs.value;

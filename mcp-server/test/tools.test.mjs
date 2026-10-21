@@ -4,7 +4,8 @@ import test from 'node:test';
 import { PROJECT_ROOT, saveConfig } from '../src/config.mjs';
 import { registerTools } from '../src/tools.mjs';
 import { fileURLToPath } from 'node:url';
-import { makeTempDir } from './helpers.mjs';
+import fs from 'node:fs/promises';
+import { makeTempDir, writeBundle } from './helpers.mjs';
 
 const ORIGINAL_CONFIG_DIR = process.env.DEPLOY_DESKTOP_CONFIG_DIR;
 const ORIGINAL_CONFIG_FILE = process.env.DEPLOY_DESKTOP_CONFIG_FILE;
@@ -34,7 +35,7 @@ function parseResult(result) {
 const tools = captureTools();
 
 test('注册完整工具集且名称唯一', () => {
-  assert.equal(tools.size, 39);
+  assert.equal(tools.size, 38);
   for (const name of [
     'deploy_registry_save',
     'deploy_registry_probe',
@@ -55,7 +56,6 @@ test('注册完整工具集且名称唯一', () => {
 
 test('破坏性工具标记 destructiveHint', () => {
   for (const name of [
-    'deploy_profile_update',
     'deploy_host_remove',
     'deploy_registry_remove',
     'deploy_image_remove',
@@ -71,18 +71,50 @@ test('破坏性工具标记 destructiveHint', () => {
   }
 });
 
-test('deploy_profile_get 读取示例配置', async () => {
-  const previous = process.env.DEPLOY_DESKTOP_PROFILE;
-  process.env.DEPLOY_DESKTOP_PROFILE = fileURLToPath(new URL('../../profile.example.json', import.meta.url));
+test('deploy_profile_get 读取当前项目绑定的交付包', async () => {
+  const configDir = await makeTempDir();
+  const bundleDir = await makeTempDir();
+  await writeBundle(bundleDir);
+  const previousDir = process.env.DEPLOY_DESKTOP_APP_CONFIG_DIR;
+  process.env.DEPLOY_DESKTOP_APP_CONFIG_DIR = configDir;
   try {
+    await fs.writeFile(path.join(configDir, 'projects.json'), JSON.stringify({
+      schemaVersion: 1,
+      activeProjectId: 'proj-1',
+      projects: [{
+        id: 'proj-1',
+        name: '演示项目',
+        product: 'demo-product',
+        hostId: 'host-1',
+        installDir: '/opt/demo',
+        sourceId: 'src-1',
+        lastVersion: '1.0.0',
+        lastBundleDir: bundleDir
+      }]
+    }));
     const result = await tools.get('deploy_profile_get').handler({}, {});
     assert.equal(result.isError, undefined);
     const payload = parseResult(result);
-    assert.equal(payload.profile.containerPrefix, 'demo-stack');
-    assert.equal(payload.profile.containers.length > 0, true);
+    assert.equal(payload.profile.containerPrefix, 'demo');
+    assert.equal(payload.project.name, '演示项目');
+    assert.equal(payload.bundle.components.length, 3);
   } finally {
-    if (previous === undefined) delete process.env.DEPLOY_DESKTOP_PROFILE;
-    else process.env.DEPLOY_DESKTOP_PROFILE = previous;
+    if (previousDir === undefined) delete process.env.DEPLOY_DESKTOP_APP_CONFIG_DIR;
+    else process.env.DEPLOY_DESKTOP_APP_CONFIG_DIR = previousDir;
+  }
+});
+
+test('deploy_profile_get 在没有项目时返回明确错误', async () => {
+  const configDir = await makeTempDir();
+  const previousDir = process.env.DEPLOY_DESKTOP_APP_CONFIG_DIR;
+  process.env.DEPLOY_DESKTOP_APP_CONFIG_DIR = configDir;
+  try {
+    const result = await tools.get('deploy_profile_get').handler({}, {});
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /尚未创建项目/);
+  } finally {
+    if (previousDir === undefined) delete process.env.DEPLOY_DESKTOP_APP_CONFIG_DIR;
+    else process.env.DEPLOY_DESKTOP_APP_CONFIG_DIR = previousDir;
   }
 });
 

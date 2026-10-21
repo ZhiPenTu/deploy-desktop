@@ -1,8 +1,12 @@
-use super::bundle::inspect_bundle_layout;
+//! 交付包部署计划：产物映射、依赖镜像、目标机镜像状态与执行步骤。
+//!
+//! 所有内容都来自 bundle.json 的声明，客户端不内置任何项目专用的目录约定。
+use super::bundle::load_target;
+use crate::commands::bundle::{ArtifactRoot, ArtifactSpec};
 use crate::commands::remote_ssh::{resolve_existing_key, run_ssh_script};
 use serde::Serialize;
 use std::fs::{self};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 #[derive(Debug, Clone, Serialize)]
@@ -16,8 +20,53 @@ pub struct PlanFile {
 #[serde(rename_all = "camelCase")]
 pub struct PlanImage {
     pub image_ref: String,
+    pub role: String,
+    pub required: bool,
+    pub bundle_file: String,
     pub source: String,
     pub present_locally: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanService {
+    pub key: String,
+    pub label: String,
+    pub container: String,
+    pub port: Option<u16>,
+    pub protocol: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanArtifact {
+    pub key: String,
+    pub label: String,
+    pub source: String,
+    pub target: String,
+    pub root: String,
+    pub kind: String,
+    pub size_bytes: u64,
+    pub files: Vec<PlanFile>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanComponent {
+    pub key: String,
+    pub label: String,
+    pub services: Vec<String>,
+    pub artifacts: Vec<PlanArtifact>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanDatabase {
+    pub service_key: String,
+    pub name: String,
+    pub client: String,
+    pub port: u16,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -27,7 +76,7 @@ pub struct PlanStep {
     pub title: String,
     pub detail: String,
     pub state: String,
-    /// 交付包 deploy/deployment-plan.json 提供的流程说明，缺失时为空。
+    /// 交付包 plan.steps 提供的流程说明，缺失时为空。
     pub hint: String,
 }
 
@@ -36,36 +85,30 @@ pub struct PlanStep {
 pub struct BundlePlan {
     pub bundle_dir: String,
     pub product: String,
-    pub mode: String,
+    pub display_name: String,
     pub version: String,
+    pub build_number: String,
     pub commit: String,
     pub commit_short: String,
     pub branch: String,
     pub built_at: String,
-    pub components: Vec<String>,
-    pub app_files: Vec<PlanFile>,
-    pub config_files: Vec<PlanFile>,
+    pub runtime: String,
+    pub compose: String,
+    pub variant: String,
+    pub components: Vec<PlanComponent>,
+    pub services: Vec<PlanService>,
+    pub database: Option<PlanDatabase>,
     pub images: Vec<PlanImage>,
     pub image_check: String,
+    pub file_count: usize,
+    pub total_bytes: u64,
     pub steps: Vec<PlanStep>,
-}
-
-#[derive(Default)]
-struct BundleMeta {
-    product: String,
-    mode: String,
-    version: String,
-    commit: String,
-    commit_short: String,
-    branch: String,
-    built_at: String,
-    components: Vec<String>,
 }
 
 /// 从交付包推导部署链路：产物、依赖镜像、目标机镜像状态与执行步骤。
 ///
 /// 界面据此渲染「制品 → 交付包 → 镜像 → 容器」，不再由前端猜模式：
-/// 文件模式的镜像只是基础镜像（可选），镜像模式的应用镜像必须全部就位才能启动。
+/// 包内镜像只是补充，应用镜像由 Compose 清单决定，缺失时提示导入离线镜像。
 ///
 /// 传入 host 时按目标机查询镜像，否则只查本机；查询失败返回 image_check=unavailable，
 /// 由界面显示「未确认」，不把未知状态当成缺失。
@@ -76,70 +119,91 @@ pub fn inspect_bundle_plan_blocking(
     user: Option<String>,
     key_path: Option<String>,
 ) -> Result<BundlePlan, String> {
-    let root = PathBuf::from(bundle_dir.trim());
-    if !root.is_dir() {
-        return Err(format!("交付包目录不存在: {}", root.display()));
-    }
-
-    let layout = inspect_bundle_layout(bundle_dir.clone())?;
-    let meta = read_bundle_meta(&root);
-    let mode = if meta.mode.is_empty() {
-        layout.mode.clone()
-    } else {
-        meta.mode.clone()
-    };
-    let app_files = collect_plan_files(&root, &root.join("app"));
-    let config_files = collect_plan_files(&root, &root.join("deploy"));
+    let bundle = load_target(Path::new(bundle_dir.trim()))?;
+    let descriptor = &bundle.descriptor;
 
     let (local_tags, image_check) =
         image_tags_for_target(host.as_deref(), port, user.as_deref(), key_path.as_deref());
-    let images = collect_plan_images(&root, &local_tags);
+    let images = collect_plan_images(&bundle, &local_tags);
 
-    let is_file = mode == "file";
-    let missing = images.iter().filter(|image| !image.present_locally).count();
+    let mut components: Vec<PlanComponent> = Vec::new();
+    for component in &descriptor.components {
+        let mut artifacts: Vec<PlanArtifact> = Vec::new();
+        for key in &component.artifacts {
+            let Some(spec) = bundle.artifact(key) else {
+                continue;
+            };
+            artifacts.push(plan_artifact(&bundle.root, spec));
+        }
+        components.push(PlanComponent {
+            key: component.key.clone(),
+            label: component.label.clone(),
+            services: component.services.clone(),
+            artifacts,
+        });
+    }
+
+    let services = descriptor
+        .runtime
+        .services
+        .iter()
+        .map(|service| PlanService {
+            key: service.key.clone(),
+            label: service.label.clone(),
+            container: bundle.container_name(&service.key),
+            port: service.port,
+            protocol: if service.protocol.trim().is_empty() {
+                "TCP".to_string()
+            } else {
+                service.protocol.clone()
+            },
+            description: service.description.clone(),
+        })
+        .collect::<Vec<_>>();
+
+    let file_count = descriptor.files.len();
+    let total_bytes = descriptor.files.iter().map(|file| file.size).sum();
+
+    let missing_required = images
+        .iter()
+        .filter(|image| image.required && !image.present_locally)
+        .count();
     let images_detail = if images.is_empty() {
         "交付包未声明镜像需求".to_string()
     } else if image_check == "unavailable" {
         format!("{} 个镜像，目标机状态未确认", images.len())
-    } else if missing == 0 {
-        format!("{} 个镜像均已在{}", images.len(), check_label(&image_check))
+    } else if missing_required == 0 {
+        format!("{} 个镜像已就位", images.len())
     } else {
         format!(
             "{} 个镜像中 {} 个在{}缺失",
             images.len(),
-            missing,
+            missing_required,
             check_label(&image_check)
         )
     };
 
+    let has_offline_images = bundle.has_bundle_images();
     let mut steps = vec![
         PlanStep {
             key: "artifact".to_string(),
             title: "获取交付包".to_string(),
-            detail: if meta.version.is_empty() {
-                "已解包到本地目录".to_string()
-            } else {
-                format!("版本 {} 已解包", meta.version)
-            },
+            detail: format!("版本 {} 已解包，{file_count} 个文件", descriptor.metadata.version),
             state: "ready".to_string(),
             hint: String::new(),
         },
         PlanStep {
             key: "images".to_string(),
-            title: if is_file {
-                "准备基础镜像".to_string()
+            title: if has_offline_images {
+                "导入随包镜像".to_string()
             } else {
-                "导入应用镜像".to_string()
+                "准备基础镜像".to_string()
             },
             detail: images_detail,
-            state: if is_file {
-                if missing == 0 && image_check != "unavailable" {
-                    "ready".to_string()
-                } else {
-                    "optional".to_string()
-                }
-            } else if missing > 0 {
+            state: if missing_required > 0 && image_check != "unavailable" {
                 "blocked".to_string()
+            } else if image_check == "unavailable" {
+                "optional".to_string()
             } else {
                 "ready".to_string()
             },
@@ -149,11 +213,11 @@ pub fn inspect_bundle_plan_blocking(
             key: "distribute".to_string(),
             title: "分发交付包".to_string(),
             detail: format!(
-                "app/ {} 个文件，deploy/ {} 个文件",
-                app_files.len(),
-                config_files.len()
+                "{} 个产物，{} 个文件",
+                descriptor.artifacts.len(),
+                file_count
             ),
-            state: if app_files.is_empty() && config_files.is_empty() {
+            state: if descriptor.artifacts.is_empty() {
                 "blocked".to_string()
             } else {
                 "ready".to_string()
@@ -163,12 +227,8 @@ pub fn inspect_bundle_plan_blocking(
         PlanStep {
             key: "start".to_string(),
             title: "启动容器栈".to_string(),
-            detail: "docker compose up -d".to_string(),
-            state: if layout.has_compose {
-                "ready".to_string()
-            } else {
-                "blocked".to_string()
-            },
+            detail: format!("docker compose -f {} up -d", descriptor.runtime.compose.trim()),
+            state: "ready".to_string(),
             hint: String::new(),
         },
         PlanStep {
@@ -179,23 +239,37 @@ pub fn inspect_bundle_plan_blocking(
             hint: String::new(),
         },
     ];
-
-    apply_plan_overrides(&root, &mut steps);
+    apply_plan_steps(&descriptor.plan.steps, &mut steps);
 
     Ok(BundlePlan {
-        bundle_dir: bundle_dir.trim().to_string(),
-        product: meta.product,
-        mode,
-        version: meta.version,
-        commit: meta.commit,
-        commit_short: meta.commit_short,
-        branch: meta.branch,
-        built_at: meta.built_at,
-        components: meta.components,
-        app_files,
-        config_files,
+        bundle_dir: bundle.root.to_string_lossy().to_string(),
+        product: descriptor.metadata.product.clone(),
+        display_name: descriptor.metadata.display_name.clone(),
+        version: descriptor.metadata.version.clone(),
+        build_number: descriptor.metadata.build_number.clone(),
+        commit: descriptor.metadata.commit.clone(),
+        commit_short: descriptor.metadata.commit_short.clone(),
+        branch: descriptor.metadata.branch.clone(),
+        built_at: descriptor.metadata.built_at.clone(),
+        runtime: descriptor.runtime.runtime_type.clone(),
+        compose: descriptor.runtime.compose.clone(),
+        variant: descriptor.runtime.variant.clone(),
+        components,
+        services,
+        database: descriptor
+            .runtime
+            .database
+            .as_ref()
+            .map(|database| PlanDatabase {
+                service_key: database.service_key.clone(),
+                name: database.name.clone(),
+                client: database.client.clone(),
+                port: database.port,
+            }),
         images,
         image_check,
+        file_count,
+        total_bytes,
         steps,
     })
 }
@@ -223,79 +297,61 @@ fn check_label(image_check: &str) -> &'static str {
     }
 }
 
-fn read_bundle_meta(root: &Path) -> BundleMeta {
-    let Ok(text) = fs::read_to_string(root.join("bundle.json")) else {
-        return BundleMeta::default();
-    };
-    let Ok(meta) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return BundleMeta::default();
-    };
-    let pick = |key: &str| {
-        meta.get(key)
-            .and_then(|value| value.as_str())
-            .unwrap_or_default()
-            .to_string()
-    };
-    let components = meta
-        .get("components")
-        .and_then(|value| value.as_array())
-        .map(|list| {
-            list.iter()
-                .filter_map(|item| item.as_str().map(|value| value.to_string()))
-                .collect()
-        })
-        .unwrap_or_default();
-    BundleMeta {
-        product: pick("product"),
-        mode: pick("mode"),
-        version: pick("version"),
-        commit: pick("commit"),
-        commit_short: pick("commitShort"),
-        branch: pick("branch"),
-        built_at: pick("builtAt"),
-        components,
+fn plan_artifact(root: &Path, spec: &ArtifactSpec) -> PlanArtifact {
+    let source = root.join(spec.source.trim());
+    let mut files: Vec<PlanFile> = Vec::new();
+    if spec.kind == crate::commands::bundle::ArtifactKind::File {
+        let size_bytes = fs::metadata(&source).map(|meta| meta.len()).unwrap_or(0);
+        files.push(PlanFile {
+            path: spec.source.trim().to_string(),
+            size_bytes,
+        });
+    } else {
+        collect_plan_files(root, &source, &mut files);
+        files.sort_by(|left, right| left.path.cmp(&right.path));
+    }
+    let size_bytes = files.iter().map(|file| file.size_bytes).sum();
+    PlanArtifact {
+        key: spec.key.clone(),
+        label: spec.label.clone(),
+        source: spec.source.trim().to_string(),
+        target: spec.path.trim().to_string(),
+        root: match spec.root {
+            ArtifactRoot::Install => "install".to_string(),
+            ArtifactRoot::Deploy => "deploy".to_string(),
+        },
+        kind: spec.kind.as_str().to_string(),
+        size_bytes,
+        files,
     }
 }
 
-/// 预制流程说明：交付包内 deploy/deployment-plan.json 可覆盖步骤标题并补充说明，
-/// 步骤顺序、实时数量与状态仍由程序按实际文件推导，避免清单写死后与实际交付漂移。
-fn apply_plan_overrides(root: &Path, steps: &mut [PlanStep]) {
-    let Ok(text) = fs::read_to_string(root.join("deploy/deployment-plan.json")) else {
-        return;
-    };
-    let Ok(plan) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return;
-    };
-    let Some(list) = plan.get("steps").and_then(|value| value.as_array()) else {
-        return;
-    };
-    for entry in list {
-        let key = entry
-            .get("key")
-            .and_then(|value| value.as_str())
-            .unwrap_or_default();
-        let Some(step) = steps.iter_mut().find(|step| step.key == key) else {
-            continue;
-        };
-        if let Some(title) = entry.get("title").and_then(|value| value.as_str()) {
-            if !title.trim().is_empty() {
-                step.title = title.trim().to_string();
+/// 交付包声明的步骤可覆盖标题与补充说明；未内置的步骤按声明顺序追加。
+fn apply_plan_steps(declared: &[crate::commands::bundle::PlanStepSpec], steps: &mut Vec<PlanStep>) {
+    for entry in declared {
+        match steps.iter_mut().find(|step| step.key == entry.key) {
+            Some(step) => {
+                if !entry.title.trim().is_empty() {
+                    step.title = entry.title.trim().to_string();
+                }
+                step.hint = entry.hint.trim().to_string();
             }
-        }
-        if let Some(hint) = entry.get("hint").and_then(|value| value.as_str()) {
-            step.hint = hint.trim().to_string();
+            None => steps.push(PlanStep {
+                key: entry.key.clone(),
+                title: if entry.title.trim().is_empty() {
+                    entry.key.clone()
+                } else {
+                    entry.title.trim().to_string()
+                },
+                detail: entry.hint.trim().to_string(),
+                state: "ready".to_string(),
+                hint: entry.hint.trim().to_string(),
+            }),
         }
     }
 }
 
-fn collect_plan_files(root: &Path, dir: &Path) -> Vec<PlanFile> {
-    let mut files = Vec::new();
-    collect_plan_files_into(root, dir, &mut files);
-    files.sort_by(|left, right| left.path.cmp(&right.path));
-    files
-}
-
-fn collect_plan_files_into(root: &Path, dir: &Path, out: &mut Vec<PlanFile>) {
+fn collect_plan_files(root: &Path, dir: &Path, out: &mut Vec<PlanFile>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
@@ -305,13 +361,13 @@ fn collect_plan_files_into(root: &Path, dir: &Path, out: &mut Vec<PlanFile>) {
             continue;
         };
         if file_type.is_dir() {
-            collect_plan_files_into(root, &path, out);
+            collect_plan_files(root, &path, out);
         } else if file_type.is_file() {
             let relative = path
                 .strip_prefix(root)
                 .unwrap_or(&path)
                 .to_string_lossy()
-                .to_string();
+                .replace('\\', "/");
             let size_bytes = fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
             out.push(PlanFile {
                 path: relative,
@@ -321,78 +377,60 @@ fn collect_plan_files_into(root: &Path, dir: &Path, out: &mut Vec<PlanFile>) {
     }
 }
 
-/// 汇总交付包声明的镜像：
-///   1. images/images.json（镜像模式，流水线生成）
-///   2. deploy/base-images.txt（文件模式，仓库写死的基础镜像清单）
-///   3. 兜底解析 deploy/docker-compose.yml 的 image 行
-fn collect_plan_images(root: &Path, local: &[String]) -> Vec<PlanImage> {
-    let mut entries: Vec<(String, String)> = Vec::new();
+/// 汇总交付包声明的镜像：images[] 为准，缺少声明时兜底解析 Compose 的 image 行。
+fn collect_plan_images(bundle: &crate::commands::bundle::Bundle, local: &[String]) -> Vec<PlanImage> {
+    let mut entries: Vec<(String, String, String, bool, String)> = Vec::new();
 
-    if let Ok(text) = fs::read_to_string(root.join("images/images.json")) {
-        if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&text) {
-            if let Some(files) = meta.get("files").and_then(|value| value.as_array()) {
-                for entry in files {
-                    if let Some(list) = entry.get("images").and_then(|value| value.as_array()) {
-                        for image in list {
-                            if let Some(reference) = image.as_str() {
-                                entries.push((reference.to_string(), "bundle".to_string()));
-                            }
-                        }
-                    }
+    for image in &bundle.descriptor.images {
+        entries.push((
+            image.reference.clone(),
+            match image.role {
+                crate::commands::bundle::ImageRole::App => "app".to_string(),
+                crate::commands::bundle::ImageRole::Base => "base".to_string(),
+            },
+            if image.bundle_file.trim().is_empty() {
+                "declared".to_string()
+            } else {
+                "bundle".to_string()
+            },
+            image.required,
+            image.bundle_file.trim().to_string(),
+        ));
+    }
+
+    if entries.is_empty() {
+        let compose_path = bundle.root.join(bundle.descriptor.runtime.compose.trim());
+        if let Ok(text) = fs::read_to_string(&compose_path) {
+            for line in text.lines() {
+                let trimmed = line.trim_start();
+                let Some(rest) = trimmed.strip_prefix("image:") else {
+                    continue;
+                };
+                let reference = rest.trim().trim_matches('"').trim_matches('\'').to_string();
+                if !reference.is_empty() {
+                    entries.push((
+                        reference,
+                        "app".to_string(),
+                        "compose".to_string(),
+                        true,
+                        String::new(),
+                    ));
                 }
             }
         }
     }
 
-    let declared = fs::read_to_string(root.join("deploy/base-images.txt")).unwrap_or_default();
-    for line in declared.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        entries.push((line.to_string(), "declared".to_string()));
-    }
-
-    if entries.is_empty() {
-        let compose =
-            fs::read_to_string(root.join("deploy/docker-compose.yml")).unwrap_or_default();
-        for line in compose.lines() {
-            let trimmed = line.trim_start();
-            let Some(rest) = trimmed.strip_prefix("image:") else {
-                continue;
-            };
-            let reference = rest.trim().trim_matches('"').to_string();
-            if !reference.is_empty() {
-                entries.push((reference, "compose".to_string()));
-            }
-        }
-    }
-
     entries.sort();
-    entries.dedup();
-    // 同一个镜像同时有 :latest 与构建号标签时，只保留 :latest，避免界面重复。
-    let refs: Vec<String> = entries
-        .iter()
-        .map(|(reference, _)| reference.clone())
-        .collect();
-    entries.retain(|(reference, _)| {
-        let base = reference
-            .rsplit_once(':')
-            .map(|(head, _)| head)
-            .unwrap_or(reference);
-        let has_latest = refs.iter().any(|other| other == &format!("{base}:latest"));
-        !has_latest || reference.ends_with(":latest")
-    });
-
+    entries.dedup_by(|left, right| left.0 == right.0);
     entries
         .into_iter()
-        .map(|(reference, source)| {
-            let present_locally = image_present(local, &reference);
-            PlanImage {
-                image_ref: reference,
-                source,
-                present_locally,
-            }
+        .map(|(reference, role, source, required, bundle_file)| PlanImage {
+            present_locally: image_present(local, &reference),
+            image_ref: reference,
+            role,
+            required,
+            bundle_file,
+            source,
         })
         .collect()
 }

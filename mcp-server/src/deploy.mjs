@@ -6,7 +6,7 @@ import net from 'node:net';
 import dgram from 'node:dgram';
 import { DeployError } from './errors.mjs';
 import { commandExists, requireBinary, run } from './exec.mjs';
-import { loadProfile, resolveContainer } from './profile.mjs';
+import { containerName, loadProfile, resolveContainer, resolveServiceKey } from './profile.mjs';
 import { PROJECT_ROOT } from './config.mjs';
 import { explainSshFailure, runRemote } from './ssh.mjs';
 import { clamp, expandHome, formatBytes, nowStamp, shellQuote } from './util.mjs';
@@ -204,31 +204,37 @@ done
   };
 }
 
-async function artifactInfo(file) {
-  try {
-    const stat = await fs.stat(file);
-    return { exists: true, path: file, sizeBytes: stat.size, modified: stat.mtime.toISOString() };
-  } catch {
-    return { exists: false, path: file, sizeBytes: 0, modified: '' };
-  }
+function resolvedArtifacts(profile, installDir, deployDir) {
+  return profile.artifacts.map((artifact) => ({
+    ...artifact,
+    target: path.resolve(artifact.root === 'install' ? installDir : deployDir, artifact.path)
+  }));
 }
 
 export async function inspectLocalDeployment(profile, installDirInput, deployDirInput) {
   const installDir = path.resolve(expandHome(installDirInput || profile.installDir));
-  const deployDir = path.resolve(expandHome(deployDirInput || profile.deployDir || path.join(installDir, 'deploy')));
-  const composeLan = path.join(deployDir, 'docker-compose.lan.yml');
-  const composeDefault = path.join(deployDir, 'docker-compose.yml');
-  const composeFile = await fs.access(composeLan).then(() => composeLan).catch(async () => fs.access(composeDefault).then(() => composeDefault).catch(() => ''));
+  const deployDir = path.resolve(expandHome(deployDirInput || path.join(installDir, profile.deploySourceRel || '')));
   const docker = await dockerStatusLocal();
-  const artifacts = {
-    serverJar: await artifactInfo(path.join(installDir, 'backend-java/server/target', profile.backendArtifact)),
-    gatewayClasses: await artifactInfo(path.join(installDir, 'backend-java/gateway-app/target/classes')),
-    gatewayLib: await artifactInfo(path.join(installDir, 'backend-java/gateway-app/target/lib')),
-    frontendDist: await artifactInfo(path.join(deployDir, 'frontend_dist'))
-  };
+  const artifacts = [];
+  for (const artifact of resolvedArtifacts(profile, installDir, deployDir)) {
+    let info;
+    try {
+      const stat = await fs.stat(artifact.target);
+      info = {
+        exists: artifact.kind === 'dir' ? stat.isDirectory() : stat.isFile(),
+        path: artifact.target,
+        sizeBytes: stat.isFile() ? stat.size : 0,
+        modified: stat.mtime.toISOString()
+      };
+    } catch {
+      info = { exists: false, path: artifact.target, sizeBytes: 0, modified: '' };
+    }
+    artifacts.push({ key: artifact.key, label: artifact.label, root: artifact.root, path: artifact.path, kind: artifact.kind, ...info });
+  }
+  const composeFile = await firstExisting([profile.compose.variantFile, profile.compose.file].filter(Boolean));
   const containers = [];
   for (const container of profile.containers) {
-    const name = `${profile.containerPrefix}-${container.serviceKey}`;
+    const name = containerName(profile, container.serviceKey);
     const inspect = await run('docker', ['inspect', '--format', '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{.Config.Image}}', name], { timeoutMs: 10000 });
     if (inspect.code !== 0) {
       containers.push({ name, serviceKey: container.serviceKey, state: 'not_created', health: 'none', statusText: '容器未创建', ports: '', image: '' });
@@ -245,12 +251,14 @@ export async function inspectLocalDeployment(profile, installDirInput, deployDir
   if (!docker.installed) issues.push('未安装 Docker');
   else if (!docker.running) issues.push('Docker 服务未运行');
   if (!docker.composeInstalled) issues.push('缺少 Docker Compose');
-  if (!composeFile) issues.push(`部署目录缺少 compose 文件: ${deployDir}`);
-  for (const [key, info] of Object.entries(artifacts)) {
-    if (!info.exists) issues.push(`缺少产物: ${key} (${info.path})`);
+  if (!composeFile) issues.push(`部署目录缺少 Compose 清单: ${deployDir}`);
+  for (const artifact of artifacts) {
+    if (!artifact.exists) issues.push(`缺少产物: ${artifact.label || artifact.key} (${artifact.target})`);
   }
   return {
     deployed: Boolean(composeFile),
+    product: profile.product,
+    version: profile.version,
     installDir,
     deployDir,
     composeFile,
@@ -258,10 +266,6 @@ export async function inspectLocalDeployment(profile, installDirInput, deployDir
     dockerRunning: docker.running,
     composeAvailable: docker.composeInstalled,
     artifacts,
-    serverJar: artifacts.serverJar,
-    gatewayClasses: artifacts.gatewayClasses,
-    gatewayLib: artifacts.gatewayLib,
-    frontendDist: artifacts.frontendDist,
     containers,
     runningContainers: running,
     totalContainers: containers.length,
@@ -270,23 +274,38 @@ export async function inspectLocalDeployment(profile, installDirInput, deployDir
   };
 }
 
+async function firstExisting(files) {
+  for (const file of files) {
+    if (await fs.access(file).then(() => true).catch(() => false)) return file;
+  }
+  return '';
+}
+
 export async function inspectRemoteDeployment(profile, hostConfig, installDirInput) {
   const installDir = String(installDirInput || hostConfig.installDir || profile.installDir).trim().replace(/\/+$/, '');
-  const deployDir = `${installDir}/deploy`;
-  const containerNames = profile.containers.map((container) => `${profile.containerPrefix}-${container.serviceKey}`);
+  const deployDir = [installDir, profile.deploySourceRel].filter(Boolean).join('/');
+  const targets = resolvedArtifacts(profile, installDir, deployDir);
+  const containerEntries = profile.containers.map((container) => ({
+    serviceKey: container.serviceKey,
+    name: containerName(profile, container.serviceKey)
+  }));
+  const artifactLines = targets.map((artifact, index) => `artifact ${index} ${shellQuote(artifact.target)}`).join('\n');
   const script = `set -e
 INSTALL=${shellQuote(installDir)}
 DEPLOY=${shellQuote(deployDir)}
 echo "INSTALL_DIR=$INSTALL"
 echo "DEPLOY_DIR=$DEPLOY"
 if [ -d "$DEPLOY" ]; then echo "DEPLOY_EXISTS=yes"; else echo "DEPLOY_EXISTS=no"; fi
-if [ -f "$DEPLOY/docker-compose.lan.yml" ]; then
-  echo "COMPOSE_FILE=docker-compose.lan.yml"
-elif [ -f "$DEPLOY/docker-compose.yml" ]; then
-  echo "COMPOSE_FILE=docker-compose.yml"
+COMPOSE_MAIN=${shellQuote(profile.compose.fileRelative)}
+COMPOSE_VARIANT=${shellQuote(profile.compose.variantRelative)}
+if [ -n "$COMPOSE_VARIANT" ] && [ -f "$DEPLOY/$COMPOSE_VARIANT" ]; then
+  echo "COMPOSE_FILE=$COMPOSE_VARIANT"
+elif [ -f "$DEPLOY/$COMPOSE_MAIN" ]; then
+  echo "COMPOSE_FILE=$COMPOSE_MAIN"
 else
   echo "COMPOSE_FILE="
 fi
+if [ -f "$INSTALL/.deploy-desktop/deployed.json" ]; then echo "DEPLOYED_RECORD=yes"; else echo "DEPLOYED_RECORD=no"; fi
 if command -v docker >/dev/null 2>&1; then echo "DOCKER=yes"; else echo "DOCKER=no"; fi
 if docker info >/dev/null 2>&1; then echo "DOCKER_RUNNING=yes"; else echo "DOCKER_RUNNING=no"; fi
 if docker compose version >/dev/null 2>&1; then echo "COMPOSE=yes"; elif command -v docker-compose >/dev/null 2>&1; then echo "COMPOSE=yes"; else echo "COMPOSE=no"; fi
@@ -303,12 +322,9 @@ artifact() {
     echo "ART_\${key}_MTIME="
   fi
 }
-artifact SERVER_JAR "$INSTALL/backend-java/server/target/${profile.backendArtifact}"
-artifact GATEWAY_CLASSES "$INSTALL/backend-java/gateway-app/target/classes"
-artifact GATEWAY_LIB "$INSTALL/backend-java/gateway-app/target/lib"
-artifact FRONTEND_DIST "$DEPLOY/frontend_dist"
+${artifactLines}
 echo "---CONTAINERS---"
-for c in ${containerNames.map(shellQuote).join(' ')}; do
+for c in ${containerEntries.map((entry) => shellQuote(entry.name)).join(' ')}; do
   state=$(docker inspect --format '{{.State.Status}}' "$c" 2>/dev/null || echo missing)
   health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$c" 2>/dev/null || echo none)
   image=$(docker inspect --format '{{.Config.Image}}' "$c" 2>/dev/null || echo "")
@@ -316,7 +332,7 @@ for c in ${containerNames.map(shellQuote).join(' ')}; do
   status_text=\${line%%|*}
   ports=\${line#*|}
   if [ "$ports" = "$line" ]; then ports=""; fi
-  printf 'CONTAINER|%s|%s|%s|%s|%s|%s\\n' "$c" "$state" "$health" "$image" "$status_text" "$ports"
+  printf 'CONTAINER|%s|%s|%s|%s|%s|%s\n' "$c" "$state" "$health" "$image" "$status_text" "$ports"
 done
 `;
   const result = await runRemote(hostConfig, script, { timeoutMs: 60000 });
@@ -329,7 +345,7 @@ done
       const [, name, state, health, image, statusText, ports] = line.split('|');
       containers.push({
         name,
-        serviceKey: profile.serviceKeyForContainer?.(name) || name.replace(`${profile.containerPrefix}-`, ''),
+        serviceKey: containerEntries.find((entry) => entry.name === name)?.serviceKey || name,
         state,
         health,
         image,
@@ -341,12 +357,14 @@ done
     const index = line.indexOf('=');
     if (index > 0) values[line.slice(0, index)] = line.slice(index + 1);
   }
-  const artifacts = {
-    serverJar: artifactFromValues(values, 'SERVER_JAR'),
-    gatewayClasses: artifactFromValues(values, 'GATEWAY_CLASSES'),
-    gatewayLib: artifactFromValues(values, 'GATEWAY_LIB'),
-    frontendDist: artifactFromValues(values, 'FRONTEND_DIST')
-  };
+  const artifacts = targets.map((artifact, index) => {
+    const info = {
+      exists: values[`ART_${index}_EXISTS`] === 'yes',
+      sizeBytes: Number(values[`ART_${index}_SIZE`]) || 0,
+      modified: values[`ART_${index}_MTIME`] || ''
+    };
+    return { key: artifact.key, label: artifact.label, root: artifact.root, path: artifact.path, kind: artifact.kind, target: artifact.target, ...info };
+  });
   const dockerAvailable = values.DOCKER === 'yes';
   const dockerRunning = values.DOCKER_RUNNING === 'yes';
   const composeAvailable = values.COMPOSE === 'yes';
@@ -356,13 +374,16 @@ done
   if (!dockerAvailable) issues.push('目标机未安装 Docker');
   else if (!dockerRunning) issues.push('目标机 Docker 服务未运行');
   if (!composeAvailable) issues.push('目标机缺少 Docker Compose');
-  if (!composeFile) issues.push('目标机缺少 compose 文件');
-  for (const [key, info] of Object.entries(artifacts)) {
-    if (!info.exists) issues.push(`缺少产物: ${key} (${info.path})`);
+  if (!composeFile) issues.push('目标机缺少 Compose 清单');
+  for (const artifact of artifacts) {
+    if (!artifact.exists) issues.push(`缺少产物: ${artifact.label || artifact.key} (${artifact.target})`);
   }
   const running = containers.filter((container) => container.state === 'running').length;
   return {
     deployed: values.DEPLOY_EXISTS === 'yes' && Boolean(composeFile),
+    product: profile.product,
+    version: profile.version,
+    deployedRecord: values.DEPLOYED_RECORD === 'yes',
     installDir,
     deployDir,
     composeFile,
@@ -370,10 +391,6 @@ done
     dockerRunning,
     composeAvailable,
     artifacts,
-    serverJar: artifacts.serverJar,
-    gatewayClasses: artifacts.gatewayClasses,
-    gatewayLib: artifacts.gatewayLib,
-    frontendDist: artifacts.frontendDist,
     containers,
     runningContainers: running,
     totalContainers: containers.length,
@@ -382,49 +399,41 @@ done
   };
 }
 
-function artifactFromValues(values, key) {
-  return {
-    exists: values[`ART_${key}_EXISTS`] === 'yes',
-    sizeBytes: Number(values[`ART_${key}_SIZE`]) || 0,
-    modified: values[`ART_${key}_MTIME`] || ''
-  };
-}
-
-function composeTargetFile(deployDir) {
-  return fs.access(path.join(deployDir, 'docker-compose.lan.yml'))
-    .then(() => 'docker-compose.lan.yml')
-    .catch(() => fs.access(path.join(deployDir, 'docker-compose.yml'))
-      .then(() => 'docker-compose.yml')
-      .catch(() => null));
-}
-
 export async function composeAction(profile, options) {
   const target = options.target || 'local';
   const action = String(options.action || '').trim();
   const allowed = ['up', 'down', 'stop', 'restart', 'ps', 'pull'];
   if (!allowed.includes(action)) throw new DeployError(`不支持的 Compose 操作: ${action}`, { hint: `可用: ${allowed.join(', ')}` });
-  const service = options.service ? resolveContainer(profile, options.service).replace(`${profile.containerPrefix}-`, '') : '';
+  const service = resolveServiceKey(profile, options.service);
   if (action === 'down' && options.confirm !== true) throw new DeployError('停止并删除容器需要 confirm=true', { code: 'CONFIRM_REQUIRED' });
+  const actionArg = action === 'up' ? `up -d${service ? ` ${shellQuote(service)}` : ''}`
+    : action === 'pull' ? `pull${service ? ` ${shellQuote(service)}` : ''}`
+    : action === 'ps' ? 'ps'
+    : `${action}${service && action !== 'down' ? ` ${shellQuote(service)}` : ''}`;
+  const main = profile.compose.fileRelative;
+  const variant = profile.compose.variantRelative;
   if (target === 'remote') {
-    const deployDir = String(options.deployDir || options.hostConfig?.deployDir || `${options.hostConfig?.installDir || profile.installDir}/deploy`).replace(/\/+$/, '');
-    const actionArg = action === 'up' ? `up -d${service ? ` ${shellQuote(service)}` : ''}`
-      : action === 'pull' ? `pull${service ? ` ${shellQuote(service)}` : ''}`
-      : action === 'ps' ? 'ps'
-      : `${action}${service && action !== 'down' ? ` ${shellQuote(service)}` : ''}`;
+    const deployDir = String(options.deployDir || options.hostConfig?.deployDir || profile.deployDir).trim().replace(/\/+$/, '');
+    const prefix = deployDir.endsWith(profile.deploySourceRel) && profile.deploySourceRel
+      ? deployDir.slice(0, -profile.deploySourceRel.length).replace(/\/+$/, '')
+      : (options.hostConfig?.installDir || profile.installDir);
     const script = `set -e
-cd ${shellQuote(deployDir)}
-if [ -f docker-compose.lan.yml ]; then COMPOSE_FILE=docker-compose.lan.yml
-elif [ -f docker-compose.yml ]; then COMPOSE_FILE=docker-compose.yml
-else echo "目标目录未找到 docker-compose.lan.yml 或 docker-compose.yml" >&2; exit 3; fi
+DEPLOY=${shellQuote([prefix, profile.deploySourceRel].filter(Boolean).join('/'))}
+cd "$DEPLOY"
+COMPOSE_MAIN=${shellQuote(main)}
+COMPOSE_VARIANT=${shellQuote(variant)}
+if [ -n "$COMPOSE_VARIANT" ] && [ -f "$COMPOSE_VARIANT" ]; then COMPOSE_FILE="$COMPOSE_VARIANT"
+elif [ -f "$COMPOSE_MAIN" ]; then COMPOSE_FILE="$COMPOSE_MAIN"
+else echo "目标目录未找到 Compose 清单: $COMPOSE_MAIN" >&2; exit 3; fi
 if docker compose version >/dev/null 2>&1; then docker compose -f "$COMPOSE_FILE" ${actionArg}
 else docker-compose -f "$COMPOSE_FILE" ${actionArg}; fi
 `;
     const result = await runRemote(options.hostConfig, script, { timeoutMs: options.timeoutMs ?? 30 * 60 * 1000 });
     return { success: true, action, service: service || 'all', output: `${result.stdout}\n${result.stderr}`.trim() };
   }
-  const deployDir = path.resolve(expandHome(options.deployDir || profile.deployDir || `${profile.installDir}/deploy`));
-  const file = await composeTargetFile(deployDir);
-  if (!file) throw new DeployError(`部署目录未找到 docker-compose.lan.yml 或 docker-compose.yml: ${deployDir}`);
+  const deployDir = path.resolve(expandHome(options.deployDir || profile.deployDir));
+  const file = await firstExisting([profile.compose.variantFile, profile.compose.file].filter(Boolean));
+  if (!file) throw new DeployError(`部署目录未找到 Compose 清单: ${deployDir}`);
   const docker = requireBinary('docker');
   const args = ['compose', '-f', file, action];
   if (action === 'up') args.push('-d');
@@ -456,7 +465,7 @@ export async function serviceLogs(profile, options) {
 }
 
 export async function dbCheck(profile, options) {
-  const container = `${profile.containerPrefix}-${profile.database.serviceKey}`;
+  const container = containerName(profile, profile.database.serviceKey);
   const client = profile.database.client;
   const port = profile.database.port;
   if (options.target === 'remote') {
@@ -498,7 +507,7 @@ export async function dbImport(profile, options) {
   if (options.confirm !== true) {
     throw new DeployError('导入数据库会写入业务数据，需要 confirm=true', { code: 'CONFIRM_REQUIRED' });
   }
-  const container = `${profile.containerPrefix}-${profile.database.serviceKey}`;
+  const container = containerName(profile, profile.database.serviceKey);
   const client = profile.database.client;
   const port = profile.database.port;
   const database = profile.database.name;

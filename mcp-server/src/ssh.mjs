@@ -6,7 +6,7 @@ import { pipeline } from 'node:stream/promises';
 import { loadConfig, validateHost } from './config.mjs';
 import { DeployError } from './errors.mjs';
 import { commandExists, findBinary, requireBinary, run } from './exec.mjs';
-import { loadProfile } from './profile.mjs';
+import { activeProject, loadConnections } from './projects.mjs';
 import { expandHome, shellQuote } from './util.mjs';
 
 const DEFAULT_KEY_CANDIDATES = ['id_ed25519', 'id_rsa', 'id_ecdsa'];
@@ -15,23 +15,56 @@ function isLikelyHostAddress(value) {
   return /^[A-Za-z0-9._:[\]-]+$/.test(value);
 }
 
+async function managedHostByKey(key) {
+  const { hosts, credentials } = await loadConnections();
+  const target = String(key || '').trim();
+  if (!target) return null;
+  const host = hosts.find((item) => item.id === target)
+    || hosts.find((item) => item.name === target)
+    || hosts.find((item) => item.address === target);
+  if (!host) return null;
+  const credential = credentials.find((item) => item.id === host.credentialId) || null;
+  return {
+    id: host.id,
+    name: host.name || host.address || host.id,
+    kind: host.kind || 'ssh',
+    host: host.address || '',
+    port: Number(host.port) || 22,
+    user: credential?.username || 'root',
+    keyPath: credential?.privateKeyPath || '',
+    installDir: '',
+    deployDir: '',
+    bundleDir: ''
+  };
+}
+
 export async function resolveHost(input, overrides = {}) {
   const { config } = await loadConfig();
+  const projectState = await activeProject().catch(() => null);
+  const project = projectState?.project || null;
   const key = String(input || '').trim();
-  if (!key) throw new DeployError('缺少 host 参数');
-  const configured = config.hosts[key];
-  const { profile } = await loadProfile();
-  const base = configured
-    ? { ...configured }
-    : {
-        name: isLikelyHostAddress(key) ? key : '',
-        host: isLikelyHostAddress(key) ? key : '',
-        port: 22,
-        user: 'root'
-      };
+  const configured = key ? config.hosts[key] : null;
+  const managed = await managedHostByKey(key).catch(() => null);
+  const projectManaged = !key && project?.hostId ? await managedHostByKey(project.hostId).catch(() => null) : null;
+
+  let base;
+  if (managed && String(managed.kind).toLowerCase() !== 'local') {
+    base = { ...managed };
+  } else if (configured) {
+    base = { ...configured };
+  } else if (projectManaged) {
+    base = { ...projectManaged };
+  } else {
+    base = {
+      name: isLikelyHostAddress(key) ? key : '',
+      host: isLikelyHostAddress(key) ? key : '',
+      port: 22,
+      user: 'root'
+    };
+  }
   if (!base.host) {
-    throw new DeployError(`未找到主机配置: ${key}`, {
-      hint: '请先使用 deploy_host_save 保存主机，或直接传入 IP/域名。'
+    throw new DeployError(key ? `未找到主机配置: ${key}` : '当前项目未绑定远程主机', {
+      hint: '请在部署舱的“设置 → 管理主机”中添加主机，并为项目选择该主机。'
     });
   }
   for (const field of ['port', 'user', 'keyPath', 'installDir', 'deployDir', 'bundleDir', 'strictHostKeyChecking']) {
@@ -39,11 +72,14 @@ export async function resolveHost(input, overrides = {}) {
       base[field] = overrides[field];
     }
   }
-  base.installDir = expandHome(base.installDir || profile.installDir);
-  base.deployDir = expandHome(base.deployDir || `${base.installDir}/deploy`);
-  base.bundleDir = expandHome(base.bundleDir || profile.bundleDir);
+  const installDir = base.installDir || project?.installDir || '';
+  if (installDir) base.installDir = expandHome(installDir);
+  base.deployDir = base.deployDir
+    ? expandHome(base.deployDir)
+    : (base.installDir ? `${base.installDir.replace(/\/+$/, '')}/deploy` : '');
+  base.bundleDir = expandHome(base.bundleDir || project?.lastBundleDir || '');
   base.keyPath = base.keyPath ? expandHome(base.keyPath) : '';
-  return { host: validateHost(base), configured: Boolean(configured), profile };
+  return { host: validateHost(base), configured: Boolean(configured || managed) };
 }
 
 export function resolveDefaultKey() {

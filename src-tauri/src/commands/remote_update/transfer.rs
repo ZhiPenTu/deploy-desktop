@@ -13,51 +13,41 @@ pub(super) fn create_remote_backup(
     key: Option<&str>,
     install_dir: &str,
     deploy_dir: &str,
+    artifacts: &[crate::commands::bundle::ResolvedArtifact],
 ) -> Result<String, String> {
+    let mut copy_lines = String::new();
+    for artifact in artifacts {
+        let target = artifact.target.to_string_lossy().to_string();
+        let backup_root = match artifact.kind {
+            crate::commands::bundle::ArtifactKind::File => "install",
+            crate::commands::bundle::ArtifactKind::Dir => "install",
+        };
+        let _ = backup_root;
+        let relative = artifact
+            .target
+            .strip_prefix(if artifact.target.starts_with(deploy_dir) {
+                std::path::Path::new(deploy_dir)
+            } else {
+                std::path::Path::new(install_dir)
+            })
+            .map(|value| value.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        let parent = std::path::Path::new(&relative)
+            .parent()
+            .map(|value| value.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        copy_lines.push_str(&format!(
+            "if [ -e {target} ]; then mkdir -p \"$BACKUP/{parent}\"; cp -a {target} \"$BACKUP/{parent}/\"; fi\n",
+            target = crate::commands::remote_ssh::shell_quote(&target),
+            parent = parent
+        ));
+    }
+
     let script = format!(
-        r#"set -e
-INSTALL={install}
-DEPLOY={deploy}
-STAMP=$(date +%Y%m%d-%H%M%S)
-BACKUP="$INSTALL/backup/update-$STAMP"
-mkdir -p "$BACKUP"
-if [ -f "$INSTALL/backend-java/server/target/{artifact}" ]; then
-  mkdir -p "$BACKUP/server"
-  cp -a "$INSTALL/backend-java/server/target/{artifact}" "$BACKUP/server/"
-fi
-if [ -d "$INSTALL/backend-java/gateway-app/target/classes" ]; then
-  mkdir -p "$BACKUP/gateway"
-  cp -a "$INSTALL/backend-java/gateway-app/target/classes" "$BACKUP/gateway/"
-fi
-if [ -d "$INSTALL/backend-java/gateway-app/target/lib" ]; then
-  mkdir -p "$BACKUP/gateway"
-  cp -a "$INSTALL/backend-java/gateway-app/target/lib" "$BACKUP/gateway/"
-fi
-if [ -d "$DEPLOY/frontend_dist" ]; then
-  mkdir -p "$BACKUP/frontend"
-  cp -a "$DEPLOY/frontend_dist" "$BACKUP/frontend/"
-fi
-if [ -f "$DEPLOY/docker-compose.yml" ]; then
-  mkdir -p "$BACKUP/deploy"
-  cp -a "$DEPLOY/docker-compose.yml" "$BACKUP/deploy/"
-fi
-if [ -f "$DEPLOY/docker-compose.lan.yml" ]; then
-  mkdir -p "$BACKUP/deploy"
-  cp -a "$DEPLOY/docker-compose.lan.yml" "$BACKUP/deploy/"
-fi
-if [ -d "$DEPLOY/nginx" ]; then
-  mkdir -p "$BACKUP/deploy"
-  cp -a "$DEPLOY/nginx" "$BACKUP/deploy/"
-fi
-if [ -d "$DEPLOY/oceanbase" ]; then
-  mkdir -p "$BACKUP/deploy"
-  cp -a "$DEPLOY/oceanbase" "$BACKUP/deploy/"
-fi
-echo "BACKUP_DIR=$BACKUP"
-"#,
-        install = shell_quote(install_dir),
-        deploy = shell_quote(deploy_dir),
-        artifact = crate::commands::profile::deployment_profile().backend_artifact
+        "set -e\nINSTALL={install}\nDEPLOY={deploy}\nSTAMP=$(date +%Y%m%d-%H%M%S)\nBACKUP=\"$INSTALL/backup/update-$STAMP\"\nmkdir -p \"$BACKUP\"\n{copies}echo \"BACKUP_DIR=$BACKUP\"\n",
+        install = crate::commands::remote_ssh::shell_quote(install_dir),
+        deploy = crate::commands::remote_ssh::shell_quote(deploy_dir),
+        copies = copy_lines
     );
     let output = run_ssh_script(host, port, user, key, &script)?;
     if !output.status.success() {

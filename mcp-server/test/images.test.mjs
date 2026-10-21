@@ -8,7 +8,11 @@ import {
   resolveImagesDir,
   scanLocalBundle
 } from '../src/images.mjs';
-import { makeProfile, makeTempDir } from './helpers.mjs';
+import { makeTempDir } from './helpers.mjs';
+
+function makeProfile(overrides = {}) {
+  return { images: [], ...overrides };
+}
 
 async function createBundle() {
   const root = await makeTempDir();

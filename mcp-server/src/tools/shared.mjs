@@ -4,7 +4,7 @@ import { resolveHost } from '../ssh.mjs';
 
 export const targetSchema = z.enum(['local', 'remote']).default('local').describe('local=当前机器，remote=通过 SSH 操作目标机');
 
-export const hostSchema = z.string().min(1).describe('SSH 主机配置名（deploy_host_save 保存的名称）或 IP/域名');
+export const hostSchema = z.string().min(1).optional().describe('SSH 主机名或 IP/域名；留空使用当前项目绑定的主机');
 
 export const remoteFields = {
   host: hostSchema.optional(),

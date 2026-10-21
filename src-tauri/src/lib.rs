@@ -13,7 +13,7 @@ use commands::{
     image_library::*,
     image_manager::*,
     local_update::*,
-    profile::*,
+    projects::*,
     registry::*,
     registry_sources::*,
     remote_ssh::*,
@@ -25,7 +25,7 @@ use commands::{
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
-            commands::profile::init_profile(app.handle());
+            commands::projects::init_projects(app.handle());
             app.manage(commands::updater::PendingUpdate::default());
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -60,7 +60,6 @@ pub fn run() {
             inspect_remote_deployment,
             inspect_deployment_review,
             update_local_deployment,
-            inspect_bundle_layout,
             inspect_bundle_plan,
             inspect_bundle_config,
             install_bundle,
@@ -88,7 +87,13 @@ pub fn run() {
             test_registry_source,
             pull_manifest_images_remote,
             pull_manifest_images_local,
-            get_deployment_profile,
+            list_projects,
+            create_project,
+            update_project,
+            delete_project,
+            set_active_project,
+            get_active_project_context,
+            activate_project_bundle,
             check_app_update,
             install_app_update,
             get_update_settings,

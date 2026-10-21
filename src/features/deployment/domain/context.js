@@ -1,5 +1,3 @@
-import { componentLabels } from './components.js';
-
 export function validInstallDir(value, remote = false) {
   const path = String(value || '').trim();
   if (!path || /[\n\r\0]/.test(path)) return false;
@@ -10,7 +8,17 @@ export function validInstallDir(value, remote = false) {
   return parts.length > 0 && !parts.includes('..');
 }
 
-export function createDeploymentContext({ connection, remote, bundle, components, backup, action, label, imageDir = '' }) {
+export function createDeploymentContext({
+  connection,
+  remote,
+  bundle,
+  components,
+  backup,
+  action,
+  label,
+  imageDir = '',
+  allowedComponents = []
+}) {
   if (!validInstallDir(connection.installDir, remote)) throw new Error('请填写有效的部署目录，不能使用根目录或上级路径。');
   if (remote && (!connection.remoteHost?.trim() || !connection.remoteUser?.trim())) {
     throw new Error('请先选择目标主机并补齐登录信息。');
@@ -23,7 +31,8 @@ export function createDeploymentContext({ connection, remote, bundle, components
   if (!Array.isArray(components) || (action === 'incremental' && !components.length)) {
     throw new Error('请至少选择一个更新组件。');
   }
-  if (components.some((key) => !Object.hasOwn(componentLabels, key))) throw new Error('更新组件无效，请重新选择交付包。');
+  const allowed = new Set(Array.isArray(allowedComponents) ? allowedComponents : []);
+  if (components.some((key) => !allowed.has(key))) throw new Error('更新组件无效，请重新选择交付包。');
   return Object.freeze({
     remote,
     host: connection.remoteHost,

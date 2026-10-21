@@ -2,20 +2,20 @@ import { z } from 'zod';
 import { loadConfig, mutateConfig } from '../config.mjs';
 import { DeployError } from '../errors.mjs';
 import { appVersion, loadProfile } from '../profile.mjs';
-import { checkAppUpdate, normalizeComponents, updateRemote } from '../update.mjs';
+import { checkAppUpdate, updateRemote } from '../update.mjs';
 import { hostSchema, remoteFields, remoteReadOnly, mutating, destructive, hostFrom } from './shared.mjs';
 import { progressReporter } from './runtime.mjs';
 
 export function registerUpdatesTools(register) {
   register('deploy_update_remote', {
     title: '更新远程部署',
-    description: '上传 app/ 与 deploy/ 产物，按组件替换并重启服务。支持预检与更新前备份。实际更新需 confirm=true。',
+    description: '按交付包声明的产物替换目标文件并重启对应服务。支持预检与更新前备份。实际更新需 confirm=true。',
     inputSchema: {
       ...remoteFields,
       host: hostSchema,
-      bundleDir: z.string().min(1).describe('更新包目录，包含 app/ 与 deploy/'),
+      bundleDir: z.string().min(1).describe('交付包目录，需包含 bundle.json'),
       installDir: z.string().optional(),
-      components: z.array(z.enum(['backend', 'gateway', 'frontend', 'config'])).min(1),
+      components: z.array(z.string()).min(1).describe('更新组件键；需为交付包中已声明的组件'),
       backup: z.boolean().optional().default(true),
       dryRun: z.boolean().optional().default(false),
       confirm: z.boolean().optional()
@@ -31,7 +31,7 @@ export function registerUpdatesTools(register) {
     return updateRemote(profile, host, {
       bundleDir: args.bundleDir,
       installDir: args.installDir,
-      components: normalizeComponents(args.components),
+      components: args.components,
       backup: args.backup,
       dryRun: args.dryRun,
       onProgress: (percent, message) => progress(percent, 100, message)

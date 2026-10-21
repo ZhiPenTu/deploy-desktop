@@ -14,7 +14,7 @@
       <div class="card-title-bar">
         <div>
           <h3>目标主机</h3>
-          <p class="card-subtitle">当前主机决定部署、更新、监控与日志诊断在本机还是远程服务器执行</p>
+          <p class="card-subtitle">当前项目的主机决定部署、更新、监控与日志诊断在本机还是远程服务器执行</p>
         </div>
         <el-tag size="small" effect="plain">{{ hosts.length }} 台主机</el-tag>
       </div>
@@ -33,7 +33,7 @@
           v-for="row in hosts"
           :key="row.id"
           class="host-card"
-          :class="{ 'is-active': row.id === connectionInventory.activeHostId }"
+          :class="{ 'is-active': row.id === projectHostId }"
         >
           <div class="host-head">
             <span class="host-tile">
@@ -43,20 +43,21 @@
               <div class="host-name-line">
                 <span class="host-name">{{ row.name }}</span>
                 <el-tag v-if="isLocalHost(row)" size="small" type="info" effect="plain">本机</el-tag>
-                <el-tag v-if="row.id === connectionInventory.activeHostId" size="small" type="success" effect="plain">
-                  当前主机
+                <el-tag v-if="row.id === projectHostId" size="small" type="success" effect="plain">
+                  当前项目主机
                 </el-tag>
               </div>
               <span v-if="row.notes" class="host-notes">{{ row.notes }}</span>
             </div>
             <el-button
-              v-if="row.id !== connectionInventory.activeHostId"
+              v-if="row.id !== projectHostId"
               size="small"
               type="primary"
               plain
               :loading="busyKey === `activate:${row.id}`"
+              :disabled="!projectState.project"
               @click="activate(row)"
-            >设为当前</el-button>
+            >用于当前项目</el-button>
           </div>
 
           <div class="host-body">
@@ -170,12 +171,14 @@ import {
   credentialLabel,
   isLocalHost,
   refreshConnectionInventory,
-  useManagedHost
+  reloadProjectState
 } from '../state.js';
+import { projectState } from '../../../config/project.js';
 import {
   deleteManagedHost,
   setupManagedHostAccess,
-  testManagedHostConnection
+  testManagedHostConnection,
+  updateProject
 } from '../../../api/tauri.js';
 
 defineEmits(['go-credentials', 'view-status']);
@@ -189,6 +192,7 @@ const resultMessage = ref('');
 const resultOk = ref(false);
 
 const hosts = computed(() => connectionInventory.hosts);
+const projectHostId = computed(() => projectState.project?.hostId || '');
 const credentials = computed(() => connectionInventory.credentials);
 
 function credentialKeyText(credentialId) {
@@ -226,10 +230,22 @@ function openEdit(row) {
 }
 
 async function activate(row) {
+  const project = projectState.project;
+  if (!project) {
+    ElMessage.warning('请先在设置中新建项目');
+    return;
+  }
   busyKey.value = `activate:${row.id}`;
   try {
-    await useManagedHost(row.id);
-    ElMessage.success(`当前主机已切换为「${row.name}」`);
+    await updateProject({
+      id: project.id,
+      name: project.name,
+      hostId: row.id,
+      installDir: project.installDir,
+      sourceId: project.sourceId || ''
+    });
+    await reloadProjectState();
+    ElMessage.success(`「${project.name}」的目标主机已设为「${row.name}」`);
   } catch (error) {
     ElMessage.error(String(error));
   } finally {
@@ -277,9 +293,13 @@ async function setupAccess(row) {
 }
 
 async function remove(row) {
+  const inUse = row.id === projectHostId.value;
+  const impact = inUse
+    ? `该主机正被当前项目「${projectState.project?.name || ''}」使用，删除后需要为项目重新选择主机。`
+    : '不会影响已部署的服务和现有项目记录。';
   try {
     await ElMessageBox.confirm(
-      `确认删除主机「${row.name}」？\n\n不会影响已部署的服务；删除当前主机后会自动切换到其他已保存主机，没有其他主机时回到本机部署。`,
+      `确认删除主机「${row.name}」？\n\n${impact}`,
       '删除主机',
       { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
     );
@@ -289,6 +309,7 @@ async function remove(row) {
   try {
     const inventory = await deleteManagedHost(row.id);
     applyConnectionInventory(inventory);
+    await reloadProjectState();
     ElMessage.success('主机已删除');
   } catch (error) {
     ElMessage.error(String(error));

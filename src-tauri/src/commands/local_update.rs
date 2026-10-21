@@ -11,7 +11,7 @@ use serde::Serialize;
 use serde_json::Value;
 use tauri::Emitter;
 
-use super::profile::{deployment_profile, DeploymentProfile};
+use super::bundle::{ArtifactRoot, Bundle, IMAGE_COMPONENT};
 use super::remote_ssh::find_binary;
 use super::remote_update::RemoteUpdateProgress;
 
@@ -36,10 +36,20 @@ struct UpdatePlan {
     deploy_dir: PathBuf,
     compose: PathBuf,
     bundle_compose: PathBuf,
+    components: Vec<String>,
     replacements: Vec<Replacement>,
     images: Vec<PathBuf>,
     services: Vec<String>,
     all_services: Vec<String>,
+    /// 每个所选组件的服务与实际部署路径，用于校验产物是否真的被容器挂载。
+    bindings: Vec<ComponentBinding>,
+    config_selected: bool,
+    image_selected: bool,
+}
+
+struct ComponentBinding {
+    services: Vec<String>,
+    paths: Vec<PathBuf>,
 }
 
 #[tauri::command]
@@ -90,7 +100,6 @@ fn run_update(
         .try_lock()
         .map_err(|_| "已有本机更新任务正在进行，请稍后重试".to_string())?;
     let started = Instant::now();
-    let components = normalize_components(components)?;
     progress(
         window,
         "检查本机部署",
@@ -98,23 +107,24 @@ fn run_update(
         "running",
         "检查交付包、部署目录与所选服务",
     );
-    let mut plan = build_plan(bundle_dir, install_dir, &components, deployment_profile())?;
+    let mut plan = build_plan(bundle_dir, install_dir, &components)?;
+    let components = plan.components.clone();
     check_local_docker()?;
     let current = compose_config(&plan, &plan.compose)?;
-    // Unselected configuration must not block an artifact-only update.
-    let incoming = if components.iter().any(|item| item == "config") {
+    // 未选择的配置不参与预检，避免无关差异阻断产物更新。
+    let incoming = if plan.config_selected {
         compose_config(&plan, &plan.bundle_compose)?
     } else {
         current.clone()
     };
-    validate_effective_configs(&plan, &components, &current, &incoming)?;
+    validate_effective_configs(&plan, &current, &incoming)?;
     if compose_output(&plan, &plan.compose, &["ps", "-a", "-q"])?
         .trim()
         .is_empty()
     {
         return Err("目标目录尚未创建任何部署服务，请先完成首次部署".to_string());
     }
-    let effective_config = if components.iter().any(|item| item == "config") {
+    let effective_config = if plan.config_selected {
         &incoming
     } else {
         &current
@@ -130,7 +140,7 @@ fn run_update(
     if backup {
         check_backup_space(&plan)?;
     }
-    if !components.iter().any(|item| item == "image") {
+    if !plan.image_selected {
         check_images_available(effective_config)?;
     }
     if dry_run {
@@ -177,7 +187,7 @@ fn run_update(
             );
             docker_output(&["load", "-i", &image.to_string_lossy()], "导入镜像")?;
         }
-        let effective = if components.iter().any(|item| item == "config") {
+        let effective = if plan.config_selected {
             preferred_compose(&plan.deploy_dir)?
         } else {
             plan.compose.clone()
@@ -190,10 +200,7 @@ fn run_update(
             "running",
             "重启受影响的服务并等待就绪",
         );
-        if components
-            .iter()
-            .any(|item| item == "config" || item == "image")
-        {
+        if plan.config_selected || plan.image_selected {
             // 禁止联网拉取或隐式构建，离线更新仅使用预检/导入的镜像。
             compose_output(
                 &plan,
@@ -206,10 +213,7 @@ fn run_update(
             args.extend(plan.services.iter().map(String::as_str));
             compose_output(&plan, &effective, &args)?;
         }
-        let waiting = if components
-            .iter()
-            .any(|item| item == "config" || item == "image")
-        {
+        let waiting = if plan.config_selected || plan.image_selected {
             &plan.all_services
         } else {
             &plan.services
@@ -249,21 +253,6 @@ fn run_update(
         error,
         duration_secs: started.elapsed().as_secs(),
     })
-}
-
-fn normalize_components(input: Vec<String>) -> Result<Vec<String>, String> {
-    let mut result = BTreeSet::new();
-    for item in input {
-        let key = item.trim().to_lowercase();
-        if !["backend", "gateway", "frontend", "config", "image"].contains(&key.as_str()) {
-            return Err("更新组件无效，请重新选择更新内容".to_string());
-        }
-        result.insert(key);
-    }
-    if result.is_empty() {
-        return Err("请至少选择一个更新组件".to_string());
-    }
-    Ok(result.into_iter().collect())
 }
 
 fn existing_directory(raw: &str, label: &str) -> Result<PathBuf, String> {
@@ -368,56 +357,90 @@ fn build_plan(
     bundle_dir: &str,
     install_dir: &str,
     components: &[String],
-    profile: &DeploymentProfile,
 ) -> Result<UpdatePlan, String> {
-    let bundle = existing_directory(bundle_dir, "交付包目录")?;
+    let bundle_root = existing_directory(bundle_dir, "交付包目录")?;
     let root = existing_directory(install_dir, "部署目录")?;
-    if bundle.starts_with(&root) || root.starts_with(&bundle) {
+    if bundle_root.starts_with(&root) || root.starts_with(&bundle_root) {
         return Err("交付包与部署目录不能重叠，请先将交付包解压到独立目录".to_string());
     }
-    let compose = super::docker_ops::resolve_compose_file(&root)
-        .ok_or_else(|| "未找到 Compose 清单，请检查部署目录".to_string())?;
-    let deploy_dir = compose.parent().unwrap().to_path_buf();
-    let deploy_relative = deploy_dir.strip_prefix(&root).unwrap();
-    let deploy_path = |name: &str| deploy_relative.join(name).to_string_lossy().into_owned();
-    let bundle_compose = preferred_compose(&bundle.join("deploy"))?;
+
+    let bundle = Bundle::load(&bundle_root)?;
+    bundle.ensure_compatible()?;
+    let components = super::bundle::normalize_components(&bundle, components.to_vec())?;
+
+    let deploy_dir = root.join(bundle.deploy_source_rel());
+    if deploy_dir != root {
+        validate_destination(&root, &deploy_dir)?;
+    }
+    let compose_spec = bundle
+        .artifact_for_source(&bundle.descriptor.runtime.compose)
+        .ok_or_else(|| "交付包未声明 Compose 清单，请重新获取制品".to_string())?;
+    let compose = deploy_dir.join(compose_spec.path.trim());
+    if !compose.is_file() {
+        return Err("未找到 Compose 清单，请检查部署目录".to_string());
+    }
+    let bundle_compose = bundle.root.join(bundle.descriptor.runtime.compose.trim());
+
     reject_symlinks(&compose)?;
     reject_symlinks(&bundle_compose)?;
-    validate_tree(&compose)?;
-    validate_tree(&bundle_compose)?;
+    validate_tree(bundle_compose.parent().unwrap_or(&bundle.root))?;
     let current = service_names(&compose)?;
     let incoming = service_names(&bundle_compose)?;
     if current.is_disjoint(&incoming) {
         return Err("交付包与当前部署的服务不匹配，请确认所选主机和制品".to_string());
     }
-    let image_bundle = bundle.join("images").is_dir() && !bundle.join("app").is_dir();
-    if image_bundle
-        && components
-            .iter()
-            .any(|item| ["backend", "gateway", "frontend"].contains(&item.as_str()))
-    {
-        return Err("该制品仅含镜像，请选择镜像与部署配置更新".to_string());
-    }
-    let artifact = Path::new(&profile.backend_artifact);
-    if artifact.components().count() != 1
-        || !matches!(artifact.components().next(), Some(Component::Normal(_)))
-    {
-        return Err("后端产物名称无效，请检查部署设置".to_string());
-    }
-    let mut replacements = Vec::new();
+
+    let config_source = bundle.descriptor.runtime.compose.trim().to_string();
+    let config_selected = components.iter().any(|key| {
+        bundle
+            .component(key)
+            .map(|component| component.artifacts.iter().any(|artifact| {
+                bundle
+                    .artifact(artifact)
+                    .map(|spec| spec.source == config_source)
+                    .unwrap_or(false)
+            }))
+            .unwrap_or(false)
+    });
+    let image_selected = components.iter().any(|key| key == IMAGE_COMPONENT);
+
+    let mut replacements: Vec<Replacement> = Vec::new();
+    let mut bindings: Vec<ComponentBinding> = Vec::new();
     let mut services = BTreeSet::new();
     let mut images = Vec::new();
-    for component in components {
-        let mut add = |source: &str, destination: &str, required: bool| -> Result<(), String> {
-            let source = bundle.join(source);
-            if !source.exists() {
-                if required {
-                    return Err(format!(
-                        "交付包缺少所选组件文件：{}",
-                        source.strip_prefix(&bundle).unwrap_or(&source).display()
-                    ));
+
+    for key in &components {
+        if key == IMAGE_COMPONENT {
+            let files = bundle.image_files();
+            if files.is_empty() {
+                return Err("交付包不含可导入的离线镜像，请取消镜像更新或选择完整制品".to_string());
+            }
+            for path in files {
+                validate_tree(&path)?;
+                if fs::metadata(&path)
+                    .map(|metadata| metadata.len() == 0)
+                    .unwrap_or(true)
+                {
+                    return Err("离线镜像包为空，请重新获取完整制品".to_string());
                 }
-                return Ok(());
+                images.push(path);
+            }
+            continue;
+        }
+        let component = bundle
+            .component(key)
+            .ok_or_else(|| "交付包未声明所选组件，请重新选择制品".to_string())?;
+        let mut targets: Vec<PathBuf> = Vec::new();
+        for artifact_key in &component.artifacts {
+            let spec = bundle
+                .artifact(artifact_key)
+                .ok_or_else(|| "交付包未声明所选产物，请重新获取制品".to_string())?;
+            let source = bundle.root.join(spec.source.trim());
+            if !source.exists() {
+                return Err(format!(
+                    "交付包缺少所选组件文件：{}",
+                    spec.source.trim()
+                ));
             }
             reject_symlinks(&source)?;
             validate_tree(&source)?;
@@ -428,113 +451,60 @@ fn build_plan(
             {
                 return Err("交付包中的组件文件为空，请重新获取完整制品".to_string());
             }
-            if required
-                && source.is_dir()
+            if source.is_dir()
                 && fs::read_dir(&source)
                     .map(|mut entries| entries.next().is_none())
                     .unwrap_or(true)
             {
                 return Err("交付包中的组件目录为空，请重新获取完整制品".to_string());
             }
-            validate_destination(&root, &root.join(destination))?;
-            replacements.push(Replacement {
-                source,
-                relative: PathBuf::from(destination),
-            });
-            Ok(())
-        };
-        match component.as_str() {
-            "backend" => add(
-                &format!("app/{}", profile.backend_artifact),
-                &format!("backend-java/server/target/{}", profile.backend_artifact),
-                true,
-            )?,
-            "gateway" => {
-                add(
-                    "app/gateway-classes",
-                    "backend-java/gateway-app/target/classes",
-                    true,
-                )?;
-                add(
-                    "app/gateway-lib",
-                    "backend-java/gateway-app/target/lib",
-                    false,
-                )?;
+            let base = match spec.root {
+                ArtifactRoot::Install => root.clone(),
+                ArtifactRoot::Deploy => deploy_dir.clone(),
+            };
+            let destination = base.join(spec.path.trim());
+            validate_destination(&root, &destination)?;
+            if !targets.iter().any(|path| path == &destination) {
+                targets.push(destination.clone());
             }
-            "frontend" => {
-                if !bundle.join("app/frontend-dist/index.html").is_file() {
-                    return Err("交付包缺少前端入口文件，请重新获取完整制品".to_string());
-                }
-                add("app/frontend-dist", &deploy_path("frontend_dist"), true)?;
+            let relative = destination
+                .strip_prefix(&root)
+                .map_err(|_| "更新目标超出部署目录，已中止操作".to_string())?
+                .to_path_buf();
+            if replacements.iter().any(|item| item.relative == relative) {
+                continue;
             }
-            "config" => {
-                add(
-                    "deploy/docker-compose.yml",
-                    &deploy_path("docker-compose.yml"),
-                    true,
-                )?;
-                let lan_source = if !bundle.join("deploy/docker-compose.lan.yml").is_file()
-                    && compose.file_name().and_then(|name| name.to_str()) == Some("docker-compose.lan.yml")
-                {
-                    // Keep the active filename when a new bundle supplies only the base manifest.
-                    "deploy/docker-compose.yml"
-                } else {
-                    "deploy/docker-compose.lan.yml"
-                };
-                add(lan_source, &deploy_path("docker-compose.lan.yml"), false)?;
-                add("deploy/nginx", &deploy_path("nginx"), false)?;
-                add("deploy/oceanbase", &deploy_path("oceanbase"), false)?;
-            }
-            "image" => {
-                let dir = bundle.join("images");
-                if !dir.is_dir() {
-                    return Err("交付包不含离线镜像，请取消镜像更新或选择完整制品".to_string());
-                }
-                reject_symlinks(&dir)?;
-                for entry in fs::read_dir(&dir).map_err(|_| "无法读取离线镜像目录".to_string())?
-                {
-                    let path = entry.map_err(|_| "无法读取镜像文件".to_string())?.path();
-                    let name = path.to_string_lossy().to_lowercase();
-                    if name.ends_with(".tar") || name.ends_with(".tgz") || name.ends_with(".tar.gz")
-                    {
-                        validate_tree(&path)?;
-                        if !path.is_file() {
-                            return Err("离线镜像包无效".to_string());
-                        }
-                        if fs::metadata(&path)
-                            .map(|metadata| metadata.len() == 0)
-                            .unwrap_or(true)
-                        {
-                            return Err("离线镜像包为空，请重新获取完整制品".to_string());
-                        }
-                        images.push(path);
-                    }
-                }
-                if images.is_empty() {
-                    return Err("交付包不含可导入的离线镜像".to_string());
-                }
-            }
-            _ => unreachable!(),
+            replacements.push(Replacement { source, relative });
         }
-        for service in profile.component_services(component) {
-            if !current.contains(&service) || !incoming.contains(&service) {
+        for service in &component.services {
+            if !current.contains(service) || !incoming.contains(service) {
                 return Err(format!(
                     "所选组件的服务 {service} 与交付包或当前部署不匹配，请检查部署设置"
                 ));
             }
-            services.insert(service);
+            services.insert(service.clone());
         }
+        bindings.push(ComponentBinding {
+            services: component.services.clone(),
+            paths: targets,
+        });
     }
+
     images.sort();
+    images.dedup();
     Ok(UpdatePlan {
         root,
         deploy_dir,
         compose,
         bundle_compose,
+        components,
         replacements,
         images,
         services: services.into_iter().collect(),
         all_services: incoming.into_iter().collect(),
+        bindings,
+        config_selected,
+        image_selected,
     })
 }
 
@@ -593,11 +563,6 @@ fn compose_command(plan: &UpdatePlan, compose: &Path, action: &[&str]) -> Result
         command.arg("--env-file").arg(env);
     }
     command.arg("-f").arg(compose);
-    let override_file = plan.deploy_dir.join("docker-compose.frontend-bind.yml");
-    if override_file.is_file() {
-        reject_symlinks(&override_file)?;
-        command.arg("-f").arg(override_file);
-    }
     command.args(action).current_dir(&plan.deploy_dir);
     Ok(command)
 }
@@ -623,36 +588,26 @@ fn compose_config(plan: &UpdatePlan, compose: &Path) -> Result<Value, String> {
 
 fn validate_effective_configs(
     plan: &UpdatePlan,
-    components: &[String],
     current: &Value,
     incoming: &Value,
 ) -> Result<(), String> {
-    if components.iter().any(|item| item == "config")
+    if plan.config_selected
         && current.get("name").and_then(Value::as_str) != incoming.get("name").and_then(Value::as_str)
     {
         return Err("交付包的 Compose 项目名称与当前部署不同，请确认制品与目标".to_string());
     }
-    for component in components {
-        let paths: Vec<PathBuf> = match component.as_str() {
-            "backend" => vec![plan.root.join(format!(
-                "backend-java/server/target/{}",
-                deployment_profile().backend_artifact
-            ))],
-            "gateway" => vec![plan.root.join("backend-java/gateway-app/target/classes")],
-            "frontend" => vec![plan.deploy_dir.join("frontend_dist")],
-            _ => Vec::new(),
+    for binding in &plan.bindings {
+        let configurations: Vec<&Value> = if plan.config_selected {
+            vec![incoming, current]
+        } else {
+            vec![current]
         };
-        for service in deployment_profile().component_services(component) {
-            for path in &paths {
-                let configurations = if components.iter().any(|item| item == "config") {
-                    vec![current, incoming]
-                } else {
-                    vec![current]
-                };
-                for config in configurations {
+        for service in &binding.services {
+            for path in &binding.paths {
+                for config in &configurations {
                     let bound = config
                         .get("services")
-                        .and_then(|value| value.get(&service))
+                        .and_then(|value| value.get(service))
                         .and_then(|value| value.get("volumes"))
                         .and_then(Value::as_array)
                         .map(|volumes| {
@@ -927,6 +882,8 @@ fn wait_for_services(plan: &UpdatePlan, compose: &Path, services: &[String]) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::bundle::sha256_hex;
+    use serde_json::json;
 
     struct Fixture(PathBuf);
     impl Fixture {
@@ -936,10 +893,13 @@ mod tests {
             fs::create_dir_all(&path).unwrap();
             Self(path)
         }
-        fn write(&self, relative: &str, text: &str) {
+        fn write(&self, relative: &str, text: impl AsRef<[u8]>) {
             let path = self.0.join(relative);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, text).unwrap();
+        }
+        fn spec(&self, dir: &str, compose: &str) -> BundleSpec {
+            BundleSpec::new(self.0.join(dir), compose)
         }
     }
     impl Drop for Fixture {
@@ -948,22 +908,117 @@ mod tests {
         }
     }
 
+    /// 按目录实际内容生成 v2 交付包，避免测试手写文件摘要。
+    struct BundleSpec {
+        root: PathBuf,
+        compose: String,
+        services: Vec<serde_json::Value>,
+        artifacts: Vec<serde_json::Value>,
+        components: Vec<serde_json::Value>,
+        images: Vec<serde_json::Value>,
+    }
+
+    impl BundleSpec {
+        fn new(root: PathBuf, compose: &str) -> Self {
+            Self {
+                root,
+                compose: compose.to_string(),
+                services: Vec::new(),
+                artifacts: Vec::new(),
+                components: Vec::new(),
+                images: Vec::new(),
+            }
+        }
+
+        fn service(mut self, key: &str) -> Self {
+            self.services.push(json!({
+                "key": key, "label": key, "port": 8080, "protocol": "TCP", "description": ""
+            }));
+            self
+        }
+
+        fn artifact(mut self, key: &str, source: &str, root: &str, path: &str, kind: &str) -> Self {
+            self.artifacts.push(json!({
+                "key": key, "label": key, "source": source, "root": root, "path": path, "type": kind
+            }));
+            self
+        }
+
+        fn component(mut self, key: &str, artifacts: &[&str], services: &[&str]) -> Self {
+            self.components.push(json!({
+                "key": key, "label": key,
+                "artifacts": artifacts.to_vec(), "services": services.to_vec()
+            }));
+            self
+        }
+
+        fn write(self) -> PathBuf {
+            let mut files = Vec::new();
+            collect(&self.root, &self.root, &mut files);
+            files.sort_by(|left: &serde_json::Value, right: &serde_json::Value| {
+                left["path"].as_str().unwrap_or_default().cmp(right["path"].as_str().unwrap_or_default())
+            });
+            let manifest = json!({
+                "apiVersion": "deploy.desktop/bundle/v2",
+                "kind": "DeploymentBundle",
+                "metadata": { "product": "demo", "displayName": "演示", "version": "1-a",
+                    "commit": "deadbeef", "commitShort": "deadbee", "branch": "main", "builtAt": "" },
+                "runtime": { "type": "compose", "compose": &self.compose,
+                    "containerPrefix": "demo", "services": self.services },
+                "components": self.components,
+                "artifacts": self.artifacts,
+                "images": self.images,
+                "plan": { "steps": [] },
+                "files": files,
+            });
+            fs::write(
+                self.root.join("bundle.json"),
+                serde_json::to_string_pretty(&manifest).unwrap(),
+            )
+            .unwrap();
+            self.root
+        }
+    }
+
+    fn collect(root: &Path, dir: &Path, out: &mut Vec<serde_json::Value>) {
+        for entry in fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect(root, &path, out);
+                continue;
+            }
+            let relative = path.strip_prefix(root).unwrap().to_string_lossy().to_string();
+            if relative == "bundle.json" {
+                continue;
+            }
+            let bytes = fs::read(&path).unwrap();
+            out.push(json!({
+                "path": relative,
+                "size": bytes.len(),
+                "sha256": sha256_hex(&bytes),
+            }));
+        }
+    }
+
+    fn compose_text(mode: &str) -> String {
+        format!("services:\n  frontend:\n    image: nginx\n    environment: {{ MODE: {mode} }}\n")
+    }
+
     #[test]
     fn rejects_overlapping_or_unrelated_deployments_without_writes() {
         let fixture = Fixture::new();
-        fixture.write(
-            "target/deploy/docker-compose.yml",
-            "services:\n  other:\n    image: nginx\n",
-        );
-        fixture.write(
-            "bundle/deploy/docker-compose.yml",
-            "services:\n  frontend:\n    image: nginx\n",
-        );
+        fixture.write("target/deploy/docker-compose.yml", "services:\n  other:\n    image: nginx\n");
+        fixture.write("bundle/deploy/docker-compose.yml", &compose_text("incoming"));
+        let bundle_dir = fixture
+            .spec("bundle", "deploy/docker-compose.yml")
+            .service("frontend")
+            .artifact("compose", "deploy/docker-compose.yml", "deploy", "docker-compose.yml", "file")
+            .component("config", &["compose"], &[])
+            .write();
         let error = build_plan(
-            fixture.0.join("bundle").to_str().unwrap(),
+            bundle_dir.to_str().unwrap(),
             fixture.0.join("target").to_str().unwrap(),
             &["config".to_string()],
-            deployment_profile(),
         )
         .err()
         .unwrap();
@@ -973,7 +1028,6 @@ mod tests {
             fixture.0.join("target").to_str().unwrap(),
             fixture.0.join("target").to_str().unwrap(),
             &["config".to_string()],
-            deployment_profile(),
         )
         .err()
         .unwrap();
@@ -981,33 +1035,78 @@ mod tests {
     }
 
     #[test]
-    fn backups_preserve_lan_compose_and_replacement_removes_stale_files() {
+    fn follows_descriptor_targets_without_project_specific_paths() {
+        let compose = "services:\n  api:\n    image: nginx\n  web:\n    image: nginx\n";
         let fixture = Fixture::new();
-        let compose = "services:\n  frontend:\n    image: nginx\n";
+        fixture.write("target/api/site/index.html", "old");
+        fixture.write("target/bin/tool", "old bin");
+        fixture.write("target/api/docker-compose.yml", compose);
+        fixture.write("bundle/app/web/index.html", "new");
+        fixture.write("bundle/app/bin/tool", "new bin");
+        fixture.write("bundle/api/docker-compose.yml", compose);
+        let bundle_dir = fixture
+            .spec("bundle", "api/docker-compose.yml")
+            .service("api")
+            .service("web")
+            .artifact("site", "app/web", "deploy", "site", "dir")
+            .artifact("bin", "app/bin", "install", "bin", "dir")
+            .artifact("compose", "api/docker-compose.yml", "deploy", "docker-compose.yml", "file")
+            .component("site", &["site"], &["web"])
+            .component("cli", &["bin"], &[])
+            .component("config", &["compose"], &[])
+            .write();
+        let plan = build_plan(
+            bundle_dir.to_str().unwrap(),
+            fixture.0.join("target").to_str().unwrap(),
+            &["site".to_string(), "cli".to_string()],
+        )
+        .unwrap();
+        assert_eq!(plan.deploy_dir, fs::canonicalize(fixture.0.join("target/api")).unwrap());
+        let relative: Vec<String> = plan
+            .replacements
+            .iter()
+            .map(|item| item.relative.to_string_lossy().to_string())
+            .collect();
+        assert!(relative.contains(&"api/site".to_string()));
+        assert!(relative.contains(&"bin".to_string()));
+        for item in &plan.replacements {
+            replace_path(&item.source, &plan.root.join(&item.relative)).unwrap();
+        }
+        assert_eq!(fs::read_to_string(fixture.0.join("target/api/site/index.html")).unwrap(), "new");
+        assert_eq!(fs::read_to_string(fixture.0.join("target/bin/tool")).unwrap(), "new bin");
+        assert_eq!(fs::read_to_string(fixture.0.join("target/api/docker-compose.yml")).unwrap(), compose);
+    }
+
+    #[test]
+    fn backups_preserve_configuration_and_replacement_removes_stale_files() {
+        let fixture = Fixture::new();
         for folder in ["target", "bundle"] {
-            fixture.write(&format!("{folder}/deploy/docker-compose.yml"), compose);
-            fixture.write(&format!("{folder}/deploy/docker-compose.lan.yml"), compose);
+            fixture.write(&format!("{folder}/deploy/docker-compose.yml"), &compose_text("current"));
         }
         fixture.write("target/deploy/nginx/stale.conf", "old");
         fixture.write("bundle/deploy/nginx/new.conf", "new");
+        let bundle_dir = fixture
+            .spec("bundle", "deploy/docker-compose.yml")
+            .service("frontend")
+            .artifact("compose", "deploy/docker-compose.yml", "deploy", "docker-compose.yml", "file")
+            .artifact("nginx", "deploy/nginx", "deploy", "nginx", "dir")
+            .component("config", &["compose", "nginx"], &[])
+            .write();
         let plan = build_plan(
-            fixture.0.join("bundle").to_str().unwrap(),
+            bundle_dir.to_str().unwrap(),
             fixture.0.join("target").to_str().unwrap(),
             &["config".to_string()],
-            deployment_profile(),
         )
         .unwrap();
         let backup = create_backup(&plan).unwrap();
-        assert!(backup.join("deploy/docker-compose.lan.yml").is_file());
+        assert!(backup.join("deploy/docker-compose.yml").is_file());
         assert_eq!(
             fs::read_to_string(backup.join("deploy/nginx/stale.conf")).unwrap(),
             "old"
         );
-        replace_path(
-            &fixture.0.join("bundle/deploy/nginx"),
-            &fixture.0.join("target/deploy/nginx"),
-        )
-        .unwrap();
+        for item in &plan.replacements {
+            replace_path(&item.source, &plan.root.join(&item.relative)).unwrap();
+        }
         assert!(!fixture.0.join("target/deploy/nginx/stale.conf").exists());
         assert_eq!(
             fs::read_to_string(fixture.0.join("target/deploy/nginx/new.conf")).unwrap(),
@@ -1016,86 +1115,40 @@ mod tests {
     }
 
     #[test]
-    fn root_compose_configuration_changes_follow_active_paths_and_back_up_old_files() {
-        let fixture = Fixture::new();
-        let current = "services:\n  frontend:\n    image: nginx\n    environment: { MODE: current }\n";
-        let incoming = "services:\n  frontend:\n    image: nginx\n    environment: { MODE: updated }\n";
-        fixture.write("target/docker-compose.yml", current);
-        fixture.write("target/deploy/docker-compose.lan.yml", "services: {}\n");
-        fixture.write("target/nginx/default.conf", "old");
-        fixture.write("bundle/deploy/docker-compose.yml", incoming);
-        fixture.write("bundle/deploy/nginx/default.conf", "new");
-        fixture.write("bundle/app/frontend-dist/index.html", "new page");
-        let components = vec!["config".to_string(), "frontend".to_string()];
-        let plan = build_plan(
-            fixture.0.join("bundle").to_str().unwrap(),
-            fixture.0.join("target").to_str().unwrap(),
-            &components,
-            deployment_profile(),
-        ).unwrap();
-        assert_eq!(plan.compose, plan.root.join("docker-compose.yml"));
-        assert_eq!(plan.deploy_dir, plan.root);
-        assert_eq!(fs::read_to_string(&plan.compose).unwrap(), current);
-        assert!(!plan.root.join("backup").exists());
-        assert!(plan.replacements.iter().any(|item| item.relative == Path::new("frontend_dist")));
-        let command = compose_command(&plan, &plan.bundle_compose, &["config", "--format", "json"]).unwrap();
-        assert_eq!(command.get_current_dir(), Some(plan.root.as_path()));
-        let args: Vec<_> = command.get_args().collect();
-        assert_eq!(args[2], plan.root.as_os_str());
-        let backup = create_backup(&plan).unwrap();
-        for item in &plan.replacements {
-            replace_path(&item.source, &plan.root.join(&item.relative)).unwrap();
-        }
-        assert_eq!(fs::read_to_string(backup.join("docker-compose.yml")).unwrap(), current);
-        assert_eq!(fs::read_to_string(backup.join("nginx/default.conf")).unwrap(), "old");
-        assert_eq!(fs::read_to_string(&plan.compose).unwrap(), incoming);
-        assert_eq!(fs::read_to_string(plan.root.join("frontend_dist/index.html")).unwrap(), "new page");
-        assert_eq!(fs::read_to_string(plan.root.join("deploy/docker-compose.lan.yml")).unwrap(), "services: {}\n");
-    }
-
-    #[test]
-    fn artifact_only_plan_preserves_customized_configuration_in_both_layouts() {
+    fn artifact_only_plan_preserves_customized_configuration() {
         for layout in ["", "deploy/"] {
             let fixture = Fixture::new();
-            let current = "services:\n  frontend:\n    image: nginx\n    environment: { MODE: customized }\n";
-            fixture.write(&format!("target/{layout}docker-compose.yml"), current);
-            fixture.write("bundle/deploy/docker-compose.yml", "name: incoming-project\nservices:\n  frontend:\n    image: nginx\n    environment: { MODE: '${UNSET_REQUIRED:?missing}' }\n");
+            let compose_source = format!("{layout}docker-compose.yml");
+            fixture.write(&format!("target/{layout}docker-compose.yml"), &compose_text("customized"));
+            fixture.write(&format!("bundle/{layout}docker-compose.yml"), &compose_text("incoming"));
             fixture.write("bundle/app/frontend-dist/index.html", "new page");
+            let bundle_dir = fixture
+                .spec("bundle", &compose_source)
+                .service("frontend")
+                .artifact("compose", &compose_source, "deploy", "docker-compose.yml", "file")
+                .artifact("dist", "app/frontend-dist", "deploy", "frontend_dist", "dir")
+                .component("frontend", &["dist"], &["frontend"])
+                .component("config", &["compose"], &[])
+                .write();
             let plan = build_plan(
-                fixture.0.join("bundle").to_str().unwrap(),
+                bundle_dir.to_str().unwrap(),
                 fixture.0.join("target").to_str().unwrap(),
                 &["frontend".to_string()],
-                deployment_profile(),
-            ).unwrap();
+            )
+            .unwrap();
             assert_eq!(plan.replacements.len(), 1);
+            assert!(!plan.config_selected);
             for item in &plan.replacements {
                 replace_path(&item.source, &plan.root.join(&item.relative)).unwrap();
             }
-            assert_eq!(fs::read_to_string(&plan.compose).unwrap(), current);
-            assert_eq!(fs::read_to_string(plan.deploy_dir.join("frontend_dist/index.html")).unwrap(), "new page");
-        }
-    }
-
-    #[test]
-    fn base_manifest_updates_existing_lan_filename_after_backup() {
-        for layout in ["", "deploy/"] {
-            let fixture = Fixture::new();
-            let current = "services:\n  frontend:\n    image: nginx\n    environment: { MODE: previous }\n";
-            let incoming = current.replace("previous", "updated");
-            fixture.write(&format!("target/{layout}docker-compose.lan.yml"), current);
-            fixture.write("bundle/deploy/docker-compose.yml", &incoming);
-            let plan = build_plan(
-                fixture.0.join("bundle").to_str().unwrap(),
-                fixture.0.join("target").to_str().unwrap(),
-                &["config".to_string()],
-                deployment_profile(),
-            ).unwrap();
-            let backup = create_backup(&plan).unwrap();
-            for item in &plan.replacements {
-                replace_path(&item.source, &plan.root.join(&item.relative)).unwrap();
-            }
-            assert_eq!(fs::read_to_string(backup.join(format!("{layout}docker-compose.lan.yml"))).unwrap(), current);
-            assert_eq!(fs::read_to_string(preferred_compose(&plan.deploy_dir).unwrap()).unwrap(), incoming);
+            assert_eq!(
+                fs::read_to_string(&plan.compose).unwrap(),
+                compose_text("customized")
+            );
+            assert_eq!(
+                fs::read_to_string(plan.deploy_dir.join("frontend_dist/index.html")).unwrap(),
+                "new page"
+            );
         }
     }
 
@@ -1120,14 +1173,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_path_traversal_and_invalid_components() {
+    fn rejects_path_traversal_in_install_dir() {
         assert!(existing_directory("/tmp/../tmp", "目录").is_err());
-        assert!(normalize_components(vec!["all".to_string()]).is_err());
-        assert!(normalize_components(Vec::new()).is_err());
-        assert_eq!(
-            normalize_components(vec!["config".to_string(), "config".to_string()]).unwrap(),
-            vec!["config"]
-        );
+        assert!(existing_directory("relative/dir", "目录").is_err());
     }
 
     #[test]
@@ -1140,28 +1188,47 @@ mod tests {
             root,
             compose: PathBuf::new(),
             bundle_compose: PathBuf::new(),
+            components: vec!["frontend".to_string()],
             replacements: Vec::new(),
             images: Vec::new(),
             services: vec!["frontend".to_string()],
             all_services: Vec::new(),
+            bindings: vec![ComponentBinding {
+                services: vec!["frontend".to_string()],
+                paths: vec![destination.clone()],
+            }],
+            config_selected: false,
+            image_selected: false,
         };
         let current = serde_json::json!({
             "name": "same-project",
             "services": { "frontend": { "volumes": [{ "type": "bind", "source": destination }] } }
         });
-        let components = vec!["frontend".to_string()];
-        assert!(validate_effective_configs(&plan, &components, &current, &current).is_ok());
+        assert!(validate_effective_configs(&plan, &current, &current).is_ok());
         let mut other_project = current.clone();
         other_project["name"] = Value::String("another-project".to_string());
-        assert!(validate_effective_configs(&plan, &components, &current, &other_project).is_ok());
-        assert!(validate_effective_configs(&plan, &["config".to_string()], &current, &other_project).is_err());
-        let mut changed = current.clone();
-        changed["services"]["frontend"]["environment"] = serde_json::json!({"MODE": "updated"});
-        changed["services"]["frontend"]["ports"] = serde_json::json!([{"target": 80, "published": "8081"}]);
-        assert!(validate_effective_configs(&plan, &["config".to_string(), "frontend".to_string()], &current, &changed).is_ok());
+        assert!(validate_effective_configs(&plan, &current, &other_project).is_ok());
+
+        let mut config_plan = UpdatePlan {
+            deploy_dir: plan.deploy_dir.clone(),
+            root: plan.root.clone(),
+            compose: PathBuf::new(),
+            bundle_compose: PathBuf::new(),
+            components: vec!["config".to_string()],
+            replacements: Vec::new(),
+            images: Vec::new(),
+            services: Vec::new(),
+            all_services: Vec::new(),
+            bindings: Vec::new(),
+            config_selected: true,
+            image_selected: false,
+        };
+        assert!(validate_effective_configs(&config_plan, &current, &other_project).is_err());
+        config_plan.config_selected = false;
+
         let without_bind =
             serde_json::json!({ "name": "same-project", "services": { "frontend": {} } });
-        assert!(validate_effective_configs(&plan, &components, &without_bind, &current).is_err());
+        assert!(validate_effective_configs(&plan, &without_bind, &current).is_err());
     }
 
     #[test]

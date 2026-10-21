@@ -8,7 +8,7 @@ import { targetSchema, hostSchema, remoteFields, remoteReadOnly, mutating, destr
 export function registerBundlesTools(register) {
   register('deploy_bundle_scan', {
     title: '扫描离线镜像包',
-    description: '扫描本地或远程 <bundleDir>/images 下的 tar/tgz 文件、总大小与 profile 期望文件缺口。',
+    description: '扫描本地或远程交付包 images 目录下的 tar/tgz 文件、总大小与交付包期望文件缺口。',
     inputSchema: {
       target: targetSchema,
       ...remoteFields,
@@ -20,7 +20,7 @@ export function registerBundlesTools(register) {
     const { profile } = await loadProfile();
     if (args.target === 'remote') {
       const host = await hostFrom(args);
-      return inspectRemoteBundle(profile, host, args.bundleDir || profile.bundleDir);
+      return inspectRemoteBundle(profile, host, args.bundleDir || host.bundleDir || profile.bundleDir);
     }
     return scanLocalBundle(profile, args.dir || profile.bundleDir);
   });
@@ -32,7 +32,7 @@ export function registerBundlesTools(register) {
       ...remoteFields,
       host: hostSchema,
       localDir: z.string().min(1).describe('本地镜像包目录或 images 目录'),
-      remoteBundleDir: z.string().min(1),
+      remoteBundleDir: z.string().optional().describe('远程镜像包根目录；默认使用当前项目绑定的交付包目录'),
       files: z.array(z.string()).optional(),
       overwrite: z.boolean().optional().default(false)
     },
@@ -40,8 +40,10 @@ export function registerBundlesTools(register) {
   }, async (args) => {
     const host = await hostFrom(args);
     const { imagesDir } = await resolveImagesDir(args.localDir);
-    const messages = await uploadBundle(host, args.localDir, args.remoteBundleDir, args.files || [], { overwrite: args.overwrite });
-    return { localDir: imagesDir, remoteDir: `${args.remoteBundleDir.replace(/\/+$/, '')}/images`, messages };
+    const remoteBundleDir = args.remoteBundleDir || host.bundleDir;
+    if (!remoteBundleDir) throw new DeployError('请填写远程镜像包目录');
+    const messages = await uploadBundle(host, args.localDir, remoteBundleDir, args.files || [], { overwrite: args.overwrite });
+    return { localDir: imagesDir, remoteDir: `${remoteBundleDir.replace(/\/+$/, '')}/images`, messages };
   });
 
   register('deploy_bundle_import', {
@@ -50,13 +52,15 @@ export function registerBundlesTools(register) {
     inputSchema: {
       ...remoteFields,
       host: hostSchema,
-      remoteBundleDir: z.string().min(1),
+      remoteBundleDir: z.string().optional().describe('远程镜像包根目录；默认使用当前项目绑定的交付包目录'),
       files: z.array(z.string()).optional()
     },
     annotations: mutating
   }, async (args) => {
     const host = await hostFrom(args);
-    return { loaded: await loadRemoteImages(host, args.remoteBundleDir, args.files || []) };
+    const remoteBundleDir = args.remoteBundleDir || host.bundleDir;
+    if (!remoteBundleDir) throw new DeployError('请填写远程镜像包目录');
+    return { loaded: await loadRemoteImages(host, remoteBundleDir, args.files || []) };
   });
 
   register('deploy_bundle_deploy', {
@@ -65,8 +69,8 @@ export function registerBundlesTools(register) {
     inputSchema: {
       target: targetSchema,
       ...remoteFields,
-      bundleDir: z.string().min(1).describe('本地镜像包根目录（读取其 images/ 子目录）'),
-      remoteBundleDir: z.string().optional().describe('远程镜像包根目录；默认使用主机配置或 profile.bundleDir'),
+      bundleDir: z.string().optional().describe('本地交付包目录（读取其 images/ 子目录）；默认使用当前项目绑定的交付包'),
+      remoteBundleDir: z.string().optional().describe('远程镜像包根目录；默认使用当前项目绑定的交付包目录'),
       files: z.array(z.string()).optional().describe('只处理指定镜像包文件名；为空表示全部'),
       upload: z.boolean().optional().default(true).describe('远程模式先上传本地镜像包'),
       service: z.string().optional().describe('只启动指定服务，默认全部'),
@@ -78,14 +82,16 @@ export function registerBundlesTools(register) {
     if (args.confirm !== true) {
       throw new DeployError('一键部署会导入镜像并启动服务，需要 confirm=true', { code: 'CONFIRM_REQUIRED' });
     }
-    const { profile } = await loadProfile();
+    const { profile } = await loadProfile({ bundleDir: args.bundleDir });
+    const bundleDir = args.bundleDir || profile.bundleDir;
     const files = args.files || [];
     if (args.target === 'remote') {
       const host = await hostFrom(args);
       const remoteBundleDir = args.remoteBundleDir || host.bundleDir;
+      if (!remoteBundleDir) throw new DeployError('请填写远程镜像包目录');
       let uploads = [];
       if (args.upload !== false) {
-        uploads = await uploadBundle(host, args.bundleDir, remoteBundleDir, files, { overwrite: false });
+        uploads = await uploadBundle(host, bundleDir, remoteBundleDir, files, { overwrite: false });
       }
       const loaded = await loadRemoteImages(host, remoteBundleDir, files);
       const compose = await composeAction(profile, {
@@ -101,7 +107,7 @@ export function registerBundlesTools(register) {
       const status = await inspectRemoteDeployment(profile, host, host.installDir).catch(() => null);
       return { target: 'remote', remoteBundleDir, uploads, loaded, compose, database, status };
     }
-    const loaded = await loadLocalImages(args.bundleDir, files);
+    const loaded = await loadLocalImages(bundleDir, files);
     const compose = await composeAction(profile, {
       target: 'local',
       action: 'up',
@@ -121,7 +127,7 @@ export function registerBundlesTools(register) {
     inputSchema: {
       ...remoteFields,
       host: hostSchema,
-      remoteBundleDir: z.string().min(1),
+      remoteBundleDir: z.string().optional().describe('远程镜像包根目录；默认使用当前项目绑定的交付包目录'),
       files: z.array(z.string()).min(1),
       confirm: z.boolean().optional()
     },
@@ -129,6 +135,8 @@ export function registerBundlesTools(register) {
   }, async (args) => {
     if (args.confirm !== true) throw new DeployError('删除镜像包文件需要 confirm=true', { code: 'CONFIRM_REQUIRED' });
     const host = await hostFrom(args);
-    return removeRemoteBundleFiles(host, args.remoteBundleDir, args.files);
+    const remoteBundleDir = args.remoteBundleDir || host.bundleDir;
+    if (!remoteBundleDir) throw new DeployError('请填写远程镜像包目录');
+    return removeRemoteBundleFiles(host, remoteBundleDir, args.files);
   });
 }

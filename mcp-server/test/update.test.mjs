@@ -10,7 +10,8 @@ import {
   resolveUpdateEndpoint,
   validateBundle
 } from '../src/update.mjs';
-import { makeProfile, makeTempDir } from './helpers.mjs';
+import { makeTempDir, writeBundle } from './helpers.mjs';
+import { Bundle } from '../src/bundle.mjs';
 
 function expectedPlatformKey() {
   if (process.platform === 'darwin') return process.arch === 'arm64' ? 'darwin-aarch64' : 'darwin-x86_64';
@@ -29,10 +30,13 @@ function listen(server) {
   });
 }
 
-test('normalizeComponents 去重并拒绝未知组件', () => {
-  assert.deepEqual(normalizeComponents(['backend', 'BACKEND', 'gateway']), ['backend', 'gateway']);
-  assert.throws(() => normalizeComponents(['database']), /不支持的更新组件/);
-  assert.throws(() => normalizeComponents([]), /至少选择一个更新组件/);
+test('normalizeComponents 去重并拒绝未知组件', async () => {
+  const root = await makeTempDir();
+  await writeBundle(root);
+  const bundle = await Bundle.load(root);
+  assert.deepEqual(normalizeComponents(bundle, ['server', 'site', 'server']), ['server', 'site']);
+  assert.throws(() => normalizeComponents(bundle, ['database']), /未声明组件 database/);
+  assert.throws(() => normalizeComponents(bundle, []), /至少选择一个更新组件/);
 });
 
 test('resolveUpdateEndpoint 默认直接使用 GitHub Releases', () => {
@@ -41,38 +45,33 @@ test('resolveUpdateEndpoint 默认直接使用 GitHub Releases', () => {
   assert.equal(resolveUpdateEndpoint(' https://example.com/latest.json '), 'https://example.com/latest.json');
 });
 
-test('validateBundle 识别完整更新包', async () => {
+test('validateBundle 按交付包解析产物与部署路径', async () => {
   const root = await makeTempDir();
-  const profile = makeProfile();
-  await fs.mkdir(path.join(root, 'app', 'gateway-classes'), { recursive: true });
-  await fs.mkdir(path.join(root, 'app', 'gateway-lib'), { recursive: true });
-  await fs.mkdir(path.join(root, 'app', 'frontend-dist'), { recursive: true });
-  await fs.writeFile(path.join(root, 'app', profile.backendArtifact), 'jar');
-  await fs.writeFile(path.join(root, 'app', 'frontend-dist', 'index.html'), '<html></html>');
-  await fs.mkdir(path.join(root, 'deploy', 'nginx'), { recursive: true });
-  await fs.mkdir(path.join(root, 'deploy', 'oceanbase'), { recursive: true });
-  await fs.writeFile(path.join(root, 'deploy', 'docker-compose.yml'), 'services: {}\n');
-
-  const paths = await validateBundle(profile, root, ['backend', 'gateway', 'frontend', 'config']);
-  assert.equal(paths.serverJar, path.join(root, 'app', profile.backendArtifact));
-  assert.equal(paths.gatewayClasses, path.join(root, 'app', 'gateway-classes'));
-  assert.equal(paths.gatewayLib, path.join(root, 'app', 'gateway-lib'));
-  assert.equal(paths.frontendDist, path.join(root, 'app', 'frontend-dist'));
-  assert.equal(paths.composeFile, path.join(root, 'deploy', 'docker-compose.yml'));
-  assert.equal(paths.nginxDir, path.join(root, 'deploy', 'nginx'));
-  assert.equal(paths.oceanbaseDir, path.join(root, 'deploy', 'oceanbase'));
+  await writeBundle(root);
+  const profile = { product: 'demo-product', installDir: '/opt/demo', deployDir: '/opt/demo/deploy' };
+  const { artifacts } = await validateBundle(profile, root, ['server', 'site', 'config']);
+  const byKey = Object.fromEntries(artifacts.map((item) => [item.key, item]));
+  assert.equal(byKey['server-bin'].target, '/opt/demo/bin');
+  assert.equal(byKey['server-config'].target, '/opt/demo/config/app.yml');
+  assert.equal(byKey['web-dist'].target, '/opt/demo/deploy/site');
+  assert.equal(byKey['compose'].target, '/opt/demo/deploy/docker-compose.yml');
+  assert.deepEqual(artifacts.map((item) => item.key), ['server-bin', 'server-config', 'web-dist', 'compose', 'db-config']);
 });
 
-test('validateBundle 报告缺失文件', async () => {
+test('validateBundle 拒绝摘要不符的交付包', async () => {
   const root = await makeTempDir();
-  await assert.rejects(
-    validateBundle(makeProfile(), root, ['backend', 'frontend']),
-    (error) => error.code === 'BUNDLE_INCOMPLETE' && /app\/demo-server\.jar/.test(error.message)
-  );
+  await writeBundle(root);
+  await fs.writeFile(path.join(root, 'app/config/app.yml'), 'tampered\n');
+  const profile = { product: 'demo-product', installDir: '/opt/demo', deployDir: '/opt/demo/deploy' };
+  await assert.rejects(validateBundle(profile, root, ['server']), (error) => error.code === 'BUNDLE_SIZE_MISMATCH' || error.code === 'BUNDLE_DIGEST_MISMATCH');
 });
 
-test('validateBundle 拒绝不存在的目录', async () => {
-  await assert.rejects(validateBundle(makeProfile(), '/definitely/not/here', ['backend']), /更新包目录不存在/);
+test('validateBundle 拒绝不匹配的产品与不存在的目录', async () => {
+  const root = await makeTempDir();
+  await writeBundle(root);
+  const profile = { product: 'other-product', installDir: '/opt/demo', deployDir: '/opt/demo/deploy' };
+  await assert.rejects(validateBundle(profile, root, ['server']), (error) => error.code === 'PRODUCT_MISMATCH');
+  await assert.rejects(validateBundle({ ...profile, product: 'demo-product' }, '/definitely/not/here', ['server']), /更新包目录不存在/);
 });
 
 test('checkAppUpdate 比较版本并返回当前平台下载信息', async () => {

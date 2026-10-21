@@ -83,7 +83,16 @@ export {
 } from './commands/monitoring.js';
 
 export {
-  getDeploymentProfile,
   checkAppUpdate,
   installAppUpdate
 } from './commands/settings.js';
+
+export {
+  listProjects,
+  createProject,
+  updateProject,
+  deleteProject,
+  setActiveProject,
+  getActiveProjectContext,
+  activateProjectBundle
+} from './commands/projects.js';

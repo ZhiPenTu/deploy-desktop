@@ -25,8 +25,8 @@
     </div>
 
     <div v-if="activeStep === 0" class="step-card">
-      <h3>选择目标主机</h3>
-      <p class="desc">从已保存的主机中选择部署目标，连接信息将自动带入。</p>
+      <h3>确认部署目标</h3>
+      <p class="desc">当前项目决定目标主机与部署目录，切换项目请使用侧边栏或项目管理。</p>
       <el-alert
         v-if="connectionInventory.error"
         title="无法读取主机列表，请在主机管理中检查后重试。"
@@ -34,68 +34,36 @@
         :closable="false"
         show-icon
       />
-      <el-form label-width="110px" class="host-form" @submit.prevent>
+      <div v-if="!hasProject" class="project-empty">
+        <span class="empty-title">当前没有可用项目</span>
+        <span class="empty-hint">
+          一个项目对应一台主机、一个部署目录和一个制品源。新建项目后即可选择制品并部署。
+        </span>
+        <el-button type="primary" @click="emit('go-projects')">前往项目管理</el-button>
+      </div>
+      <el-form v-else label-width="110px" class="host-form" @submit.prevent>
+        <el-form-item label="项目">
+          <span>{{ projectName }}</span>
+        </el-form-item>
         <el-form-item label="目标主机">
           <div class="input-row">
-            <el-select
-              :model-value="config.activeHostId || undefined"
-              :loading="selectingHost"
-              :disabled="busy"
-              placeholder="请选择目标主机"
-              aria-label="目标主机"
-              @change="selectHost"
-            >
-              <el-option
-                v-for="host in connectionInventory.hosts"
-                :key="host.id"
-                :value="host.id"
-                :label="
-                  host.kind === 'local'
-                    ? host.name === '本机'
-                      ? '本机'
-                      : `${host.name}（本机）`
-                    : `${host.name}（${host.address}）`
-                "
-              />
-            </el-select>
-            <el-button :disabled="busy" @click="emit('go-hosts')"> 管理主机 </el-button>
+            <span>{{ targetLabel }}</span>
+            <el-button :disabled="busy" @click="emit('go-projects')">项目管理</el-button>
           </div>
         </el-form-item>
-        <template v-if="selectedHost">
-          <el-form-item label="连接信息">
-            <span>
-              {{ isRemote ? `${config.remoteUser}@${config.remoteHost}:${config.remotePort}` : '本机' }}
-            </span>
-          </el-form-item>
-          <el-form-item label="部署目录">
-            <el-input
-              v-model="config.installDir"
-              :disabled="busy"
-              placeholder="请输入目标主机上的绝对路径"
-              aria-label="部署目录"
-            />
-            <p class="field-hint">服务文件将写入此目录；增量更新应选择现有部署目录。</p>
-          </el-form-item>
-          <el-form-item v-if="isRemote" label="连接检查">
-            <div class="input-row wrap">
-              <el-button :loading="testingSsh" :disabled="busy" @click="testConnection"> 测试连接 </el-button>
-              <el-button :loading="settingKey" :disabled="busy" @click="setupAccess">
-                配置免密登录
-              </el-button>
-              <span v-if="sshMessage" :class="sshOk ? 'text-success' : 'text-danger'">
-                {{ sshMessage }}
-              </span>
-            </div>
-          </el-form-item>
-        </template>
+        <el-form-item label="部署目录">
+          <span class="path-text">{{ config.installDir || '未设置' }}</span>
+        </el-form-item>
+        <el-form-item v-if="isRemote" label="连接检查">
+          <div class="input-row wrap">
+            <el-button :loading="testingSsh" :disabled="busy" @click="testConnection"> 测试连接 </el-button>
+            <el-button :loading="settingKey" :disabled="busy" @click="setupAccess">配置免密登录</el-button>
+            <span v-if="sshMessage" :class="sshOk ? 'text-success' : 'text-danger'">{{ sshMessage }}</span>
+          </div>
+        </el-form-item>
       </el-form>
-      <el-empty
-        v-if="!connectionInventory.hosts.length"
-        description="暂无可选主机，请先在主机管理中添加"
-        :image-size="72"
-      />
       <div class="step-footer">
-        <span class="field-hint">{{ selectedHost ? `当前目标：${targetLabel}` : '请先选择主机' }}</span>
+        <span class="field-hint">{{ hasProject ? `当前目标：${targetLabel}` : '请先创建项目' }}</span>
         <el-button type="primary" :disabled="!hostReady || busy" @click="nextStep">
           下一步：检测环境
           <el-icon class="el-icon--right"><ArrowRight /></el-icon>
@@ -441,16 +409,19 @@
 </template>
 
 <script setup>
-import { ref, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { ArrowRight, Check, Loading } from '@element-plus/icons-vue';
 import ConfigDiffDialog from '../components/ConfigDiffDialog.vue';
 import WizardArtifactPicker from '../../artifacts/components/WizardArtifactPicker.vue';
 import { useDeploymentWizard } from '../composables/useDeploymentWizard.js';
 import { connectionInventory } from '../../connections/state.js';
+import { projectState } from '../../../config/project.js';
 import { safeText } from '../domain/errors.js';
 
 const props = defineProps({ connection: { type: Object, required: true } });
-const emit = defineEmits(['go-dashboard', 'go-images', 'go-artifacts', 'go-hosts', 'busy-change']);
+const emit = defineEmits(['go-dashboard', 'go-images', 'go-artifacts', 'go-projects', 'busy-change']);
+const hasProject = computed(() => Boolean(projectState.project?.id));
+const projectName = computed(() => projectState.project?.name || '');
 const config = props.connection;
 const configDiffOpen = ref(false);
 const configDiffService = ref('');
@@ -465,7 +436,6 @@ const {
   isRemote,
   targetLabel,
   hostReady,
-  selectingHost,
   testingSsh,
   settingKey,
   sshMessage,
@@ -502,7 +472,6 @@ const {
   stateLabel,
   artifactChosen,
   artifactPrepared,
-  selectHost,
   testConnection,
   setupAccess,
   checkEnvironment,
@@ -597,6 +566,37 @@ h3 {
   line-height: 1.65;
   margin-bottom: 22px;
 }
+.project-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 28px 20px;
+  border: 1px dashed var(--border-color);
+  border-radius: var(--radius-md);
+  text-align: center;
+  color: var(--text-muted);
+}
+
+.project-empty .empty-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.project-empty .empty-hint {
+  max-width: 520px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.path-text {
+  font-family: "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: var(--text-main);
+  overflow-wrap: anywhere;
+}
+
 .host-form {
   margin-top: 26px;
   max-width: 850px;

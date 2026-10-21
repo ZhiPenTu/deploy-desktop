@@ -333,13 +333,28 @@ fn expectations_for(images_dir: &Path) -> Vec<ImageExpectation> {
             .collect();
     }
 
-    super::profile::deployment_profile()
+    // 没有 images.json 时按交付包声明的镜像包核对文件名。
+    let Some(bundle) = images_dir
+        .parent()
+        .and_then(crate::commands::bundle::Bundle::load_optional)
+    else {
+        return Vec::new();
+    };
+    bundle
+        .descriptor
         .images
         .iter()
-        .map(|image| ImageExpectation {
-            file_name: image.file.clone(),
-            image_ref: image.image_ref.clone(),
-            file_present: images_dir.join(&image.file).is_file(),
+        .filter(|image| !image.bundle_file.trim().is_empty())
+        .filter_map(|image| {
+            let file_name = std::path::Path::new(image.bundle_file.trim())
+                .file_name()?
+                .to_string_lossy()
+                .to_string();
+            Some(ImageExpectation {
+                file_present: images_dir.join(&file_name).is_file(),
+                file_name,
+                image_ref: image.reference.clone(),
+            })
         })
         .collect()
 }
@@ -352,11 +367,20 @@ fn image_ref_for(images_dir: &Path, file_name: &str) -> Option<String> {
         return Some(entry.images.join("、"));
     }
 
-    super::profile::deployment_profile()
+    let bundle = images_dir
+        .parent()
+        .and_then(crate::commands::bundle::Bundle::load_optional)?;
+    bundle
+        .descriptor
         .images
         .iter()
-        .find(|image| image.file == file_name)
-        .map(|image| image.image_ref.clone())
+        .find(|image| {
+            std::path::Path::new(image.bundle_file.trim())
+                .file_name()
+                .map(|name| name.to_string_lossy() == file_name)
+                .unwrap_or(false)
+        })
+        .map(|image| image.reference.clone())
 }
 
 fn remote_images_dir(bundle_dir: &str) -> String {
@@ -471,7 +495,7 @@ fi
     files.sort_by(|a, b| a.name.cmp(&b.name));
     let total_bytes = files.iter().map(|file| file.size_bytes).sum();
 
-    let expectations = expectations_for(Path::new(&images_dir))
+    let expectations: Vec<ImageExpectation> = expectations_for(Path::new(&images_dir))
         .into_iter()
         .map(|expectation| ImageExpectation {
             file_present: files.iter().any(|file| file.name == expectation.file_name),
@@ -479,10 +503,9 @@ fi
         })
         .collect();
 
-    let missing_images: Vec<String> = super::profile::deployment_profile()
-        .images
+    let missing_images: Vec<String> = expectations
         .iter()
-        .map(|image| image.image_ref.clone())
+        .map(|expectation| expectation.image_ref.clone())
         .filter(|image_ref| !docker_images.iter().any(|image| image == image_ref))
         .collect();
 

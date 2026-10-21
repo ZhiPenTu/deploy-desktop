@@ -101,11 +101,13 @@ fn review_blocking(
 ) -> Result<DeploymentReview, String> {
     let root = fs::canonicalize(bundle_dir.trim())
         .map_err(|_| "无法访问交付包目录，请重新选择并解压制品".to_string())?;
-    let compose_path = ["deploy/docker-compose.lan.yml", "deploy/docker-compose.yml"]
-        .iter()
-        .find(|name| root.join(name).is_file())
-        .ok_or_else(|| "交付包缺少 Docker Compose 清单，请重新选择制品".to_string())?;
-    let path = resolve_bundle_file(&root, compose_path)?;
+    let bundle = crate::commands::bundle::Bundle::load(&root)?;
+    bundle.ensure_compatible()?;
+    let compose_path = bundle.descriptor.runtime.compose.trim().to_string();
+    if bundle.artifact_for_source(&compose_path).is_none() {
+        return Err("交付包未声明 Docker Compose 清单，请重新选择制品".to_string());
+    }
+    let path = resolve_bundle_file(&root, &compose_path)?;
     let desired = read_compose(&path)?;
     let services = parse_services(&desired)?;
     if services.is_empty() {
@@ -143,7 +145,7 @@ fn review_blocking(
     } else {
         inspect_local_target(Path::new(install), &images)?
     };
-    let mut review = compare(*compose_path, install, &desired, &services, &images, target)?;
+    let mut review = compare(&compose_path, install, &desired, &services, &images, target)?;
     review.image_check = if review.target_checked && review.docker_running {
         if remote.is_some() {
             "remote"
@@ -170,13 +172,13 @@ fn review_blocking(
     };
     let files = scan_image_files(&media);
     let manifest = super::image_manager::load_image_manifest(&media);
-    let profile = super::profile::deployment_profile();
+    let declared = super::remote_update::declared_images(&root);
     for image in &mut review.images {
         let (package, _) = match_tarball(
             &normalize_image_ref(&image.image_ref),
             &files,
             &manifest,
-            &profile.images,
+            &declared,
         );
         image.local_file = package.map(|(name, _)| name).unwrap_or_default();
     }

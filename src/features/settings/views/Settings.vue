@@ -68,6 +68,10 @@
         </div>
       </el-tab-pane>
 
+      <el-tab-pane label="项目管理" name="projects" lazy>
+        <ProjectManager />
+      </el-tab-pane>
+
       <el-tab-pane label="镜像设置" name="images" lazy>
         <ManifestPullPanel :connection="connection" />
 
@@ -122,19 +126,25 @@
 
         <div class="card-surface settings-card">
           <div class="card-title-bar">
-            <h3>当前部署配置</h3>
-            <span class="hint">来自主机管理、部署向导与制品中心的选择</span>
+            <h3>当前部署目标</h3>
+            <span class="hint">随当前项目变化</span>
           </div>
           <div class="info-grid">
+            <span class="info-label">当前项目</span>
+            <span class="info-value">{{ project?.name || '未选择项目' }}</span>
             <span class="info-label">部署方式</span>
             <span class="info-value">{{ isRemote ? '远程局域网部署' : '本机离线部署' }}</span>
             <span class="info-label">目标主机</span>
             <span class="info-value">{{ isRemote ? connection.remoteHost || '未填写' : '当前工作站' }}</span>
-            <span class="info-label">当前部署包</span>
+            <span class="info-label">部署目录</span>
+            <span class="info-value path-value">{{ connection.installDir || '未设置' }}</span>
+            <span class="info-label">交付包位置</span>
             <span class="info-value path-value">{{ connection.bundleDir || '未设置' }}</span>
+            <span class="info-label">交付包版本</span>
+            <span class="info-value">{{ project?.lastVersion || '未绑定' }}</span>
           </div>
           <p class="field-hint">
-            目标主机在主机管理中切换，部署方式在部署向导中选择，当前部署包在制品中心选择。
+            项目在「项目管理」中维护，交付包在制品中心选择；切换项目后部署向导、监控、日志与数据库都会使用新项目的主机与目录。
           </p>
         </div>
       </el-tab-pane>
@@ -156,6 +166,8 @@ import { selectLocalPath as open } from '../../../api/tauri.js';
 import ArtifactSourceEditor from '../../artifacts/components/ArtifactSourceEditor.vue';
 import ManifestPullPanel from '../../registry/components/ManifestPullPanel.vue';
 import UpdateChecker from '../components/UpdateChecker.vue';
+import ProjectManager from '../components/ProjectManager.vue';
+import { projectState } from '../../../config/project.js';
 import { deleteArtifactSource, listArtifactSources, getImageLibrarySettings, saveImageLibrarySettings } from '../../../api/tauri.js';
 
 const props = defineProps({
@@ -182,6 +194,7 @@ const defaultOfflineDir = ref('');
 const savingOfflineDir = ref(false);
 
 const isRemote = computed(() => props.connection.mode === 'remote');
+const project = computed(() => projectState.project);
 
 function isInUse(row) {
   const current = String(props.connection.bundleDir || '').trim();

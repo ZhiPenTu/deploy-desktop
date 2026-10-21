@@ -24,10 +24,10 @@ pub struct DbImportResult {
 
 #[tauri::command]
 pub fn check_oceanbase_status() -> Result<OceanBaseHealth, String> {
-    let profile = super::profile::deployment_profile();
-    let container = profile.database_container();
-    let client = profile.database.client.as_str();
-    let port_arg = format!("-P{}", profile.database.port);
+    let (profile, database) = super::profile::require_database()?;
+    let container = profile.container_name(&database.service_key);
+    let client = database.client.as_str();
+    let port_arg = format!("-P{}", database.port);
 
     // 检查容器运行状态
     let inspect_out = Command::new("docker")
@@ -94,14 +94,14 @@ pub fn check_oceanbase_status() -> Result<OceanBaseHealth, String> {
 
 #[tauri::command]
 pub fn import_oceanbase_sql(sql_file_path: String) -> Result<DbImportResult, String> {
-    let profile = super::profile::deployment_profile();
-    let container = profile.database_container();
-    let client = profile.database.client.as_str();
-    let port_arg = format!("-P{}", profile.database.port);
-    let database = profile.database.name.as_str();
+    let (profile, database) = super::profile::require_database()?;
+    let container = profile.container_name(&database.service_key);
+    let client = database.client.as_str();
+    let port_arg = format!("-P{}", database.port);
+    let database_name = database.name.as_str();
     let create_statement = format!(
         "CREATE DATABASE IF NOT EXISTS {} DEFAULT CHARACTER SET utf8mb4;",
-        database
+        database_name
     );
 
     let p = Path::new(&sql_file_path);
@@ -139,7 +139,7 @@ pub fn import_oceanbase_sql(sql_file_path: String) -> Result<DbImportResult, Str
             &port_arg,
             "-uroot",
             "--default-character-set=utf8mb4",
-            database,
+            database_name,
         ])
         .stdin(Stdio::from(file))
         .output();
@@ -181,13 +181,15 @@ pub fn import_oceanbase_sql(sql_file_path: String) -> Result<DbImportResult, Str
 }
 
 fn query_table_list() -> (usize, Vec<String>) {
-    let profile = super::profile::deployment_profile();
-    let container = profile.database_container();
-    let client = profile.database.client.as_str();
-    let port_arg = format!("-P{}", profile.database.port);
+    let Ok((profile, database)) = super::profile::require_database() else {
+        return (0, Vec::new());
+    };
+    let container = profile.container_name(&database.service_key);
+    let client = database.client.as_str();
+    let port_arg = format!("-P{}", database.port);
     let query = format!(
         "SELECT table_name FROM information_schema.tables WHERE table_schema='{}' ORDER BY table_name;",
-        profile.database.name
+        database.name
     );
     let out = Command::new("docker")
         .args([
@@ -218,10 +220,12 @@ fn query_table_list() -> (usize, Vec<String>) {
 }
 
 fn query_row_count(table_name: &str) -> usize {
-    let profile = super::profile::deployment_profile();
-    let container = profile.database_container();
-    let client = profile.database.client.as_str();
-    let port_arg = format!("-P{}", profile.database.port);
+    let Ok((profile, database)) = super::profile::require_database() else {
+        return 0;
+    };
+    let container = profile.container_name(&database.service_key);
+    let client = database.client.as_str();
+    let port_arg = format!("-P{}", database.port);
     let query = format!("SELECT count(*) FROM {};", table_name);
     let out = Command::new("docker")
         .args([
@@ -231,7 +235,7 @@ fn query_row_count(table_name: &str) -> usize {
             "-h127.0.0.1",
             &port_arg,
             "-uroot",
-            &profile.database.name,
+            &database.name,
             "-N",
             "-e",
             &query,

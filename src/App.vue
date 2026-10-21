@@ -1,6 +1,11 @@
 <template>
   <div class="app-layout" :class="{ 'platform-macos': isMacDesktop }">
-    <Sidebar :current-tab="currentTab" @update:tab="navigateTab" />
+    <Sidebar
+      :current-tab="currentTab"
+      :switching="switchingProject"
+      @update:tab="navigateTab"
+      @switch-project="handleSwitchProject"
+    />
 
     <div class="workspace">
       <Header
@@ -30,7 +35,7 @@
           @go-dashboard="navigateTab('dashboard')"
           @go-images="navigateTab('images')"
           @go-artifacts="navigateTab('artifacts')"
-          @go-hosts="navigateTab('hosts')"
+          @go-projects="openSettings('projects')"
         />
 
         <EnvCheck
@@ -84,7 +89,11 @@
 import { computed, ref } from 'vue';
 import { ElMessage } from 'element-plus';
 import { isDesktopApp } from './api/tauri.js';
-import { connection, connectionInventory, hostById } from './features/connections/state.js';
+import {
+  connection,
+  hostById,
+  switchActiveProject
+} from './features/connections/state.js';
 import Header from './components/layout/Header.vue';
 import Sidebar from './components/layout/Sidebar.vue';
 import Credentials from './features/connections/views/Credentials.vue';
@@ -97,7 +106,7 @@ import ArtifactCenter from './features/artifacts/views/ArtifactCenter.vue';
 import Settings from './features/settings/views/Settings.vue';
 import McpService from './features/mcp/views/McpService.vue';
 import LogViewer from './features/monitoring/views/LogViewer.vue';
-import { getDefaultContainer } from './config/cluster.js';
+
 
 const pages = {
   credentials: { title: '凭证管理', group: '连接' },
@@ -120,13 +129,14 @@ function openSettings(section) {
 }
 const isMacDesktop = isDesktopApp() && /mac os x/i.test(navigator.userAgent);
 const wizardBusy = ref(false);
+const switchingProject = ref(false);
 const selectedStatusHostId = ref('');
 const selectedStatusHost = computed(() => hostById(selectedStatusHostId.value));
 function navigateTab(tab) {
   if (wizardBusy.value) { ElMessage.warning('当前操作正在进行，请等待完成后切换页面。'); return; }
   currentTab.value = tab;
 }
-const activeLogContainer = ref(getDefaultContainer());
+const activeLogContainer = ref('');
 const currentPage = computed(() => pages[currentTab.value] || pages.wizard);
 
 const handleViewLog = (containerName) => {
@@ -134,9 +144,22 @@ const handleViewLog = (containerName) => {
   currentTab.value = 'logs';
 };
 
+async function handleSwitchProject(id) {
+  if (!id || wizardBusy.value || switchingProject.value) return;
+  switchingProject.value = true;
+  try {
+    await switchActiveProject(id);
+    activeLogContainer.value = '';
+    ElMessage.success('已切换项目');
+  } catch (error) {
+    ElMessage.error(String(error));
+  } finally {
+    switchingProject.value = false;
+  }
+}
+
 const handleQuickCheck = () => {
-  const targetHost = hostById(selectedStatusHostId.value) ||
-    hostById(connectionInventory.activeHostId);
+  const targetHost = hostById(selectedStatusHostId.value) || hostById(connection.activeHostId);
   selectedStatusHostId.value = targetHost?.id || '';
   navigateTab('host-status');
 };

@@ -1,13 +1,34 @@
-export const componentLabels = Object.freeze({
-  image: '镜像', backend: '后端服务', gateway: '网关服务', frontend: '前端页面', config: '部署配置'
-});
+export const IMAGE_COMPONENT = 'image';
+
+/** 可更新组件全部来自交付包声明，客户端不内置组件名称。 */
+export function planComponents(plan) {
+  const declared = Array.isArray(plan?.components) ? plan.components : [];
+  const result = [];
+  for (const item of declared) {
+    const key = String(item?.key || '').trim();
+    if (!key || key === IMAGE_COMPONENT || result.some((entry) => entry.key === key)) continue;
+    result.push({ key, label: String(item?.label || '').trim() || key });
+  }
+  return result;
+}
+
+export function hasBundledImages(plan) {
+  return (Array.isArray(plan?.images) ? plan.images : [])
+    .some((image) => String(image?.bundleFile || '').trim());
+}
+
+export function componentOptions(plan) {
+  const options = planComponents(plan).map(({ key, label }) => ({ key, label }));
+  if (hasBundledImages(plan)) options.push({ key: IMAGE_COMPONENT, label: '随包镜像' });
+  return options;
+}
+
+export function componentLabels(plan) {
+  return Object.fromEntries(componentOptions(plan).map(({ key, label }) => [key, label]));
+}
 
 export function deploymentComponents(plan) {
-  const declared = Array.isArray(plan?.components) ? plan.components : [];
-  const keys = plan?.mode === 'image'
-    ? ['image', 'config']
-    : declared.length ? declared : ['backend', 'gateway', 'frontend', 'config'];
-  return [...new Set(keys)].filter((key) => Object.hasOwn(componentLabels, key) && (plan?.mode !== 'file' || key !== 'image'));
+  return componentOptions(plan).map(({ key }) => key);
 }
 
 export function servicesAreReady(review) {

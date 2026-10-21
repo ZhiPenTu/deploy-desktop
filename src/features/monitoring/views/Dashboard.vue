@@ -8,26 +8,8 @@
 
       <div class="header-actions">
         <div class="host-switch">
-          <span class="host-switch-label">监控主机</span>
-          <el-select
-            :model-value="activeHostId || undefined"
-            :loading="switchingHost"
-            :disabled="operating || switchingHost || !hosts.length"
-            placeholder="暂无可用主机"
-            class="host-select"
-            aria-label="监控主机"
-            @change="handleHostChange"
-          >
-            <el-option
-              v-for="host in hosts"
-              :key="host.id"
-              :value="host.id"
-              :label="hostOptionLabel(host)"
-            />
-          </el-select>
-          <el-button v-if="!hosts.length" text type="primary" @click="emit('go-hosts')">
-            管理主机
-          </el-button>
+          <span class="host-switch-label">监控目标</span>
+          <span class="host-name">{{ targetLabel }}</span>
         </div>
         <span class="action-divider" aria-hidden="true"></span>
         <el-button type="primary" :loading="operating" @click="handleStackAction('up')">
@@ -51,44 +33,23 @@
 
     <el-alert v-if="readError" :title="readError" type="error" :closable="false" show-icon class="read-error" />
 
-    <div class="endpoint-grid">
-      <a
+    <div v-if="!serviceCards.length" class="endpoint-empty card-surface">
+      <span class="cluster-empty-title">当前项目还没有可展示的服务端口</span>
+      <span class="cluster-empty-hint">选择并绑定交付包后，这里会显示交付包声明的服务地址。</span>
+    </div>
+    <div v-else class="endpoint-grid">
+      <div
+        v-for="service in serviceCards"
+        :key="service.serviceKey"
         class="endpoint-card"
         :class="{ empty: !targetIp }"
-        :href="targetIp ? `http://${targetIp}:18080` : undefined"
-        target="_blank"
       >
-        <div class="endpoint-top">
-          <span class="endpoint-icon"><el-icon><Monitor /></el-icon></span>
-          <el-icon v-if="targetIp" class="endpoint-arrow"><TopRight /></el-icon>
-        </div>
-        <div class="endpoint-label">Web 控制台</div>
-        <div class="endpoint-value">{{ targetIp ? `${targetIp}:18080` : '未填写目标主机' }}</div>
-        <div class="endpoint-desc">端口 18080 · 浏览器访问管理界面</div>
-      </a>
-
-      <a
-        class="endpoint-card"
-        :class="{ empty: !targetIp }"
-        :href="targetIp ? `http://${targetIp}:8000` : undefined"
-        target="_blank"
-      >
-        <div class="endpoint-top">
-          <span class="endpoint-icon"><el-icon><Link /></el-icon></span>
-          <el-icon v-if="targetIp" class="endpoint-arrow"><TopRight /></el-icon>
-        </div>
-        <div class="endpoint-label">Spring Boot 接口</div>
-        <div class="endpoint-value">{{ targetIp ? `${targetIp}:8000` : '未填写目标主机' }}</div>
-        <div class="endpoint-desc">端口 8000 · 主服务 HTTP 接口</div>
-      </a>
-
-      <div class="endpoint-card" :class="{ empty: !targetIp }">
         <div class="endpoint-top">
           <span class="endpoint-icon"><el-icon><Connection /></el-icon></span>
         </div>
-        <div class="endpoint-label">设备通信 UDP</div>
-        <div class="endpoint-value">{{ targetIp ? `${targetIp}:20000` : '未填写目标主机' }}</div>
-        <div class="endpoint-desc">端口 20000 · 网关接收设备上报</div>
+        <div class="endpoint-label">{{ service.label }}</div>
+        <div class="endpoint-value">{{ targetIp ? `${targetIp}:${service.port}` : '未填写目标主机' }}</div>
+        <div class="endpoint-desc">{{ service.description || `端口 ${service.port} · ${service.protocol}` }}</div>
       </div>
 
       <div class="endpoint-card health-card" :class="healthClass">
@@ -146,7 +107,7 @@
         </div>
 
         <div class="c-foot">
-          <el-button size="small" text :disabled="switchingHost" @click="handleRestartService(c.service_key)">
+          <el-button size="small" text :disabled="operating" @click="handleRestartService(c.service_key)">
             重启服务
           </el-button>
           <el-button size="small" text type="primary" @click="$emit('view-log', c.name)">
@@ -171,12 +132,9 @@ import { createRequestScope } from '../../../shared/async/requestScope.js';
 import {
   CircleCheck,
   Connection,
-  Link,
-  Monitor,
   Platform,
   Refresh,
   RefreshRight,
-  TopRight,
   VideoPause,
   VideoPlay
 } from '@element-plus/icons-vue';
@@ -187,8 +145,9 @@ import {
   getRemoteContainersStatus,
   remoteDockerComposeAction
 } from '../../../api/tauri.js';
-import { defaultCluster } from '../../../config/cluster.js';
-import { connectionInventory, useManagedHost } from '../../connections/state.js';
+import { clusterServices } from '../../../config/cluster.js';
+import { projectState } from '../../../config/project.js';
+import { hostById, isLocalHost } from '../../connections/state.js';
 
 const props = defineProps({
   connection: {
@@ -197,32 +156,32 @@ const props = defineProps({
   }
 });
 
-const emit = defineEmits(['view-log', 'go-hosts']);
+const emit = defineEmits(['view-log']);
 
 const isRemote = computed(() => props.connection.mode === 'remote');
 const targetIp = computed(() => (isRemote.value ? props.connection.remoteHost : '127.0.0.1'));
-const deployDir = computed(() => props.connection.deployDir || '/opt/deploy');
-const activeHostId = computed(() => props.connection.activeHostId);
-const hosts = computed(() => connectionInventory.hosts);
+const deployDir = computed(() => props.connection.deployDir || props.connection.installDir);
+const services = computed(() => clusterServices());
+const serviceCards = computed(() => services.value.filter((service) => service.port).slice(0, 3));
+const targetLabel = computed(() => {
+  const host = hostById(projectState.project?.hostId || '');
+  if (!host) return '尚未配置主机';
+  return isLocalHost(host) ? '本机' : `${host.name}（${host.address}）`;
+});
 
 const loading = ref(false);
 const operating = ref(false);
-const switchingHost = ref(false);
+
 const containers = ref([]);
 const readError = ref('');
 const statusRequests = createRequestScope();
 onScopeDispose(() => statusRequests.dispose());
 
-const hostOptionLabel = (host) => {
-  if (host.kind === 'local') return host.name === '本机' ? '本机' : `${host.name}（本机）`;
-  return `${host.name}（${host.address}）`;
-};
-
-const roleMap = Object.fromEntries(
-  defaultCluster.services.map((service) => [service.serviceKey, service.description])
+const roleMap = computed(() =>
+  Object.fromEntries(services.value.map((service) => [service.serviceKey, service.description]))
 );
 
-const getRoleDesc = (key) => roleMap[key] || '系统组件';
+const getRoleDesc = (key) => roleMap.value[key] || '系统组件';
 
 const runningCount = computed(() => containers.value.filter((c) => c.state === 'running').length);
 const healthyCount = computed(
@@ -341,24 +300,6 @@ const handleRestartService = async (serviceKey) => {
   }
 };
 
-const handleHostChange = async (id) => {
-  if (!id || id === activeHostId.value) return;
-  statusRequests.begin();
-  switchingHost.value = true;
-  loading.value = false;
-  containers.value = [];
-  readError.value = '';
-  try {
-    await useManagedHost(id);
-    await fetchStatus();
-  } catch (e) {
-    ElMessage.error('切换监控主机失败，请检查主机配置后重试。');
-    await fetchStatus();
-  } finally {
-    switchingHost.value = false;
-  }
-};
-
 onMounted(fetchStatus);
 </script>
 
@@ -388,8 +329,20 @@ onMounted(fetchStatus);
   color: var(--text-muted);
 }
 
-.host-select {
-  width: 210px;
+.host-name {
+  font-size: 12.5px;
+  color: var(--text-main);
+}
+
+.endpoint-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: center;
+  justify-content: center;
+  min-height: 120px;
+  margin-bottom: 28px;
+  text-align: center;
 }
 
 .action-divider {

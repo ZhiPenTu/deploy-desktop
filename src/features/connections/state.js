@@ -1,13 +1,23 @@
 import { reactive } from 'vue';
-import { profileState } from '../../config/profile.js';
+import {
+  projectState,
+  bindProjectBundle,
+  refreshProjectContext,
+  switchProject
+} from '../../config/project.js';
 import { listConnectionInventory, setActiveManagedHost } from '../../api/tauri.js';
 
+/**
+ * 连接信息全部由当前项目派生：项目决定主机与部署目录，
+ * 交付包决定 Compose 位置，页面不再直接读取本机部署配置。
+ */
 export const connection = reactive({
   mode: 'remote',
-  bundleDir: profileState.bundleDir,
-  mediaDir: profileState.mediaDir || profileState.bundleDir,
-  deployDir: profileState.deployDir,
-  installDir: profileState.installDir,
+  projectId: '',
+  bundleDir: '',
+  mediaDir: '',
+  deployDir: '',
+  installDir: '',
   remoteHost: '',
   remotePort: 22,
   remoteUser: 'root',
@@ -24,21 +34,6 @@ export const connectionInventory = reactive({
   loading: false,
   error: ''
 });
-
-export function syncConnectionFromProfile() {
-  if (profileState.bundleDir) {
-    connection.bundleDir = profileState.bundleDir;
-  }
-  if (profileState.mediaDir) {
-    connection.mediaDir = profileState.mediaDir;
-  }
-  if (profileState.deployDir) {
-    connection.deployDir = profileState.deployDir;
-  }
-  if (profileState.installDir) {
-    connection.installDir = profileState.installDir;
-  }
-}
 
 export function credentialById(id) {
   return connectionInventory.credentials.find((credential) => credential.id === id) || null;
@@ -58,34 +53,57 @@ export function credentialLabel(id) {
   return `${credential.name} · ${credential.username}`;
 }
 
-function applyManagedHostToConnection(host) {
-  if (!host) return;
+function clearHost(connectionState) {
+  connectionState.activeHostId = '';
+  connectionState.mode = 'local';
+  connectionState.remoteHost = '';
+  connectionState.remotePort = 22;
+  connectionState.remoteUser = 'root';
+  connectionState.remoteKey = '';
+  connectionState.remoteCredentialId = '';
+  connectionState.remotePassword = '';
+}
+
+function applyHost(hostId) {
+  const host = hostById(hostId);
+  if (!host) {
+    clearHost(connection);
+    return;
+  }
   connection.activeHostId = host.id;
   if (isLocalHost(host)) {
-    connection.mode = 'local';
-    connection.remoteHost = '';
-    connection.remotePort = 22;
-    connection.remoteUser = 'root';
-    connection.remoteKey = '';
-    connection.remoteCredentialId = '';
-    connection.remotePassword = '';
-  } else {
-    const credential = credentialById(host.credentialId);
-    connection.mode = 'remote';
-    connection.remoteHost = host.address;
-    connection.remotePort = host.port || 22;
-    connection.remoteUser = credential?.username || connection.remoteUser || 'root';
-    connection.remoteKey = credential?.privateKeyPath || '';
-    connection.remoteCredentialId = host.credentialId;
-    connection.remotePassword = '';
+    clearHost(connection);
+    connection.activeHostId = host.id;
+    return;
   }
-  if (host.deployDir) {
-    connection.deployDir = host.deployDir;
-    connection.installDir = host.deployDir;
-  } else {
-    if (profileState.deployDir) connection.deployDir = profileState.deployDir;
-    if (profileState.installDir) connection.installDir = profileState.installDir;
+  const credential = credentialById(host.credentialId);
+  connection.mode = 'remote';
+  connection.remoteHost = host.address;
+  connection.remotePort = host.port || 22;
+  connection.remoteUser = credential?.username || connection.remoteUser || 'root';
+  connection.remoteKey = credential?.privateKeyPath || '';
+  connection.remoteCredentialId = host.credentialId;
+  connection.remotePassword = '';
+}
+
+/** 按当前项目刷新连接：主机、部署目录与交付包目录。 */
+export function syncConnectionFromProject() {
+  const project = projectState.project;
+  if (!project?.id) {
+    connection.projectId = '';
+    connection.bundleDir = '';
+    connection.mediaDir = '';
+    connection.deployDir = '';
+    connection.installDir = '';
+    clearHost(connection);
+    return;
   }
+  connection.projectId = project.id;
+  connection.installDir = project.installDir || '';
+  connection.deployDir = projectState.deployDir || project.installDir || '';
+  connection.bundleDir = project.lastBundleDir || '';
+  connection.mediaDir = project.lastBundleDir || '';
+  applyHost(project.hostId);
 }
 
 export function applyConnectionInventory(inventory) {
@@ -96,19 +114,7 @@ export function applyConnectionInventory(inventory) {
   connectionInventory.activeHostId = inventory?.activeHostId || '';
   connectionInventory.error = '';
 
-  const activeHost = hostById(connectionInventory.activeHostId);
-  if (activeHost) {
-    applyManagedHostToConnection(activeHost);
-  } else {
-    connection.activeHostId = '';
-    connection.mode = 'local';
-    connection.remoteHost = '';
-    connection.remotePort = 22;
-    connection.remoteUser = 'root';
-    connection.remotePassword = '';
-    connection.remoteKey = '';
-    connection.remoteCredentialId = '';
-  }
+  applyHost(projectState.project?.hostId || '');
 }
 
 export async function refreshConnectionInventory() {
@@ -131,6 +137,28 @@ export async function initConnectionInventory() {
   } catch (error) {
     console.warn('读取凭证与主机配置失败，继续使用当前连接设置', error);
   }
+}
+
+/** 切换当前项目，并让所有页面跟随新的主机与部署目录。 */
+export async function switchActiveProject(id) {
+  const context = await switchProject(id);
+  syncConnectionFromProject();
+  await refreshConnectionInventory();
+  return context;
+}
+
+/** 项目设置变化后重新读取项目与连接，不改变交付包绑定。 */
+export async function reloadProjectState() {
+  await refreshProjectContext();
+  syncConnectionFromProject();
+  return projectState;
+}
+
+/** 将交付包绑定到当前项目，供部署向导与制品中心共用。 */
+export async function applyProjectBundle(bundleDir, version) {
+  await bindProjectBundle(bundleDir, version);
+  syncConnectionFromProject();
+  return projectState.bundle;
 }
 
 export async function useManagedHost(id) {

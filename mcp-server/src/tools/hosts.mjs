@@ -75,7 +75,7 @@ export function registerHostsTools(register) {
 
   register('deploy_env_check', {
     title: '环境自检',
-    description: '检查 CPU、内存、磁盘、Docker、Compose 与 profile 中声明的端口占用。',
+    description: '检查 CPU、内存、磁盘、Docker、Compose 与交付包声明的端口占用。',
     inputSchema: {
       target: targetSchema,
       ...remoteFields,

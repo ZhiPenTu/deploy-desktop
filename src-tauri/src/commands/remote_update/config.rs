@@ -141,13 +141,13 @@ pub(crate) fn inspect_bundle_config_blocking(
     }
 
     let manifest = crate::commands::image_manager::load_image_manifest(&image_dir_path);
-    let profile = crate::commands::profile::deployment_profile();
+    let declared = declared_images(&root);
     let files = scan_image_files(&image_dir_path);
 
     let manifest_label = if manifest.iter().any(|entry| !entry.images.is_empty()) {
         "images.json"
-    } else if !profile.images.is_empty() {
-        "profile"
+    } else if !declared.is_empty() {
+        "bundle"
     } else {
         "none"
     };
@@ -171,7 +171,7 @@ pub(crate) fn inspect_bundle_config_blocking(
             continue;
         }
         let (local_file, match_source) =
-            match_tarball(&match_ref, &files, &manifest, &profile.images);
+            match_tarball(&match_ref, &files, &manifest, &declared);
         let docker_present = image_present(&normalized_tags, &match_ref);
         let status = compose_image_status(local_file.is_some(), docker_present, &image_check);
         images.push(ComposeImageView {
@@ -369,11 +369,36 @@ pub(in crate::commands) fn scan_image_files(dir: &Path) -> Vec<(String, u64)> {
 
 /// 镜像包匹配顺序：交付包清单 images.json → 部署配置里的文件名映射 → 文件名推断。
 /// 推断只做兜底，界面会标注来源，避免把猜测当成清单结论。
+/// 交付包声明的镜像包：仅随包分发的镜像才有本地文件名。
+#[derive(Debug, Clone)]
+pub(in crate::commands) struct DeclaredImage {
+    pub file: String,
+    pub reference: String,
+}
+
+pub(in crate::commands) fn declared_images(bundle_dir: &Path) -> Vec<DeclaredImage> {
+    let Some(bundle) = crate::commands::bundle::Bundle::load_optional(bundle_dir) else {
+        return Vec::new();
+    };
+    bundle
+        .descriptor
+        .images
+        .iter()
+        .map(|image| DeclaredImage {
+            file: Path::new(image.bundle_file.trim())
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            reference: image.reference.clone(),
+        })
+        .collect()
+}
+
 pub(in crate::commands) fn match_tarball(
     match_ref: &str,
     files: &[(String, u64)],
     manifest: &[crate::commands::image_manager::ImageManifestEntry],
-    profile_images: &[crate::commands::profile::ImageProfile],
+    declared: &[DeclaredImage],
 ) -> (Option<(String, u64)>, &'static str) {
     let find_file = |name: &str| files.iter().find(|(file, _)| file == name).cloned();
 
@@ -389,10 +414,13 @@ pub(in crate::commands) fn match_tarball(
         }
     }
 
-    for image in profile_images {
-        if normalize_image_ref(&image.image_ref) == match_ref {
+    for image in declared {
+        if image.file.trim().is_empty() {
+            continue;
+        }
+        if normalize_image_ref(&image.reference) == match_ref {
             if let Some(hit) = find_file(&image.file) {
-                return (Some(hit), "profile");
+                return (Some(hit), "bundle");
             }
         }
     }

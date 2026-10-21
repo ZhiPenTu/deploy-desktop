@@ -645,7 +645,11 @@ fn bundle_has_version(dir: &Path, version: &str) -> bool {
     fs::read_to_string(dir.join("bundle.json"))
         .ok()
         .and_then(|content| serde_json::from_str::<Value>(&content).ok())
-        .is_some_and(|meta| json_str(&meta, "version").trim() == version.trim())
+        .is_some_and(|meta| {
+            meta.get("metadata")
+                .map(|metadata| json_str(metadata, "version").trim() == version.trim())
+                .unwrap_or(false)
+        })
 }
 
 fn release_cache_path(config_root: &Path) -> PathBuf {
@@ -1222,70 +1226,26 @@ fn is_safe_entry(name: &str) -> bool {
         .any(|part| part == "..")
 }
 
-fn has_image_archive(dir: &Path) -> bool {
-    fs::read_dir(dir)
-        .map(|entries| {
-            entries.flatten().any(|entry| {
-                let name = entry
-                    .file_name()
-                    .to_string_lossy()
-                    .to_lowercase();
-                entry.path().is_file()
-                    && (name.ends_with(".tar")
-                        || name.ends_with(".tgz")
-                        || name.ends_with(".tar.gz"))
-            })
-        })
-        .unwrap_or(false)
-}
-
-fn validate_layout(dir: &Path, backend_artifact: &str) -> Result<(String, String), String> {
-    let bundle_json = dir.join("bundle.json");
-    if !bundle_json.is_file() {
+fn validate_layout(dir: &Path) -> Result<(String, String), String> {
+    if !dir.join("bundle.json").is_file() {
         return Err("构建物缺少 bundle.json，可能不是 deploy-desktop 交付包".to_string());
     }
-    let text = fs::read_to_string(&bundle_json).map_err(|e| format!("读取 bundle.json 失败：{e}"))?;
-    let meta: Value = serde_json::from_str(&text).map_err(|e| format!("bundle.json 格式无效：{e}"))?;
-    let version = validate_artifact_version(json_str(&meta, "version"))?;
-
-    let mut missing = Vec::new();
-    // 两种交付形态都接受：
-    //   - 文件模式：app/ + deploy/（逐文件替换 jar、classes、lib、dist）
-    //   - 镜像模式：images/ + deploy/（docker load 镜像后由 compose 直接使用）
-    let image_mode = super::remote_update::inspect_bundle_layout(dir.to_string_lossy().to_string())?.mode == "image";
-    if !image_mode {
-        if !dir.join("app").join(backend_artifact).is_file() {
-            missing.push(format!("app/{backend_artifact}"));
-        }
-        if !dir.join("app/frontend-dist/index.html").is_file() {
-            missing.push("app/frontend-dist/index.html".to_string());
-        }
-    } else if !has_image_archive(&dir.join("images")) {
-        missing.push("images/*.tar.gz".to_string());
-    }
-    if !dir.join("deploy/docker-compose.yml").is_file() {
-        missing.push("deploy/docker-compose.yml".to_string());
-    }
-    if !missing.is_empty() {
-        return Err(format!("交付包缺少必要文件：{}", missing.join("、")));
-    }
-
-    Ok((
-        version.to_string(),
-        json_str(&meta, "commitShort").to_string(),
-    ))
+    // 结构、文件清单与摘要都在描述符里校验，客户端不再假设固定目录结构。
+    let bundle = crate::commands::bundle::Bundle::load(dir)?;
+    bundle.verify_payload()?;
+    let version = validate_artifact_version(bundle.version())?.to_string();
+    Ok((version, bundle.metadata().commit_short.clone()))
 }
 
 fn install_artifact_archive(
     archive: &Path,
     dest: &Path,
     version: &str,
-    backend_artifact: &str,
 ) -> Result<ArtifactBundle, String> {
     let staged = dest.with_file_name(format!(".unpack-{}-{}", std::process::id(), now_millis()));
     let result = (|| {
         let files = safe_extract(archive, &staged)?;
-        let (bundle_version, commit) = validate_layout(&staged, backend_artifact)?;
+        let (bundle_version, commit) = validate_layout(&staged)?;
         if bundle_version != version {
             return Err(format!("交付包版本不匹配：选择的版本为 {version}，包内版本为 {bundle_version}，请重新选择或重新构建"));
         }
@@ -1343,7 +1303,6 @@ pub fn download_artifact(
     };
     validate_download_url(&download_url, &source)?;
 
-    let profile = crate::commands::profile::deployment_profile();
     let version = validate_artifact_version(&release.version)?.to_string();
     if source.kind == "url" && url_release(&source)?.version != version {
         return Err("制品源版本已变更，请刷新列表后重新选择".to_string());
@@ -1380,7 +1339,7 @@ pub fn download_artifact(
         downloaded: size,
         total: size,
     });
-    let installed = install_artifact_archive(&temp, &dest, &version, &profile.backend_artifact);
+    let installed = install_artifact_archive(&temp, &dest, &version);
     let _ = fs::remove_file(&temp);
     let mut bundle = installed?;
     sources[index].last_version = bundle.version.clone();
@@ -1444,7 +1403,7 @@ fn inspect_local_tree(dir: &Path, depth: usize) -> Result<(usize, u64), String> 
     Ok((count, bytes))
 }
 
-fn prepare_local_bundle(path: &Path, cache_root: &Path, backend: &str) -> Result<ArtifactBundle, String> {
+fn prepare_local_bundle(path: &Path, cache_root: &Path) -> Result<ArtifactBundle, String> {
     let meta = fs::symlink_metadata(path).map_err(|e| format!("读取所选制品失败：{e}"))?;
     if meta.file_type().is_symlink() {
         return Err("请选择交付包原文件或目录，不能使用符号链接".to_string());
@@ -1476,8 +1435,7 @@ fn prepare_local_bundle(path: &Path, cache_root: &Path, backend: &str) -> Result
     let dir = extracted.as_deref().unwrap_or(&source);
     let result = (|| {
         let (files, bytes) = inspect_local_tree(dir, 0)?;
-        let (version, commit) = validate_layout(dir, backend)?;
-        super::remote_update::validate_install_bundle(&dir.to_string_lossy())?;
+        let (version, commit) = validate_layout(dir)?;
         Ok(ArtifactBundle {
             dir: dir.to_string_lossy().to_string(), version, commit,
             md5: String::new(), size_bytes: bytes, files,
@@ -1495,8 +1453,7 @@ pub async fn prepare_local_artifact_bundle(app: AppHandle, path: String) -> Resu
         return Err("请先选择交付包文件或目录".to_string());
     }
     let cache_root = config_dir(&app)?.join("bundles/local");
-    let backend = crate::commands::profile::deployment_profile().backend_artifact.clone();
-    tauri::async_runtime::spawn_blocking(move || prepare_local_bundle(Path::new(path.trim()), &cache_root, &backend))
+    tauri::async_runtime::spawn_blocking(move || prepare_local_bundle(Path::new(path.trim()), &cache_root))
         .await.map_err(|e| format!("制品准备失败，请重试：{e}"))?
 }
 
@@ -1546,6 +1503,7 @@ pub fn delete_local_bundle(app: AppHandle, id: String) -> Result<LocalBundleRemo
     sources[index].last_version.clear();
     sources[index].last_bundle_dir.clear();
     store_sources(&app, &sources)?;
+    super::projects::clear_bundle_dir(&config_root.join("bundles").join(&id));
 
     Ok(removal)
 }
@@ -1580,8 +1538,7 @@ pub fn open_artifact_bundle(app: AppHandle, id: String) -> Result<ArtifactBundle
         return Err(format!("本地交付包目录不存在：{}", dir.display()));
     }
 
-    let profile = crate::commands::profile::deployment_profile();
-    let (version, commit) = validate_layout(&dir, &profile.backend_artifact)?;
+    let (version, commit) = validate_layout(&dir)?;
 
     Ok(ArtifactBundle {
         dir: dir.to_string_lossy().to_string(),
@@ -1627,8 +1584,7 @@ pub fn open_artifact_bundle_version(
         return Err(format!("版本 {version} 尚未下载到本机"));
     }
 
-    let profile = crate::commands::profile::deployment_profile();
-    let (bundle_version, commit) = validate_layout(&dir, &profile.backend_artifact)?;
+    let (bundle_version, commit) = validate_layout(&dir)?;
     if bundle_version != version {
         return Err("本地交付包版本与所选版本不一致，请重新下载该版本".to_string());
     }
@@ -1676,32 +1632,94 @@ pub fn open_external_url(url: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    /// 按目录实际内容生成 v2 bundle.json，避免测试手写文件摘要。
+    fn write_v2_bundle(dir: &Path, version: &str) {
+        let mut files: Vec<serde_json::Value> = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(current) = stack.pop() {
+            let Ok(entries) = fs::read_dir(&current) else { continue };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let relative = path.strip_prefix(dir).unwrap().to_string_lossy().to_string();
+                if relative == "bundle.json" {
+                    continue;
+                }
+                let bytes = fs::read(&path).unwrap();
+                files.push(json!({
+                    "path": relative,
+                    "size": bytes.len(),
+                    "sha256": crate::commands::bundle::sha256_hex(&bytes),
+                }));
+            }
+        }
+        files.sort_by(|left, right| {
+            left["path"].as_str().unwrap_or_default().cmp(right["path"].as_str().unwrap_or_default())
+        });
+        let manifest = json!({
+            "apiVersion": "deploy.desktop/bundle/v2",
+            "kind": "DeploymentBundle",
+            "metadata": { "product": "demo", "version": version, "commitShort": "test",
+                "commit": "", "branch": "main", "builtAt": "" },
+            "runtime": { "type": "compose", "compose": "deploy/docker-compose.yml",
+                "containerPrefix": "demo", "services": [] },
+            "components": [{ "key": "app", "label": "应用", "artifacts": ["jar", "dist"], "services": [] }],
+            "artifacts": [
+                { "key": "jar", "source": "app/server.jar", "root": "install",
+                  "path": "server/server.jar", "type": "file" },
+                { "key": "dist", "source": "app/frontend-dist", "root": "deploy",
+                  "path": "frontend_dist", "type": "dir" },
+                { "key": "compose", "source": "deploy/docker-compose.yml", "root": "deploy",
+                  "path": "docker-compose.yml", "type": "file" }
+            ],
+            "images": [],
+            "plan": { "steps": [] },
+            "files": files,
+        });
+        fs::write(dir.join("bundle.json"), serde_json::to_string(&manifest).unwrap()).unwrap();
+    }
 
     #[test]
     fn local_artifact_archive_is_prepared_without_overwriting_source() {
         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
         let root = std::env::temp_dir().join(format!("local-artifact-{}-{stamp}", std::process::id()));
         let source = root.join("source");
-        let backend = &crate::commands::profile::deployment_profile().backend_artifact;
         fs::create_dir_all(source.join("app/frontend-dist")).unwrap();
         fs::create_dir_all(source.join("deploy")).unwrap();
-        fs::write(source.join("bundle.json"), r#"{"version":"2","commitShort":"test","components":["backend","frontend","config"]}"#).unwrap();
-        fs::write(source.join("app").join(backend), "artifact").unwrap();
+        fs::write(source.join("app/server.jar"), "artifact").unwrap();
         fs::write(source.join("app/frontend-dist/index.html"), "frontend").unwrap();
         fs::write(source.join("deploy/docker-compose.yml"), "services: {}\n").unwrap();
+        write_v2_bundle(&source, "2");
         let archive = root.join("bundle.tgz");
         assert!(Command::new("tar").arg("-czf").arg(&archive).arg("-C").arg(&source).arg(".").status().unwrap().success());
-        let prepared = prepare_local_bundle(&archive, &root.join("cache"), backend).unwrap();
+        let prepared = prepare_local_bundle(&archive, &root.join("cache")).unwrap();
         assert_eq!(prepared.version, "2");
         assert_eq!(prepared.files, 4);
         assert!(Path::new(&prepared.dir).join("deploy/docker-compose.yml").is_file());
-        assert_eq!(fs::read_to_string(source.join("app").join(backend)).unwrap(), "artifact");
+        assert_eq!(fs::read_to_string(source.join("app/server.jar")).unwrap(), "artifact");
         let cache_count = fs::read_dir(root.join("cache")).unwrap().count();
         fs::remove_file(source.join("bundle.json")).unwrap();
         let invalid = root.join("invalid.tgz");
         assert!(Command::new("tar").arg("-czf").arg(&invalid).arg("-C").arg(&source).arg(".").status().unwrap().success());
-        assert!(prepare_local_bundle(&invalid, &root.join("cache"), backend).is_err());
+        assert!(prepare_local_bundle(&invalid, &root.join("cache")).is_err());
         assert_eq!(fs::read_dir(root.join("cache")).unwrap().count(), cache_count);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_bundle_is_rejected_with_regeneration_hint() {
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!("legacy-artifact-{}-{stamp}", std::process::id()));
+        fs::create_dir_all(root.join("deploy")).unwrap();
+        fs::write(root.join("deploy/docker-compose.yml"), "services: {}\n").unwrap();
+        fs::write(root.join("bundle.json"), r#"{"version":"7","mode":"file","components":["backend"]}"#).unwrap();
+        assert!(prepare_local_bundle(&root, &root.join("cache")).is_err());
+        assert!(!root.join("cache").exists() || fs::read_dir(root.join("cache")).unwrap().next().is_none());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1713,10 +1731,10 @@ mod tests {
         fs::create_dir_all(root.join("source")).unwrap();
         fs::write(root.join("outside.txt"), "outside").unwrap();
         std::os::unix::fs::symlink(root.join("outside.txt"), root.join("source/link")).unwrap();
-        assert!(prepare_local_bundle(&root.join("source"), &root.join("cache"), "server.jar").is_err());
+        assert!(prepare_local_bundle(&root.join("source"), &root.join("cache")).is_err());
         let archive = root.join("bundle.tgz");
         assert!(Command::new("tar").arg("-czf").arg(&archive).arg("-C").arg(root.join("source")).arg(".").status().unwrap().success());
-        assert!(prepare_local_bundle(&archive, &root.join("cache"), "server.jar").is_err());
+        assert!(prepare_local_bundle(&archive, &root.join("cache")).is_err());
         assert_eq!(fs::read_to_string(root.join("outside.txt")).unwrap(), "outside");
         assert!(fs::read_dir(root.join("cache")).unwrap().next().is_none());
         fs::remove_dir_all(root).unwrap();
@@ -1847,12 +1865,12 @@ mod tests {
         fs::write(fixture.join("app/server.jar"), "jar").unwrap();
         fs::write(fixture.join("app/frontend-dist/index.html"), "html").unwrap();
         fs::write(fixture.join("deploy/docker-compose.yml"), "services: {}").unwrap();
-        fs::write(fixture.join("bundle.json"), r#"{"version":"7"}"#).unwrap();
+        write_v2_bundle(&fixture, "7");
         let archive = root.join("bundle.tgz");
         let status = Command::new("tar").arg("-czf").arg(&archive).arg("-C").arg(&fixture)
             .args(["app", "deploy", "bundle.json"]).status().unwrap();
         assert!(status.success());
-        let error = install_artifact_archive(&archive, &cached, "8-a1b2c3d", "server.jar").unwrap_err();
+        let error = install_artifact_archive(&archive, &cached, "8-a1b2c3d").unwrap_err();
         assert!(error.contains("版本不匹配"));
         assert_eq!(fs::read_to_string(cached.join("previous.txt")).unwrap(), "preserve");
 
@@ -1860,10 +1878,10 @@ mod tests {
         item.id = "src-test".to_string();
         let release = ArtifactRelease { version: "8-a1b2c3d".to_string(), ..Default::default() };
         assert!(cached_bundle_dir(&root, &item, &release).is_none());
-        fs::write(fixture.join("bundle.json"), r#"{"version":"8-a1b2c3d"}"#).unwrap();
+        write_v2_bundle(&fixture, "8-a1b2c3d");
         assert!(Command::new("tar").arg("-czf").arg(&archive).arg("-C").arg(&fixture)
             .args(["app", "deploy", "bundle.json"]).status().unwrap().success());
-        let installed = install_artifact_archive(&archive, &cached, "8-a1b2c3d", "server.jar").unwrap();
+        let installed = install_artifact_archive(&archive, &cached, "8-a1b2c3d").unwrap();
         assert_eq!(installed.version, "8-a1b2c3d");
         assert!(!cached.join("previous.txt").exists());
         assert_eq!(cached_bundle_dir(&root, &item, &release), Some(cached));

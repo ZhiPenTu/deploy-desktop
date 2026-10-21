@@ -16,9 +16,10 @@ afterEach(() => {
   delete globalThis.isTauri;
 });
 
-test('browser preview starts with empty inventories and no deployment profile', async () => {
+test('browser preview starts with empty inventories and no active project', async () => {
   assert.equal(api.isDesktopApp(), false);
-  assert.equal(await api.getDeploymentProfile(), null);
+  assert.deepEqual(await api.listProjects(), { schemaVersion: 1, activeProjectId: '', projects: [] });
+  assert.deepEqual(await api.getActiveProjectContext(), { project: null, bundle: null, deployDir: '' });
   assert.deepEqual(await api.listArtifactSources(), []);
   assert.deepEqual(await api.listRegistrySources(), []);
   assert.deepEqual(await api.listConnectionInventory(), { credentials: [], hosts: [], activeHostId: '' });
@@ -26,7 +27,7 @@ test('browser preview starts with empty inventories and no deployment profile', 
 
 test('every desktop operation rejects in the browser instead of reporting simulated success', async () => {
   const previewHelpers = new Set([
-    'isDesktopApp', 'getDeploymentProfile', 'listArtifactSources', 'listRegistrySources',
+    'isDesktopApp', 'listProjects', 'getActiveProjectContext', 'listArtifactSources', 'listRegistrySources',
     'listConnectionInventory', 'openArtifactRunUrl', 'onImageLibraryProgress',
     'onImageManagerProgress', 'onRegistryProgress', 'onRemoteUpdateProgress'
   ]);
@@ -57,15 +58,21 @@ test('desktop updates preserve target, component, backup and dry-run arguments a
   await assert.rejects(api.checkLocalEnv(), /连接失败/);
 });
 
-test('profile, update checks and progress channels use the desktop bridge', async () => {
+test('project context, update checks and progress channels use the desktop bridge', async () => {
   globalThis.isTauri = true;
   const events = [];
   const calls = [];
-  const profile = { name: 'demo-stack' };
+  const store = { schemaVersion: 1, activeProjectId: 'p-1', projects: [{ id: 'p-1', name: '生产环境' }] };
+  const context = { project: store.projects[0], bundle: null, deployDir: '/srv/app/deploy' };
   const release = { version: '1.0.0' };
   mockIPC((command, args) => {
     calls.push(command);
-    if (command === 'get_deployment_profile') return profile;
+    if (command === 'list_projects') return store;
+    if (command === 'get_active_project_context') return context;
+    if (command === 'activate_project_bundle') {
+      assert.deepEqual(args, { projectId: 'p-1', bundleDir: '/bundle/1.0.0', version: '1.0.0' });
+      return store;
+    }
     if (command === 'check_app_update') return release;
     if (command === 'download_artifact') {
       assert.equal(args.id, 'source');
@@ -75,11 +82,16 @@ test('profile, update checks and progress channels use the desktop bridge', asyn
     window.__TAURI_INTERNALS__.runCallback(args.onEvent.id, { index: 1, end: true });
     return null;
   });
-  assert.equal(await api.getDeploymentProfile(), profile);
+  assert.deepEqual(await api.listProjects(), store);
+  assert.deepEqual(await api.getActiveProjectContext(), context);
+  assert.deepEqual(await api.activateProjectBundle('p-1', '/bundle/1.0.0', '1.0.0'), store);
   assert.equal(await api.checkAppUpdate(), release);
   await api.installAppUpdate((event) => events.push(event));
   await api.downloadArtifact('source', release, (event) => events.push(event));
-  assert.deepEqual(calls, ['get_deployment_profile', 'check_app_update', 'install_app_update', 'download_artifact']);
+  assert.deepEqual(calls, [
+    'list_projects', 'get_active_project_context', 'activate_project_bundle',
+    'check_app_update', 'install_app_update', 'download_artifact'
+  ]);
   assert.deepEqual(events, [{ command: 'install_app_update', percent: 50 }, { command: 'download_artifact', percent: 50 }]);
 });
 

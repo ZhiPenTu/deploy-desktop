@@ -69,7 +69,7 @@ pub(crate) fn check_local_env_blocking(target_dir: Option<String>) -> Result<Loc
     let core_ports = super::profile::deployment_profile().port_definitions();
 
     for (p, proto, svc) in core_ports {
-        let (avail, occupant) = check_port_availability(p, proto);
+        let (avail, occupant) = check_port_availability(p, &proto);
         ports.push(PortStatus {
             port: p,
             protocol: proto.to_string(),

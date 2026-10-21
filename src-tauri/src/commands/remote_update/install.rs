@@ -1,11 +1,12 @@
-use super::bundle::{install_bundle_components, normalize_install_dir, validate_bundle};
-use super::models::BundlePaths;
+use super::bundle::{install_components, normalize_install_dir};
 use super::progress::emit_progress;
 use super::transfer::{upload_dir_replace, upload_file_replace};
+use crate::commands::bundle::{write_deployed_record, ArtifactKind, Bundle};
+use crate::commands::projects;
 use crate::commands::remote_ssh::resolve_existing_key;
 use serde::{Deserialize, Serialize};
 use std::fs::{self};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstallBundleResult {
@@ -57,14 +58,23 @@ fn install_bundle_blocking(
     if mode != "local" && mode != "remote" {
         return Err(format!("不支持的分发模式: {mode}"));
     }
-    let components = install_bundle_components(bundle_dir)?;
-    emit_progress(window, "校验交付包", 4, "running", "检查交付包结构...");
-    let bundle = validate_bundle(bundle_dir, &components)?;
+    emit_progress(window, "校验交付包", 4, "running", "检查交付包结构与文件摘要...");
+    let bundle = Bundle::load(Path::new(bundle_dir.trim()))?;
+    bundle.ensure_compatible()?;
+    bundle.verify_payload()?;
+
     let install_dir = normalize_install_dir(install_dir);
-    let deploy_dir = format!("{install_dir}/deploy");
-    let artifact = crate::commands::profile::deployment_profile()
-        .backend_artifact
-        .clone();
+    if install_dir.is_empty() {
+        return Err("请先为当前项目填写部署目录".to_string());
+    }
+    let install_root = PathBuf::from(&install_dir);
+    let deploy_root = install_root.join(bundle.deploy_source_rel());
+    let components = install_components(&bundle);
+    let selected = bundle.select_components(&components)?;
+    let resolved = bundle.resolve_artifacts(&selected, &install_root, &deploy_root)?;
+    if resolved.is_empty() {
+        return Err("交付包未声明可分发的产物，请重新构建制品".to_string());
+    }
 
     let mut uploaded: Vec<String> = Vec::new();
     if mode == "local" {
@@ -75,68 +85,41 @@ fn install_bundle_blocking(
             "running",
             "复制交付包到部署目录...",
         );
-        uploaded = install_bundle_local(&bundle, Path::new(bundle_dir), &install_dir)?;
+        uploaded = install_bundle_local(&resolved, bundle_dir, &install_root)?;
+        copy_bundle_images(&bundle, &install_root, &mut uploaded)?;
     } else {
         let key = resolve_existing_key(key_path.map(str::to_string), host)?;
-
-        if let Some(path) = &bundle.server_jar {
-            emit_progress(window, "分发后端服务", 20, "running", "上传后端 fat jar...");
-            let remote = format!("{install_dir}/backend-java/server/target/{artifact}");
-            upload_file_replace(host, port, user, key.as_deref(), path, &remote)?;
-            uploaded.push(remote);
-        }
-        if let Some(path) = &bundle.gateway_classes {
+        for (index, artifact) in resolved.iter().enumerate() {
+            let percent = 20 + index * 55 / resolved.len().max(1);
             emit_progress(
                 window,
-                "分发网关 classes",
-                35,
+                "分发产物",
+                percent,
                 "running",
-                "上传网关 classes...",
+                &format!("上传 {}", artifact.label),
             );
-            let remote = format!("{install_dir}/backend-java/gateway-app/target/classes");
-            upload_dir_replace(host, port, user, key.as_deref(), path, &remote)?;
+            let remote = artifact.target.to_string_lossy().to_string();
+            match artifact.kind {
+                ArtifactKind::File => upload_file_replace(
+                    host,
+                    port,
+                    user,
+                    key.as_deref(),
+                    &artifact.source,
+                    &remote,
+                )?,
+                ArtifactKind::Dir => upload_dir_replace(
+                    host,
+                    port,
+                    user,
+                    key.as_deref(),
+                    &artifact.source,
+                    &remote,
+                )?,
+            }
             uploaded.push(remote);
         }
-        if let Some(path) = &bundle.gateway_lib {
-            emit_progress(window, "分发网关依赖", 50, "running", "上传网关依赖 jar...");
-            let remote = format!("{install_dir}/backend-java/gateway-app/target/lib");
-            upload_dir_replace(host, port, user, key.as_deref(), path, &remote)?;
-            uploaded.push(remote);
-        }
-        if let Some(path) = &bundle.frontend_dist {
-            emit_progress(window, "分发前端页面", 65, "running", "上传前端静态资源...");
-            let remote = format!("{deploy_dir}/frontend_dist");
-            upload_dir_replace(host, port, user, key.as_deref(), path, &remote)?;
-            uploaded.push(remote);
-        }
-        if let Some(path) = &bundle.compose_file {
-            emit_progress(
-                window,
-                "分发部署配置",
-                80,
-                "running",
-                "上传 compose 与挂载配置...",
-            );
-            let remote = format!("{deploy_dir}/docker-compose.yml");
-            upload_file_replace(host, port, user, key.as_deref(), path, &remote)?;
-            uploaded.push(remote);
-        }
-        if let Some(path) = &bundle.compose_lan_file {
-            let remote = format!("{deploy_dir}/docker-compose.lan.yml");
-            upload_file_replace(host, port, user, key.as_deref(), path, &remote)?;
-            uploaded.push(remote);
-        }
-        if let Some(path) = &bundle.nginx_dir {
-            let remote = format!("{deploy_dir}/nginx");
-            upload_dir_replace(host, port, user, key.as_deref(), path, &remote)?;
-            uploaded.push(remote);
-        }
-        if let Some(path) = &bundle.oceanbase_dir {
-            let remote = format!("{deploy_dir}/oceanbase");
-            upload_dir_replace(host, port, user, key.as_deref(), path, &remote)?;
-            uploaded.push(remote);
-        }
-        if !bundle.image_files.is_empty() {
+        if bundle.has_bundle_images() {
             emit_progress(
                 window,
                 "分发镜像包",
@@ -145,33 +128,43 @@ fn install_bundle_blocking(
                 "上传镜像包并在目标机导入，大文件需要一些时间...",
             );
             let names: Vec<String> = bundle
-                .image_files
+                .image_files()
                 .iter()
                 .filter_map(|path| {
                     path.file_name()
                         .map(|value| value.to_string_lossy().to_string())
                 })
                 .collect();
-            let loaded = crate::commands::image_manager::push_images_blocking(
-                window,
-                host,
-                port,
-                user,
-                key.clone(),
-                bundle_dir,
-                &install_dir,
-                names,
-                true,
-            )?;
-            uploaded.extend(loaded);
+            if !names.is_empty() {
+                let loaded = crate::commands::image_manager::push_images_blocking(
+                    window,
+                    host,
+                    port,
+                    user,
+                    key.clone(),
+                    bundle_dir,
+                    &install_dir,
+                    names,
+                    true,
+                )?;
+                uploaded.extend(loaded);
+            }
         }
+    }
+
+    let project_id = projects::active_project()
+        .map(|project| project.id)
+        .unwrap_or_default();
+    let record = bundle.deployed_record(&project_id);
+    if let Err(error) = write_deployed_record(&install_root, &record) {
+        log::warn!("写入部署记录失败: {error}");
     }
 
     emit_progress(window, "分发完成", 100, "success", "交付包已分发到部署目录");
     Ok(InstallBundleResult {
         success: true,
         install_dir: install_dir.clone(),
-        deploy_dir: deploy_dir.clone(),
+        deploy_dir: deploy_root.to_string_lossy().to_string(),
         uploaded: uploaded.clone(),
         output: format!(
             "交付包已分发到 {install_dir}，共写入 {} 个位置。下一步可启动容器栈。",
@@ -179,61 +172,45 @@ fn install_bundle_blocking(
         ),
     })
 }
-pub(super) fn install_bundle_local(
-    bundle: &BundlePaths,
-    bundle_root: &Path,
-    install_dir: &str,
+
+fn install_bundle_local(
+    artifacts: &[crate::commands::bundle::ResolvedArtifact],
+    _bundle_dir: &str,
+    _install_root: &Path,
 ) -> Result<Vec<String>, String> {
-    let artifact = crate::commands::profile::deployment_profile()
-        .backend_artifact
-        .clone();
-    let server_dir = Path::new(install_dir)
-        .join("backend-java")
-        .join("server")
-        .join("target");
-    let gateway_dir = Path::new(install_dir)
-        .join("backend-java")
-        .join("gateway-app")
-        .join("target");
-    let deploy_dir = Path::new(install_dir).join("deploy");
     let mut written = Vec::new();
-
-    if let Some(path) = &bundle.server_jar {
-        let dest = server_dir.join(&artifact);
-        copy_file_replace(path, &dest)?;
-        written.push(dest.to_string_lossy().to_string());
-    }
-    if let Some(path) = &bundle.gateway_classes {
-        let dest = gateway_dir.join("classes");
-        copy_dir_replace(path, &dest)?;
-        written.push(dest.to_string_lossy().to_string());
-    }
-    if let Some(path) = &bundle.gateway_lib {
-        let dest = gateway_dir.join("lib");
-        copy_dir_replace(path, &dest)?;
-        written.push(dest.to_string_lossy().to_string());
-    }
-    if let Some(path) = &bundle.frontend_dist {
-        let dest = deploy_dir.join("frontend_dist");
-        copy_dir_replace(path, &dest)?;
-        written.push(dest.to_string_lossy().to_string());
-    }
-
-    let source_deploy = bundle_root.join("deploy");
-    if source_deploy.is_dir() {
-        copy_dir_merge(&source_deploy, &deploy_dir)?;
-        written.push(deploy_dir.to_string_lossy().to_string());
-    }
-
-    // 镜像模式交付包：镜像包必须一起落到部署目录，后续「加载镜像」与
-    // 「启动容器栈」才能在本机找到 images/*.tar.gz。
-    let source_images = bundle_root.join("images");
-    let target_images = Path::new(install_dir).join("images");
-    if source_images.is_dir() && source_images != target_images {
-        copy_dir_merge(&source_images, &target_images)?;
-        written.push(target_images.to_string_lossy().to_string());
+    for artifact in artifacts {
+        match artifact.kind {
+            ArtifactKind::File => copy_file_replace(&artifact.source, &artifact.target)?,
+            ArtifactKind::Dir => copy_dir_replace(&artifact.source, &artifact.target)?,
+        }
+        written.push(artifact.target.to_string_lossy().to_string());
     }
     Ok(written)
+}
+
+fn copy_bundle_images(
+    bundle: &Bundle,
+    install_root: &Path,
+    written: &mut Vec<String>,
+) -> Result<(), String> {
+    let files = bundle.image_files();
+    if files.is_empty() {
+        return Ok(());
+    }
+    let target_dir = install_root.join("images");
+    fs::create_dir_all(&target_dir)
+        .map_err(|e| format!("创建目录 {} 失败: {e}", target_dir.display()))?;
+    for source in files {
+        let name = source
+            .file_name()
+            .map(|value| value.to_string_lossy().to_string())
+            .ok_or_else(|| "镜像包文件名无效".to_string())?;
+        let target = target_dir.join(name);
+        copy_file_replace(&source, &target)?;
+        written.push(target.to_string_lossy().to_string());
+    }
+    Ok(())
 }
 
 fn copy_file_replace(src: &Path, dest: &Path) -> Result<(), String> {

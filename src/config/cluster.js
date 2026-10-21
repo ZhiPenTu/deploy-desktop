@@ -1,32 +1,25 @@
-import { profileState } from './profile.js';
+import { projectState } from './project.js';
 
-function containerName(serviceKey) {
-  return profileState.containerPrefix ? `${profileState.containerPrefix}-${serviceKey}` : serviceKey;
+function containerPrefix() {
+  return String(projectState.bundle?.containerPrefix || '').trim();
 }
 
-function clusterServices() {
-  return profileState.containers.map((container) => ({
-    container: containerName(container.serviceKey),
-    serviceKey: container.serviceKey,
-    label: container.label,
-    port: container.port ?? null,
-    protocol: container.protocol,
-    description: container.description
+export function containerName(serviceKey) {
+  const prefix = containerPrefix();
+  return prefix ? `${prefix}-${serviceKey}` : serviceKey;
+}
+
+/** 容器清单来自当前项目交付包声明的服务，客户端不再内置项目拓扑。 */
+export function clusterServices() {
+  const services = Array.isArray(projectState.bundle?.services) ? projectState.bundle.services : [];
+  return services.map((service) => ({
+    container: containerName(service.key),
+    serviceKey: service.key,
+    label: service.label || service.key,
+    port: service.port ?? null,
+    protocol: service.protocol || 'TCP',
+    description: service.description || ''
   }));
-}
-
-export const defaultCluster = {
-  get name() {
-    return profileState.name;
-  },
-  get services() {
-    return clusterServices();
-  }
-};
-
-export function getDefaultContainer() {
-  const services = clusterServices();
-  return services.length ? services[0].container : '';
 }
 
 export function serviceOptions() {

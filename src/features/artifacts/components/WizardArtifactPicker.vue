@@ -200,6 +200,7 @@ import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { selectLocalPath as open } from '../../../api/tauri.js';
 import { Box, DocumentChecked, FolderOpened, Refresh } from '@element-plus/icons-vue';
 import { downloadArtifact, fetchArtifactRelease, isDesktopApp, listArtifactReleases, listArtifactSources, openArtifactBundle, openArtifactBundleVersion, prepareLocalArtifactBundle } from '../../../api/tauri.js';
+import { applyProjectBundle } from '../../connections/state.js';
 
 const props = defineProps({
   connection: { type: Object, required: true },
@@ -507,7 +508,7 @@ async function prepare() {
       bundle = { ...bundle, ...validated };
     }
     preparedBundle.value = bundle;
-    props.connection.bundleDir = bundle.dir;
+    await applyProjectBundle(bundle.dir, bundle.version);
     Object.assign(progress, { percent: 100, stage: '校验完成' });
     emit('selected', bundle);
     if (selected.kind === 'release') {

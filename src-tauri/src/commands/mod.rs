@@ -1,5 +1,7 @@
 pub(crate) mod blocking;
 pub mod artifact;
+pub mod bundle;
+pub mod projects;
 pub mod connections;
 pub mod db_ops;
 pub mod deployment_review;

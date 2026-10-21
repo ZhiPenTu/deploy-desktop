@@ -9,7 +9,8 @@ import { invokeIncremental } from '../src/features/deployment/services/operation
 const input = () => ({
   connection: { remoteHost: 'host.example.com', remotePort: 2222, remoteUser: 'deploy', remoteKey: '/key', installDir: '/srv/app' },
   remote: true, bundle: { dir: '/bundle', version: '1.0.0' },
-  components: ['backend'], backup: true, action: 'incremental', label: 'demo'
+  components: ['backend'], backup: true, action: 'incremental', label: 'demo',
+  allowedComponents: ['backend', 'config', 'image']
 });
 
 afterEach(() => {
@@ -39,16 +40,27 @@ test('confirmation snapshots detach mutable host and component inputs', () => {
   assert.ok(Object.isFrozen(context) && Object.isFrozen(context.components));
   assert.equal(contextTarget(context).host, 'host.example.com');
   assert.equal(contextTarget({ remote: false }), null);
-  for (const patch of [{components:[]}, {components:['unknown']}, {action:'invalid'}, {bundle:null}]) {
+  for (const patch of [{components:[]}, {components:['unknown']}, {components:['constructor']}, {action:'invalid'}, {bundle:null}]) {
     assert.throws(() => createDeploymentContext({...input(), ...patch}));
   }
   assert.throws(() => createDeploymentContext({...input(), connection:{...input().connection,remotePort:0}}), /端口/);
 });
 
-test('component policy excludes unsupported and image-only choices for file bundles', () => {
-  assert.deepEqual(deploymentComponents({mode:'image',components:['backend']}), ['image','config']);
-  assert.deepEqual(deploymentComponents({mode:'file',components:['backend','image','backend','unknown','constructor']}), ['backend']);
-  assert.deepEqual(deploymentComponents({mode:'file'}), ['backend','gateway','frontend','config']);
+test('component choices come from the bundle descriptor instead of fixed names', () => {
+  const plan = {
+    components: [
+      { key: 'web', label: '站点', artifacts: [], services: ['web'] },
+      { key: 'agent', label: '采集程序', artifacts: [], services: [] },
+      { key: 'web', label: '重复项', artifacts: [], services: [] }
+    ],
+    images: [{ imageRef: 'demo/web@sha256:abc', bundleFile: '' }]
+  };
+  assert.deepEqual(deploymentComponents(plan), ['web', 'agent']);
+  assert.deepEqual(deploymentComponents({ components: [], images: [] }), []);
+  assert.deepEqual(
+    deploymentComponents({ ...plan, images: [{ imageRef: 'demo/web@sha256:abc', bundleFile: 'images/web.tar' }] }),
+    ['web', 'agent', 'image']
+  );
 });
 
 test('a successful command is insufficient without checked and ready containers', () => {

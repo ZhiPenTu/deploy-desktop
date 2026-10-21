@@ -11,7 +11,6 @@ export const PROJECT_ROOT = path.resolve(process.env.DEPLOY_DESKTOP_ROOT || path
 
 export const DEFAULT_CONFIG = Object.freeze({
   version: 1,
-  profilePath: null,
   registries: {},
   hosts: {},
   update: {
@@ -22,6 +21,15 @@ export const DEFAULT_CONFIG = Object.freeze({
 
 export function configDir() {
   return expandHome(process.env.DEPLOY_DESKTOP_CONFIG_DIR || path.join(os.homedir(), '.deploy-desktop'));
+}
+
+export async function appVersion() {
+  try {
+    const content = await fs.readFile(path.join(PROJECT_ROOT, 'package.json'), 'utf8');
+    return JSON.parse(content).version || '0.0.0';
+  } catch {
+    return process.env.DEPLOY_DESKTOP_VERSION || '0.0.0';
+  }
 }
 
 export function configPath() {

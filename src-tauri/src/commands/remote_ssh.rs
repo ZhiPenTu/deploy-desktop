@@ -437,10 +437,7 @@ pub(crate) fn run_remote_deploy_action_blocking(
     let dir = deploy_dir
         .filter(|d| !d.trim().is_empty())
         .unwrap_or_else(|| {
-            format!(
-                "{}/deploy",
-                super::profile::deployment_profile().install_dir
-            )
+            super::profile::deployment_profile().deploy_dir
         });
 
     match mode.as_str() {
@@ -903,26 +900,6 @@ for f in .env deploy/.env .env.local deploy/.env.local; do
   fi
 done
 COMPOSE_ARGS="-f $COMPOSE_FILE"
-COMPOSE_DIR=$(dirname "$COMPOSE_FILE")
-if [ -d "$COMPOSE_DIR/frontend_dist" ] && ! grep -q frontend_dist "$COMPOSE_FILE"; then
-  for c in frontend-main.conf frontend-upstream.conf frontend-default.conf; do
-    if [ ! -f "$COMPOSE_DIR/nginx/$c" ]; then
-      echo "交付包缺少 deploy/nginx/$c，文件模式前端无法挂载；请补齐后再启动。" >&2
-      exit 4
-    fi
-  done
-  cat > "$COMPOSE_DIR/docker-compose.frontend-bind.yml" <<'YAML'
-services:
-  frontend:
-    image: nginx:1.27-alpine
-    volumes:
-      - ./frontend_dist:/usr/share/nginx/html:ro
-      - ./nginx/frontend-main.conf:/etc/nginx/nginx.conf:ro
-      - ./nginx/frontend-upstream.conf:/etc/nginx/conf.d/00-upstream.conf:ro
-      - ./nginx/frontend-default.conf:/etc/nginx/conf.d/default.conf:ro
-YAML
-  COMPOSE_ARGS="$COMPOSE_ARGS -f $COMPOSE_DIR/docker-compose.frontend-bind.yml"
-fi
 if docker compose version >/dev/null 2>&1; then
   docker compose $ENV_ARGS $COMPOSE_ARGS {}
 else
@@ -1302,10 +1279,10 @@ pub(crate) fn check_remote_oceanbase_status_blocking(
     key_path: Option<String>,
 ) -> Result<OceanBaseHealth, String> {
     let key = resolve_existing_key(key_path, &host)?;
-    let profile = super::profile::deployment_profile();
-    let container = shell_quote(&profile.database_container());
-    let client = shell_quote(&profile.database.client);
-    let db_port = profile.database.port;
+    let (profile, database) = super::profile::require_database()?;
+    let container = shell_quote(&profile.container_name(&database.service_key));
+    let client = shell_quote(&database.client);
+    let db_port = database.port;
     let script = format!(
         r#"set -e
 STATE=$(docker inspect --format '{{{{.State.Status}}}}|{{{{if .State.Health}}}}{{{{.State.Health.Status}}}}{{{{else}}}}none{{{{end}}}}' {container} 2>/dev/null || echo "not_found|not_found")
@@ -1382,11 +1359,11 @@ pub(crate) fn import_remote_oceanbase_sql_blocking(
     sql_file_path: String,
 ) -> Result<DbImportResult, String> {
     let key = resolve_existing_key(key_path, &host)?;
-    let profile = super::profile::deployment_profile();
-    let container = shell_quote(&profile.database_container());
-    let client = shell_quote(&profile.database.client);
-    let db_port = profile.database.port;
-    let database = profile.database.name.clone();
+    let (profile, database) = super::profile::require_database()?;
+    let container = shell_quote(&profile.container_name(&database.service_key));
+    let client = shell_quote(&database.client);
+    let db_port = database.port;
+    let database = database.name.clone();
     let script = format!(
         r#"set -e
 SQL={}

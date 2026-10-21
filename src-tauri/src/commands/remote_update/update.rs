@@ -1,11 +1,14 @@
-use super::bundle::{normalize_components, normalize_install_dir, validate_bundle};
-use super::inspect::{ensure_required_containers, inspect_remote_deployment_inner, remote_free_kb};
+use super::bundle::{load_bundle, normalize_install_dir};
+use super::inspect::{inspect_remote_deployment_inner, remote_free_kb};
 use super::models::RemoteUpdateResult;
 use super::progress::emit_progress;
 use super::transfer::{create_remote_backup, upload_dir_replace, upload_file_replace};
+use crate::commands::bundle::{ArtifactKind, Bundle};
+use crate::commands::projects;
 use crate::commands::remote_ssh::{
     explain_ssh_failure, resolve_existing_key, run_ssh_script, shell_quote,
 };
+use std::path::Path;
 use std::time::Instant;
 
 #[tauri::command]
@@ -39,6 +42,7 @@ pub async fn update_remote_deployment(
     .map_err(|e| format!("更新任务执行失败: {e}"))?
 }
 
+#[allow(clippy::too_many_arguments)]
 fn update_remote_deployment_blocking(
     window: &tauri::Window,
     host: String,
@@ -52,13 +56,9 @@ fn update_remote_deployment_blocking(
     dry_run: bool,
 ) -> Result<RemoteUpdateResult, String> {
     let started = Instant::now();
-    let components = normalize_components(components)?;
-    if components.is_empty() {
-        return Err("请至少选择一个更新组件".to_string());
-    }
-
     emit_progress(window, "校验更新包", 3, "running", "检查本地更新包内容...");
-    let bundle = validate_bundle(&bundle_dir, &components)?;
+    let (bundle, components) = load_bundle(&bundle_dir, &components)?;
+    bundle.verify_payload()?;
 
     let key = resolve_existing_key(key_path, &host)?;
     let install_dir = normalize_install_dir(&install_dir);
@@ -70,7 +70,8 @@ fn update_remote_deployment_blocking(
         "running",
         "确认目标机部署目录与容器状态...",
     );
-    let status = inspect_remote_deployment_inner(&host, port, &user, key.as_deref(), &install_dir)?;
+    let status =
+        inspect_remote_deployment_inner(&host, port, &user, key.as_deref(), &install_dir)?;
     let deploy_dir = status.deploy_dir.clone();
     if !status.deployed {
         return Err(format!(
@@ -87,7 +88,13 @@ fn update_remote_deployment_blocking(
     if !status.compose_available {
         return Err("目标机缺少 docker compose，无法执行服务更新。".to_string());
     }
-    ensure_required_containers(&components, &status)?;
+    let selected = bundle.select_components(&components)?;
+    let resolved = bundle.resolve_artifacts(
+        &selected,
+        Path::new(&install_dir),
+        Path::new(&deploy_dir),
+    )?;
+    ensure_required_services(&bundle, &components, &status)?;
 
     if backup {
         let free_kb = remote_free_kb(&host, port, &user, key.as_deref(), &install_dir)?;
@@ -127,7 +134,7 @@ fn update_remote_deployment_blocking(
             "创建备份",
             15,
             "running",
-            "备份现有 jar、网关文件与前端产物...",
+            "备份将被替换的产物与部署配置...",
         );
         let dir = create_remote_backup(
             &host,
@@ -136,6 +143,7 @@ fn update_remote_deployment_blocking(
             key.as_deref(),
             &install_dir,
             &deploy_dir,
+            &resolved,
         )?;
         output_log.push_str(&format!("备份目录: {dir}\n"));
         emit_progress(
@@ -151,134 +159,56 @@ fn update_remote_deployment_blocking(
         None
     };
 
-    if let Some(path) = &bundle.server_jar {
-        emit_progress(window, "上传后端服务", 28, "running", "上传后端 fat jar...");
-        let remote = format!(
-            "{install_dir}/backend-java/server/target/{}",
-            crate::commands::profile::deployment_profile().backend_artifact
-        );
-        upload_file_replace(&host, port, &user, key.as_deref(), path, &remote)?;
-        output_log.push_str(&format!("已上传: {remote}\n"));
-        emit_progress(window, "上传后端服务", 38, "success", "后端 fat jar 已上传");
-    }
-
-    if let Some(path) = &bundle.gateway_classes {
+    for (index, artifact) in resolved.iter().enumerate() {
+        let percent = 28 + index * 45 / resolved.len().max(1);
         emit_progress(
             window,
-            "上传网关 classes",
-            42,
+            "上传产物",
+            percent,
             "running",
-            "上传网关 classes 目录...",
+            &format!("上传 {}", artifact.label),
         );
-        let remote = format!("{install_dir}/backend-java/gateway-app/target/classes");
-        upload_dir_replace(&host, port, &user, key.as_deref(), path, &remote)?;
-        output_log.push_str(&format!("已替换: {remote}\n"));
-        emit_progress(
-            window,
-            "上传网关 classes",
-            48,
-            "success",
-            "网关 classes 已替换",
-        );
-    }
-
-    if let Some(path) = &bundle.gateway_lib {
-        emit_progress(
-            window,
-            "上传网关依赖",
-            50,
-            "running",
-            "上传网关 lib 目录...",
-        );
-        let remote = format!("{install_dir}/backend-java/gateway-app/target/lib");
-        upload_dir_replace(&host, port, &user, key.as_deref(), path, &remote)?;
-        output_log.push_str(&format!("已替换: {remote}\n"));
-        emit_progress(window, "上传网关依赖", 55, "success", "网关 lib 已替换");
-    }
-
-    if let Some(path) = &bundle.frontend_dist {
-        emit_progress(
-            window,
-            "上传前端页面",
-            58,
-            "running",
-            "上传前端 dist 目录...",
-        );
-        let remote = format!("{deploy_dir}/frontend_dist");
-        upload_dir_replace(&host, port, &user, key.as_deref(), path, &remote)?;
-        output_log.push_str(&format!("已替换: {remote}\n"));
-        emit_progress(window, "上传前端页面", 64, "success", "前端 dist 已替换");
-    }
-
-    if let Some(path) = &bundle.compose_file {
-        emit_progress(
-            window,
-            "上传部署配置",
-            66,
-            "running",
-            "上传 compose 与挂载配置...",
-        );
-        upload_file_replace(
-            &host,
-            port,
-            &user,
-            key.as_deref(),
-            path,
-            &format!("{deploy_dir}/docker-compose.yml"),
-        )?;
-        let lan = bundle.compose_lan_file.as_ref().or_else(|| {
-            (status.compose_file == "docker-compose.lan.yml").then_some(path)
-        });
-        if let Some(lan) = lan {
-            upload_file_replace(
+        let remote = artifact.target.to_string_lossy().to_string();
+        match artifact.kind {
+            ArtifactKind::File => upload_file_replace(
                 &host,
                 port,
                 &user,
                 key.as_deref(),
-                lan,
-                &format!("{deploy_dir}/docker-compose.lan.yml"),
-            )?;
-        }
-        if let Some(nginx) = &bundle.nginx_dir {
-            upload_dir_replace(
+                &artifact.source,
+                &remote,
+            )?,
+            ArtifactKind::Dir => upload_dir_replace(
                 &host,
                 port,
                 &user,
                 key.as_deref(),
-                nginx,
-                &format!("{deploy_dir}/nginx"),
-            )?;
+                &artifact.source,
+                &remote,
+            )?,
         }
-        if let Some(oceanbase) = &bundle.oceanbase_dir {
-            upload_dir_replace(
-                &host,
-                port,
-                &user,
-                key.as_deref(),
-                oceanbase,
-                &format!("{deploy_dir}/oceanbase"),
-            )?;
-        }
-        output_log.push_str(&format!("已更新部署配置: {deploy_dir}\n"));
-        emit_progress(window, "上传部署配置", 72, "success", "部署配置已更新");
+        output_log.push_str(&format!("已写入 {remote}\n"));
     }
 
-    if !bundle.image_files.is_empty() {
+    if components.iter().any(|item| item == "image") {
         emit_progress(
             window,
-            "上传镜像包",
-            74,
+            "导入镜像",
+            78,
             "running",
-            "上传镜像包并导入 Docker 镜像，大文件需要一些时间...",
+            "上传镜像包并在目标机导入...",
         );
         let names: Vec<String> = bundle
-            .image_files
+            .image_files()
             .iter()
             .filter_map(|path| {
                 path.file_name()
                     .map(|value| value.to_string_lossy().to_string())
             })
             .collect();
+        if names.is_empty() {
+            return Err("该交付包未包含离线镜像，请取消镜像更新或重新下载制品".to_string());
+        }
         let loaded = crate::commands::image_manager::push_images_blocking(
             window,
             &host,
@@ -290,43 +220,125 @@ fn update_remote_deployment_blocking(
             names,
             true,
         )?;
-        for line in loaded {
-            output_log.push_str(&format!("{line}\n"));
-        }
-        emit_progress(window, "导入镜像", 76, "success", "镜像包已导入目标机");
+        output_log.push_str(&format!("已导入 {} 个镜像包\n", loaded.len()));
     }
 
     emit_progress(
         window,
         "应用更新",
-        78,
+        88,
         "running",
-        "重启所选服务并等待健康检查...",
+        "重启受影响的服务并等待就绪",
     );
-    let apply_output =
-        apply_remote_update(&host, port, &user, key.as_deref(), &deploy_dir, &components)?;
-    output_log.push_str(&apply_output);
+    let output = apply_remote_update(
+        &host,
+        port,
+        &user,
+        key.as_deref(),
+        &deploy_dir,
+        &components,
+        &bundle,
+    )?;
+    output_log.push_str(&output);
+
+    let project_id = projects::active_project()
+        .map(|project| project.id)
+        .unwrap_or_default();
+    let record = bundle.deployed_record(&project_id);
+    if let Ok(text) = serde_json::to_string(&record) {
+        let script = format!(
+            "mkdir -p {}/.deploy-desktop && printf '%s' {} > {}/.deploy-desktop/deployed.json",
+            shell_quote(&install_dir),
+            shell_quote(&text),
+            shell_quote(&install_dir)
+        );
+        if let Err(error) = run_ssh_script(&host, port, &user, key.as_deref(), &script) {
+            log::warn!("写入目标机部署记录失败: {error}");
+        }
+    }
+
     emit_progress(
         window,
-        "应用更新",
-        94,
+        "更新完成",
+        100,
         "success",
-        "所选服务已重启并通过健康检查",
+        "所选组件已更新并通过就绪检查",
     );
-
-    let final_status =
+    let status =
         inspect_remote_deployment_inner(&host, port, &user, key.as_deref(), &install_dir).ok();
-    emit_progress(window, "更新完成", 100, "success", "服务更新完成");
-
     Ok(RemoteUpdateResult {
         success: true,
         components,
         backup_dir,
         output: output_log,
         duration_secs: started.elapsed().as_secs(),
-        status: final_status,
+        status,
     })
 }
+
+fn selected_services(bundle: &Bundle, components: &[String]) -> Vec<String> {
+    let mut services: Vec<String> = Vec::new();
+    for key in components {
+        if key == "image" {
+            continue;
+        }
+        if let Some(component) = bundle.component(key) {
+            for service in &component.services {
+                if !services.contains(service) {
+                    services.push(service.clone());
+                }
+            }
+        }
+    }
+    services.sort();
+    services
+}
+
+fn is_config_selected(bundle: &Bundle, components: &[String]) -> bool {
+    let compose = bundle.descriptor.runtime.compose.trim();
+    components.iter().any(|key| {
+        if key == "image" {
+            return false;
+        }
+        bundle
+            .component(key)
+            .map(|component| {
+                component.artifacts.iter().any(|artifact| {
+                    bundle
+                        .artifact(artifact)
+                        .map(|spec| spec.source == compose)
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false)
+    })
+}
+
+fn ensure_required_services(
+    bundle: &Bundle,
+    components: &[String],
+    status: &super::models::RemoteDeploymentStatus,
+) -> Result<(), String> {
+    let required = selected_services(bundle, components);
+    let missing: Vec<String> = required
+        .into_iter()
+        .filter(|key| {
+            !status
+                .containers
+                .iter()
+                .any(|container| container.service_key == *key && container.state != "not_created")
+        })
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "目标机缺少以下容器：{}。请先使用部署向导完成首次安装，或确认部署目录是否正确。",
+            missing.join("、")
+        ))
+    }
+}
+
 fn apply_remote_update(
     host: &str,
     port: u16,
@@ -334,37 +346,17 @@ fn apply_remote_update(
     key: Option<&str>,
     deploy_dir: &str,
     components: &[String],
+    bundle: &Bundle,
 ) -> Result<String, String> {
-    let has_backend = components.iter().any(|component| component == "backend");
-    let has_gateway = components.iter().any(|component| component == "gateway");
-    let has_frontend = components.iter().any(|component| component == "frontend");
-    let has_config = components.iter().any(|component| component == "config");
-    let has_image = components.iter().any(|component| component == "image");
-
-    let profile = crate::commands::profile::deployment_profile();
-    let mut restart_services: Vec<String> = Vec::new();
-    if has_backend {
-        restart_services.extend(profile.component_services("backend"));
-    }
-    if has_gateway {
-        restart_services.extend(profile.component_services("gateway"));
-    }
-    if has_frontend {
-        restart_services.extend(profile.component_services("frontend"));
-    }
-    if has_image {
-        restart_services.extend(profile.component_services("backend"));
-        restart_services.extend(profile.component_services("gateway"));
-        restart_services.extend(profile.component_services("frontend"));
-    }
-    restart_services.sort();
-    restart_services.dedup();
-
-    let wait_services: Vec<String> = if has_config || has_image {
-        profile
-            .containers
+    let restart_services = selected_services(bundle, components);
+    let config_selected = is_config_selected(bundle, components) || components.iter().any(|c| c == "image");
+    let wait_services: Vec<String> = if config_selected {
+        bundle
+            .descriptor
+            .runtime
+            .services
             .iter()
-            .map(|container| container.service_key.clone())
+            .map(|service| service.key.clone())
             .collect()
     } else {
         restart_services.clone()
@@ -393,50 +385,30 @@ compose() {{
         deploy = shell_quote(deploy_dir)
     );
 
-    if has_config {
-        script.push_str("echo \"==> 应用部署配置 (docker compose up -d)\"\ncompose up -d\n");
-    }
-
-    if has_frontend {
-        let frontend_service = profile
-            .component_services("frontend")
-            .into_iter()
-            .next()
-            .ok_or_else(|| "profile 未配置前端服务".to_string())?;
-        let frontend_container = profile.container_name(&frontend_service);
-        script.push_str(&format!(
-            r#"echo "==> 更新前端静态页面"
-# frontend_dist 以只读 bind mount 提供给官方 nginx 镜像，静态文件按请求读取，
-# 不再 docker cp 进容器；容器未运行时用 compose 拉起。
-if [ "$(docker inspect --format '{{{{.State.Status}}}}' {frontend} 2>/dev/null || echo missing)" != "running" ]; then
-  compose up -d frontend
-fi
-"#,
-            frontend = shell_quote(&frontend_container)
-        ));
+    if config_selected {
+        script.push_str(
+            "echo \"==> 应用部署配置 (docker compose up -d)\"\ncompose up -d --pull never --no-build\n",
+        );
     }
 
     if !restart_services.is_empty() {
-        let apply_line = if has_image {
-            format!(
-                "echo \"==> 按新镜像重建服务: {}\"\ncompose up -d {}\n",
-                restart_services.join(" "),
-                restart_services.join(" ")
-            )
+        let action = if components.iter().any(|item| item == "image") {
+            "up -d --pull never --no-build"
         } else {
-            format!(
-                "echo \"==> 重启服务: {}\"\ncompose restart {}\n",
-                restart_services.join(" "),
-                restart_services.join(" ")
-            )
+            "restart"
         };
-        script.push_str(&apply_line);
+        script.push_str(&format!(
+            "echo \"==> 应用服务变更: {}\"\ncompose {} {}\n",
+            restart_services.join(" "),
+            action,
+            restart_services.join(" ")
+        ));
     }
 
     if !wait_services.is_empty() {
         script.push_str("echo \"==> 等待服务健康检查\"\n");
         for service in &wait_services {
-            let container = crate::commands::profile::deployment_profile().container_name(service);
+            let container = bundle.container_name(service);
             script.push_str(&format!(
                 r#"ready=no
 for i in $(seq 1 45); do
@@ -475,3 +447,4 @@ fi
         ))
     }
 }
+

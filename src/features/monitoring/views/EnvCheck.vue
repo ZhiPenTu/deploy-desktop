@@ -194,6 +194,7 @@ import {
   installRemoteDockerEngine
 } from '../../../api/tauri.js';
 import { credentialById } from '../../connections/state.js';
+import { projectState } from '../../../config/project.js';
 import { createRequestScope } from '../../../shared/async/requestScope.js';
 
 const props = defineProps({
@@ -217,7 +218,12 @@ const readError = ref('');
 const envRequests = createRequestScope();
 onScopeDispose(() => envRequests.dispose());
 const credential = computed(() => credentialById(props.host?.credentialId));
-const deployDir = computed(() => props.host?.deployDir || props.connection.deployDir);
+const isProjectHost = computed(() => Boolean(props.host?.id) && props.host.id === projectState.project?.hostId);
+const deployDir = computed(() => (
+  isProjectHost.value
+    ? props.connection.deployDir || props.connection.installDir
+    : props.host?.deployDir || props.connection.deployDir
+));
 const targetText = computed(() => (
   isRemote.value
     ? `${props.host?.address || '未配置地址'}:${props.host?.port || 22}`

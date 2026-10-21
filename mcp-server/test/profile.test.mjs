@@ -1,110 +1,80 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { Bundle } from '../src/bundle.mjs';
 import {
-  appVersion,
+  buildProfile,
   containerName,
   databaseContainer,
   resolveContainer,
+  resolveServiceKey,
   serviceKeysForComponent,
-  updateProfile,
   validateProfile
 } from '../src/profile.mjs';
-import { makeProfile } from './helpers.mjs';
+import { makeProject, makeTempDir, writeBundle } from './helpers.mjs';
 
-test('validateProfile 接受完整配置并补默认值', () => {
-  const profile = validateProfile(makeProfile());
+async function demoProfile() {
+  const root = await makeTempDir();
+  await writeBundle(root);
+  const bundle = await Bundle.load(root);
+  return validateProfile(buildProfile(makeProject({ lastBundleDir: root }), bundle));
+}
+
+test('buildProfile 完全按交付包推导运行时视图', async () => {
+  const profile = await demoProfile();
   assert.equal(profile.containerPrefix, 'demo');
-  assert.equal(profile.containers[1].protocol, 'TCP');
-  assert.equal(profile.containers[1].description, '');
-  assert.equal(profile.containers[2].port, null);
+  assert.equal(profile.deployDir, '/opt/demo/deploy');
+  assert.equal(profile.installDir, '/opt/demo');
+  assert.equal(profile.compose.file, '/opt/demo/deploy/docker-compose.yml');
+  assert.equal(profile.compose.fileRelative, 'docker-compose.yml');
+  assert.equal(profile.containers[0].protocol, 'TCP');
+  assert.equal(profile.containers[0].description, '');
   assert.equal(profile.database.port, 2881);
+  assert.deepEqual(profile.components.map((item) => item.key), ['server', 'site', 'config']);
+  assert.deepEqual(profile.images.map((item) => item.file), ['db.tar']);
+  assert.equal(profile.steps.length, 2);
 });
 
-test('validateProfile 拒绝非法容器前缀与产物名', () => {
-  assert.throws(() => validateProfile(makeProfile({ containerPrefix: '-bad' })), /containerPrefix/);
-  assert.throws(() => validateProfile(makeProfile({ backendArtifact: 'a/b.jar' })), /backendArtifact/);
-});
-
-test('validateProfile 校验数据库与容器关联', () => {
-  assert.throws(
-    () => validateProfile(makeProfile({ database: { serviceKey: 'missing', name: 'db', client: 'obclient', port: 2881 } })),
-    /database\.serviceKey 未出现在 containers 中/
-  );
-  assert.throws(
-    () => validateProfile(makeProfile({ database: { serviceKey: 'oceanbase', name: 'db-name', client: 'obclient', port: 2881 } })),
-    /database\.name 只能包含/
-  );
-  assert.throws(
-    () => validateProfile(makeProfile({ database: { serviceKey: 'oceanbase', name: 'db', client: 'obclient', port: 0 } })),
-    /database\.port/
-  );
-});
-
-test('validateProfile 拒绝重复服务键与非法端口', () => {
-  const duplicate = makeProfile();
-  duplicate.containers[1].serviceKey = 'oceanbase';
-  assert.throws(() => validateProfile(duplicate), /serviceKey 重复/);
-
-  const badPort = makeProfile();
-  badPort.containers[1].port = 70000;
-  assert.throws(() => validateProfile(badPort), /port 必须是 1-65535/);
-
-  const badProtocol = makeProfile();
-  badProtocol.containers[1].protocol = 'SCTP';
-  assert.throws(() => validateProfile(badProtocol), /protocol 必须是 TCP 或 UDP/);
-});
-
-test('validateProfile 校验镜像包声明', () => {
-  assert.throws(() => validateProfile(makeProfile({ images: [] })), /images 必须是非空数组/);
-  assert.throws(() => validateProfile(makeProfile({ images: [{ file: 'a/b.tar', imageRef: 'x' }] })), /images\[0\]\.file/);
-  assert.throws(
-    () => validateProfile(makeProfile({ images: [{ file: 'a.tar', imageRef: 'x' }, { file: 'a.tar', imageRef: 'y' }] })),
-    /file 重复/
-  );
-});
-
-test('容器名与组分映射符合 profile 约定', () => {
-  const profile = validateProfile(makeProfile());
-  assert.equal(containerName(profile, 'frontend'), 'demo-frontend');
-  assert.equal(databaseContainer(profile), 'demo-oceanbase');
-  assert.equal(resolveContainer(profile, 'frontend'), 'demo-frontend');
-  assert.equal(resolveContainer(profile, 'demo-frontend'), 'demo-frontend');
+test('容器名与组件服务映射来自交付包声明', async () => {
+  const profile = await demoProfile();
+  assert.equal(containerName(profile, 'web'), 'demo-web');
+  assert.equal(databaseContainer(profile), 'demo-db');
+  assert.equal(resolveContainer(profile, 'web'), 'demo-web');
+  assert.equal(resolveContainer(profile, 'demo-web'), 'demo-web');
+  assert.equal(resolveServiceKey(profile, 'demo-web'), 'web');
   assert.throws(() => resolveContainer(profile, 'missing'), /不存在服务/);
 
-  assert.deepEqual(serviceKeysForComponent(profile, 'backend'), ['backend-java']);
-  assert.deepEqual(serviceKeysForComponent(profile, 'gateway'), ['gateway-shard-1']);
-  assert.deepEqual(serviceKeysForComponent(profile, 'frontend'), ['frontend']);
+  assert.deepEqual(serviceKeysForComponent(profile, 'server'), ['api']);
+  assert.deepEqual(serviceKeysForComponent(profile, 'site'), ['web']);
   assert.equal(serviceKeysForComponent(profile, 'config').length, profile.containers.length);
   assert.deepEqual(serviceKeysForComponent(profile, 'unknown'), []);
 });
 
-test('updateProfile 拒绝未知字段', async () => {
-  await assert.rejects(updateProfile({ notAField: true }), /不支持的 profile 字段/);
+test('自定义容器名优先于前缀拼接', async () => {
+  const root = await makeTempDir();
+  await writeBundle(root, {
+    descriptor: {
+      runtime: {
+        containerPrefix: 'demo',
+        services: [
+          { key: 'api', label: '接口', port: 8000, protocol: 'TCP', container: 'custom-api' },
+          { key: 'db', label: '数据库', port: 2881, protocol: 'TCP' }
+        ],
+        database: { serviceKey: 'db', name: 'demo_db', client: 'obclient', port: 2881 }
+      },
+      components: [
+        { key: 'server', label: '服务端', artifacts: ['server-bin', 'server-config'], services: ['api'] },
+        { key: 'config', label: '部署配置', artifacts: ['compose', 'db-config'], services: [] }
+      ]
+    }
+  });
+  const bundle = await Bundle.load(root);
+  const profile = buildProfile(makeProject({ lastBundleDir: root }), bundle);
+  assert.equal(containerName(profile, 'api'), 'custom-api');
+  assert.equal(containerName(profile, 'db'), 'demo-db');
 });
 
-test('appVersion 读取项目版本', async () => {
-  assert.match(await appVersion(), /^\d+\.\d+\.\d+/);
-});
-
-test('profile.components 优先于旧的服务名前缀推断', () => {
-  const profile = validateProfile(
-    makeProfile({
-      components: { backend: ['api'], gateway: ['gw-a', 'gw-b'], frontend: ['web'] }
-    })
-  );
-  assert.deepEqual(serviceKeysForComponent(profile, 'backend'), ['api']);
-  assert.deepEqual(serviceKeysForComponent(profile, 'gateway'), ['gw-a', 'gw-b']);
-  assert.deepEqual(serviceKeysForComponent(profile, 'frontend'), ['web']);
-});
-
-test('validateProfile 拒绝非法 components 声明', () => {
-  assert.throws(() => validateProfile(makeProfile({ components: [] })), /components 必须是对象/);
-  assert.throws(
-    () => validateProfile(makeProfile({ components: { backend: 'api' } })),
-    /components\.backend 必须是数组/
-  );
-  assert.throws(
-    () => validateProfile(makeProfile({ components: { backend: ['bad key'] } })),
-    /不是合法的服务键/
-  );
+test('validateProfile 拒绝非法容器前缀与非绝对目录', async () => {
+  const profile = await demoProfile();
+  assert.throws(() => validateProfile({ ...profile, containerPrefix: '-bad' }), /容器前缀/);
+  assert.throws(() => validateProfile({ ...profile, installDir: 'relative/dir' }), /绝对路径/);
 });

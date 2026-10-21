@@ -1,12 +1,10 @@
 // Deployment adapters and their internal bundle, transport, and execution boundaries.
 mod models;
 pub use models::{
-    RemoteArtifactInfo, RemoteDeploymentStatus, RemoteUpdateProgress, RemoteUpdateResult,
+    RemoteArtifactStatus, RemoteDeploymentStatus, RemoteUpdateProgress, RemoteUpdateResult,
 };
 
 mod bundle;
-pub(super) use bundle::validate_install_bundle;
-pub use bundle::{__cmd__inspect_bundle_layout, inspect_bundle_layout, BundleLayout};
 
 mod plan;
 pub use plan::{
@@ -20,8 +18,8 @@ pub use config::{
     ComposeServiceView,
 };
 pub(super) use config::{
-    compose_service_views, match_tarball, normalize_image_ref, resolve_bundle_file,
-    scan_image_files,
+    compose_service_views, declared_images, match_tarball, normalize_image_ref,
+    resolve_bundle_file, scan_image_files,
 };
 
 mod inspect;
