@@ -1,6 +1,6 @@
 [package]
 name = "deploy-desktop"
-version = "0.2.12"
+version = "0.2.13"
 description = "Cross-platform offline deployment console with registry manifest support"
 authors = ["deploy-desktop contributors"]
 edition = "2021"
