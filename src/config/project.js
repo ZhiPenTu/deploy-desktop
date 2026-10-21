@@ -70,7 +70,7 @@ export async function initProjects() {
   try {
     return await refreshProjectContext();
   } catch (error) {
-    console.warn('读取项目配置失败，可在设置中重新创建项目', error);
+    console.warn('读取项目配置失败，可在「项目管理」中重新创建项目', error);
     projectState.loaded = true;
     return null;
   }
@@ -86,7 +86,7 @@ export async function switchProject(id) {
 export async function bindProjectBundle(bundleDir, version) {
   const project = projectState.project;
   if (!project?.id) {
-    throw new Error('请先在设置中新建项目并选择目标主机');
+    throw new Error('请先在「项目管理」中新建项目并选择目标主机');
   }
   await activateProjectBundle(project.id, String(bundleDir || '').trim(), String(version || '').trim());
   return await refreshProjectContext();

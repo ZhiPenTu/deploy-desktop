@@ -23,8 +23,8 @@
         </select>
         <span class="project-meta">{{ projectMeta }}</span>
       </template>
-      <button v-else type="button" class="project-empty" @click="$emit('update:tab', 'settings')">
-        尚无项目，前往设置创建
+      <button v-else type="button" class="project-empty" @click="$emit('update:tab', 'projects')">
+        尚无项目，前往创建
       </button>
     </div>
 
@@ -68,7 +68,8 @@ import {
   Connection,
   Setting,
   Key,
-  Monitor
+  Monitor,
+  FolderOpened
 } from '@element-plus/icons-vue';
 import appIcon from '../../assets/app-icon.png';
 import { computed } from 'vue';
@@ -102,6 +103,12 @@ const projectMeta = computed(() => {
 });
 
 const navGroups = [
+  {
+    label: '项目',
+    items: [
+      { key: 'projects', icon: FolderOpened, title: '项目管理' }
+    ]
+  },
   {
     label: '连接',
     items: [

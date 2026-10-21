@@ -232,7 +232,7 @@ function openEdit(row) {
 async function activate(row) {
   const project = projectState.project;
   if (!project) {
-    ElMessage.warning('请先在设置中新建项目');
+    ElMessage.warning('请先在「项目管理」中新建项目');
     return;
   }
   busyKey.value = `activate:${row.id}`;

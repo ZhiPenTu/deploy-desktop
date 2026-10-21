@@ -68,10 +68,6 @@
         </div>
       </el-tab-pane>
 
-      <el-tab-pane label="项目管理" name="projects" lazy>
-        <ProjectManager />
-      </el-tab-pane>
-
       <el-tab-pane label="镜像设置" name="images" lazy>
         <ManifestPullPanel :connection="connection" />
 
@@ -144,7 +140,7 @@
             <span class="info-value">{{ project?.lastVersion || '未绑定' }}</span>
           </div>
           <p class="field-hint">
-            项目在「项目管理」中维护，交付包在制品中心选择；切换项目后部署向导、监控、日志与数据库都会使用新项目的主机与目录。
+            项目在左侧「项目管理」中维护，交付包在制品中心选择；切换项目后部署向导、监控、日志与数据库都会使用新项目的主机与目录。
           </p>
         </div>
       </el-tab-pane>
@@ -166,7 +162,6 @@ import { selectLocalPath as open } from '../../../api/tauri.js';
 import ArtifactSourceEditor from '../../artifacts/components/ArtifactSourceEditor.vue';
 import ManifestPullPanel from '../../registry/components/ManifestPullPanel.vue';
 import UpdateChecker from '../components/UpdateChecker.vue';
-import ProjectManager from '../components/ProjectManager.vue';
 import { projectState } from '../../../config/project.js';
 import { deleteArtifactSource, listArtifactSources, getImageLibrarySettings, saveImageLibrarySettings } from '../../../api/tauri.js';
 

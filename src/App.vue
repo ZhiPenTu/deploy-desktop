@@ -17,6 +17,11 @@
       />
 
       <main class="content-panel">
+        <Projects
+          v-if="currentTab === 'projects'"
+          @go-hosts="navigateTab('hosts')"
+        />
+
         <Credentials
           v-if="currentTab === 'credentials'"
           @go-hosts="currentTab = 'hosts'"
@@ -35,7 +40,7 @@
           @go-dashboard="navigateTab('dashboard')"
           @go-images="navigateTab('images')"
           @go-artifacts="navigateTab('artifacts')"
-          @go-projects="openSettings('projects')"
+          @go-projects="navigateTab('projects')"
         />
 
         <EnvCheck
@@ -96,6 +101,7 @@ import {
 } from './features/connections/state.js';
 import Header from './components/layout/Header.vue';
 import Sidebar from './components/layout/Sidebar.vue';
+import Projects from './features/projects/views/Projects.vue';
 import Credentials from './features/connections/views/Credentials.vue';
 import Hosts from './features/connections/views/Hosts.vue';
 import InstallWizard from './features/deployment/views/InstallWizard.vue';
@@ -109,6 +115,7 @@ import LogViewer from './features/monitoring/views/LogViewer.vue';
 
 
 const pages = {
+  projects: { title: '项目管理', group: '项目' },
   credentials: { title: '凭证管理', group: '连接' },
   hosts: { title: '主机管理', group: '连接' },
   wizard: { title: '部署向导', group: '部署' },
