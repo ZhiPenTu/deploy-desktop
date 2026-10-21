@@ -45,6 +45,9 @@ pub struct DeploymentImageReview {
 pub struct DeploymentReview {
     pub compose_file: String,
     pub target_compose_file: String,
+    // Read-only source snapshots, never substituted for the execution configuration.
+    pub current_compose: String,
+    pub desired_compose: String,
     pub install_dir: String,
     pub has_deployment: bool,
     pub target_checked: bool,
@@ -817,6 +820,8 @@ fn compare(
     Ok(DeploymentReview {
         compose_file: compose_file.to_string(),
         target_compose_file: target.compose_file,
+        current_compose: target.compose,
+        desired_compose: desired.to_string(),
         install_dir: install.to_string(),
         has_deployment,
         target_checked: target.checked,
@@ -879,6 +884,11 @@ mod tests {
         assert_eq!(review.services[0].change, "changed");
         assert_eq!(review.services[1].change, "added");
         assert_eq!(review.services[2].change, "removed");
+        assert_eq!(review.current_compose, current);
+        assert_eq!(review.desired_compose, desired);
+        let serialized = serde_json::to_value(&review).unwrap();
+        assert_eq!(serialized["currentCompose"], current);
+        assert_eq!(serialized["desiredCompose"], desired);
         assert!(review.has_deployment);
         assert_eq!(review.missing_images, ["redis:7"]);
         assert!(!review.ready);

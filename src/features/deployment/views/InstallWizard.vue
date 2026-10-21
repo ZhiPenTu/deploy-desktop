@@ -232,7 +232,10 @@
           <span>制品版本 {{ preparedBundle?.version || '未标记' }}</span>
           <span>{{ review.services?.filter((s) => s.change !== 'removed').length }} 个服务</span>
         </div>
-        <p class="field-hint">部署清单：{{ review.composeFile }}</p>
+        <div class="section-heading compose-review-heading">
+          <p class="field-hint">部署清单：{{ review.composeFile }}</p>
+          <el-button :disabled="checkingReview" @click="openConfigDiff()">查看配置对比</el-button>
+        </div>
         <el-tabs v-model="reviewTab">
           <el-tab-pane label="服务清单比对" name="services">
             <el-table :data="review.services || []" size="small" empty-text="未读取到服务清单">
@@ -249,7 +252,16 @@
               </el-table-column>
               <el-table-column label="变化" width="110">
                 <template #default="{ row }">
-                  <el-tag size="small" :type="row.change === 'unchanged' ? 'info' : 'warning'">
+                  <el-button
+                    v-if="row.change !== 'unchanged'"
+                    link
+                    type="warning"
+                    :aria-label="`查看 ${row.name} 的配置差异`"
+                    @click="openConfigDiff(row.name)"
+                  >
+                    {{ changeLabel(row.change) }}
+                  </el-button>
+                  <el-tag v-else size="small" type="info">
                     {{ changeLabel(row.change) }}
                   </el-tag>
                 </template>
@@ -279,6 +291,13 @@
             </el-table>
           </el-tab-pane>
         </el-tabs>
+        <ConfigDiffDialog
+          v-if="configDiffOpen"
+          v-model="configDiffOpen"
+          :review="review"
+          :service-name="configDiffService"
+          :version="preparedBundle?.version || ''"
+        />
         <ul v-if="review.issues?.length" class="issue-list">
           <li v-for="issue in review.issues" :key="issue">
             {{ safeText(issue) }}
@@ -415,7 +434,9 @@
 </template>
 
 <script setup>
+import { ref, watch } from 'vue';
 import { ArrowRight, Check, Loading } from '@element-plus/icons-vue';
+import ConfigDiffDialog from '../components/ConfigDiffDialog.vue';
 import WizardArtifactPicker from '../../artifacts/components/WizardArtifactPicker.vue';
 import { useDeploymentWizard } from '../composables/useDeploymentWizard.js';
 import { connectionInventory } from '../../connections/state.js';
@@ -424,6 +445,12 @@ import { safeText } from '../domain/errors.js';
 const props = defineProps({ connection: { type: Object, required: true } });
 const emit = defineEmits(['go-dashboard', 'go-images', 'go-artifacts', 'go-hosts', 'busy-change']);
 const config = props.connection;
+const configDiffOpen = ref(false);
+const configDiffService = ref('');
+function openConfigDiff(serviceName = '') {
+  configDiffService.value = serviceName;
+  configDiffOpen.value = true;
+}
 const {
   steps,
   activeStep,
@@ -481,6 +508,11 @@ const {
   runPreflight,
   executeDeployment
 } = useDeploymentWizard(config, emit);
+
+watch([review, activeStep], () => {
+  configDiffOpen.value = false;
+  configDiffService.value = '';
+});
 </script>
 
 <style scoped>
@@ -569,6 +601,8 @@ h3 {
   align-items: center;
   gap: 12px;
 }
+.compose-review-heading { align-items: center; margin-bottom: 10px; }
+.compose-review-heading .field-hint { flex: 1; margin-top: 0; }
 .input-row {
   width: 100%;
 }
