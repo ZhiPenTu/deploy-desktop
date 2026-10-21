@@ -447,19 +447,9 @@ fn target_script(install: &str, images: &[String]) -> String {
     let mut script = format!(
         r#"set -eu
 INSTALL={install}
-DEPLOY="$INSTALL/deploy"
+{compose_location}
 if [ -d "$INSTALL" ] && [ ! -r "$INSTALL" ]; then exit 3; fi
 if [ -d "$DEPLOY" ] && [ ! -r "$DEPLOY" ]; then exit 3; fi
-COMPOSE_FILE=""
-if [ -f "$INSTALL/docker-compose.lan.yml" ]; then
-  COMPOSE_FILE="$INSTALL/docker-compose.lan.yml"
-elif [ -f "$INSTALL/docker-compose.yml" ]; then
-  COMPOSE_FILE="$INSTALL/docker-compose.yml"
-elif [ -f "$DEPLOY/docker-compose.lan.yml" ]; then
-  COMPOSE_FILE="$DEPLOY/docker-compose.lan.yml"
-elif [ -f "$DEPLOY/docker-compose.yml" ]; then
-  COMPOSE_FILE="$DEPLOY/docker-compose.yml"
-fi
 printf 'TARGET_CHECKED=yes\nCOMPOSE_FILE=%s\n' "$COMPOSE_FILE"
 if docker info >/dev/null 2>&1; then
   echo 'DOCKER_RUNNING=yes'
@@ -491,6 +481,7 @@ echo '__REVIEW_CONTAINERS_END__'
 echo 'CONTAINERS_CHECKED=yes'
 "#,
         install = shell_quote(install),
+        compose_location = super::docker_ops::compose_location_script(),
         limit = COMPOSE_LIMIT,
         container_format = shell_quote(CONTAINER_FORMAT)
     );
@@ -659,11 +650,14 @@ fn compare(
     let supported_update_layout = !has_deployment
         || Path::new(&target.compose_file)
             .parent()
-            .map(|parent| same_directory(&parent.to_string_lossy(), &format!("{install}/deploy")))
+            .map(|parent| {
+                same_directory(&parent.to_string_lossy(), install)
+                    || same_directory(&parent.to_string_lossy(), &format!("{install}/deploy"))
+            })
             .unwrap_or(false);
     if !supported_update_layout {
         issues.push(
-            "现有清单不在所选目录的 deploy/ 下，请选择包含 deploy/ 的项目根目录后重新核对"
+            "现有清单不在所选部署目录中，请重新选择部署目录后核对"
                 .to_string(),
         );
     }
@@ -1021,11 +1015,34 @@ mod tests {
             target,
         )
         .unwrap();
-        assert!(!review.ready);
+        assert!(review.ready);
         assert!(!review.can_first_deploy);
-        assert!(!review.can_incremental_update);
+        assert!(review.can_incremental_update);
+        assert!(review.issues.is_empty());
         assert_eq!(review.services[0].container_state, "running");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn configuration_only_differences_allow_incremental_updates_in_both_layouts() {
+        let current = "services:\n  kafka:\n    image: kafka:4.0\n    environment: { MODE: current }\n    ports: ['9092:9092']\n";
+        let desired = "services:\n  kafka:\n    image: kafka:4.0\n    environment: { MODE: updated }\n    ports: ['9093:9092']\n";
+        let services = parse_services(desired).unwrap();
+        for path in ["/srv/demo/docker-compose.yml", "/srv/demo/deploy/docker-compose.yml"] {
+            let mut target = snapshot(current, &[(0, "ready")]);
+            target.compose_file = path.to_string();
+            let review = compare(
+                "deploy/docker-compose.yml", "/srv/demo", desired,
+                &services, &unique_images(&services), target,
+            ).unwrap();
+            assert!(review.compose_changed);
+            assert_eq!(review.services[0].change, "changed");
+            assert_eq!(review.services[0].image, review.services[0].current_image);
+            assert!(review.ready);
+            assert!(review.can_incremental_update);
+            assert!(!review.can_first_deploy);
+            assert!(review.issues.is_empty());
+        }
     }
 
     #[test]

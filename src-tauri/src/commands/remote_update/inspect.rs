@@ -131,25 +131,16 @@ pub(super) fn ensure_required_containers(
     }
 }
 
-pub(super) fn inspect_remote_deployment_inner(
-    host: &str,
-    port: u16,
-    user: &str,
-    key: Option<&str>,
-    install_dir: &str,
-) -> Result<RemoteDeploymentStatus, String> {
-    let deploy_dir = format!("{install_dir}/deploy");
+fn deployment_status_script(install_dir: &str) -> String {
     let mut script = format!(
         r#"set -e
 INSTALL={install}
-DEPLOY={deploy}
+{compose_location}
 echo "INSTALL_DIR=$INSTALL"
 echo "DEPLOY_DIR=$DEPLOY"
 if [ -d "$DEPLOY" ]; then echo "DEPLOY_EXISTS=yes"; else echo "DEPLOY_EXISTS=no"; fi
-if [ -f "$DEPLOY/docker-compose.lan.yml" ]; then
-  echo "COMPOSE_FILE=docker-compose.lan.yml"
-elif [ -f "$DEPLOY/docker-compose.yml" ]; then
-  echo "COMPOSE_FILE=docker-compose.yml"
+if [ -n "$COMPOSE_FILE" ]; then
+  printf 'COMPOSE_FILE=%s\n' "$(basename "$COMPOSE_FILE")"
 else
   echo "COMPOSE_FILE="
 fi
@@ -180,7 +171,7 @@ artifact FRONTEND_DIST "$DEPLOY/frontend_dist"
 echo "---CONTAINERS---"
 "#,
         install = shell_quote(install_dir),
-        deploy = shell_quote(&deploy_dir),
+        compose_location = crate::commands::docker_ops::compose_location_script(),
         artifact = crate::commands::profile::deployment_profile().backend_artifact
     );
 
@@ -200,7 +191,17 @@ printf 'CONTAINER|%s|%s|%s|%s|%s|%s\n' "$c" "$state" "$health" "$image" "$status
         ));
     }
 
-    let output = run_ssh_script(host, port, user, key, &script)
+    script
+}
+
+pub(super) fn inspect_remote_deployment_inner(
+    host: &str,
+    port: u16,
+    user: &str,
+    key: Option<&str>,
+    install_dir: &str,
+) -> Result<RemoteDeploymentStatus, String> {
+    let output = run_ssh_script(host, port, user, key, &deployment_status_script(install_dir))
         .map_err(|e| format!("连接目标机失败: {e}"))?;
     let raw = String::from_utf8_lossy(&output.stdout).to_string();
     if !output.status.success() {
@@ -246,6 +247,10 @@ printf 'CONTAINER|%s|%s|%s|%s|%s|%s\n' "$c" "$state" "$health" "$image" "$status
         }
     }
 
+    let deploy_dir = flags
+        .get("DEPLOY_DIR")
+        .cloned()
+        .unwrap_or_else(|| format!("{install_dir}/deploy"));
     let deploy_exists = flags
         .get("DEPLOY_EXISTS")
         .map(|v| v == "yes")
@@ -340,6 +345,44 @@ printf 'CONTAINER|%s|%s|%s|%s|%s|%s\n' "$c" "$state" "$health" "$image" "$status
         issues,
         message,
     })
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn remote_status_reads_active_compose_and_frontend_in_both_layouts() {
+        for layout in ["", "deploy/"] {
+            let root = std::env::temp_dir().join(format!(
+                "deploy-remote-layout-{}-{}", std::process::id(),
+                SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            ));
+            fs::create_dir_all(root.join("bin")).unwrap();
+            fs::create_dir_all(root.join(format!("{layout}frontend_dist"))).unwrap();
+            fs::write(root.join(format!("{layout}docker-compose.yml")), "services: {}\n").unwrap();
+            let binary = root.join("bin/docker");
+            fs::write(&binary, "#!/bin/sh\ncase \"$1\" in info|compose) exit 0;; *) exit 1;; esac\n").unwrap();
+            fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+            let mut paths = vec![root.join("bin")];
+            paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
+            let output = Command::new("sh")
+                .args(["-c", &deployment_status_script(root.to_str().unwrap())])
+                .env("PATH", std::env::join_paths(paths).unwrap())
+                .output().unwrap();
+            assert!(output.status.success());
+            let text = String::from_utf8(output.stdout).unwrap();
+            let expected = root.join(format!("{layout}docker-compose.yml"));
+            assert!(text.lines().any(|line| line == format!("DEPLOY_DIR={}", expected.parent().unwrap().display())));
+            assert!(text.lines().any(|line| line == "COMPOSE_FILE=docker-compose.yml"));
+            assert!(text.lines().any(|line| line == "ART_FRONTEND_DIST_EXISTS=yes"));
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
 }
 
 fn artifact_from_flags(flags: &HashMap<String, String>, key: &str) -> RemoteArtifactInfo {

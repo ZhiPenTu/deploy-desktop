@@ -41,6 +41,10 @@ if [ -f "$DEPLOY/docker-compose.yml" ]; then
   mkdir -p "$BACKUP/deploy"
   cp -a "$DEPLOY/docker-compose.yml" "$BACKUP/deploy/"
 fi
+if [ -f "$DEPLOY/docker-compose.lan.yml" ]; then
+  mkdir -p "$BACKUP/deploy"
+  cp -a "$DEPLOY/docker-compose.lan.yml" "$BACKUP/deploy/"
+fi
 if [ -d "$DEPLOY/nginx" ]; then
   mkdir -p "$BACKUP/deploy"
   cp -a "$DEPLOY/nginx" "$BACKUP/deploy/"

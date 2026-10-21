@@ -236,6 +236,13 @@
           <p class="field-hint">部署清单：{{ review.composeFile }}</p>
           <el-button :disabled="checkingReview" @click="openConfigDiff()">查看配置对比</el-button>
         </div>
+        <el-alert
+          v-if="review.hasDeployment && review.composeChanged"
+          title="配置有变化，可继续选择更新内容；仅勾选“部署配置”时才会替换配置文件。"
+          type="info"
+          :closable="false"
+          show-icon
+        />
         <el-tabs v-model="reviewTab">
           <el-tab-pane label="服务清单比对" name="services">
             <el-table :data="review.services || []" size="small" empty-text="未读取到服务清单">

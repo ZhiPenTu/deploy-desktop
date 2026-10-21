@@ -47,6 +47,20 @@ pub fn resolve_compose_file(root: &Path) -> Option<std::path::PathBuf> {
         .find(|path| path.is_file())
 }
 
+/// Keep SSH probes and local execution on the same Compose search order.
+/// INSTALL is shell-quoted by the caller; all candidate names are fixed here.
+pub(crate) fn compose_location_script() -> String {
+    let mut script = String::from("COMPOSE_FILE=\"\"\nDEPLOY=\"$INSTALL/deploy\"\n");
+    for (index, name) in COMPOSE_CANDIDATES.iter().enumerate() {
+        let branch = if index == 0 { "if" } else { "elif" };
+        script.push_str(&format!(
+            "{branch} [ -f \"$INSTALL/{name}\" ]; then\n  COMPOSE_FILE=\"$INSTALL/{name}\"\n"
+        ));
+    }
+    script.push_str("fi\nif [ -n \"$COMPOSE_FILE\" ]; then DEPLOY=$(dirname \"$COMPOSE_FILE\"); fi\n");
+    script
+}
+
 pub fn resolve_env_files(root: &Path) -> Vec<std::path::PathBuf> {
     [
         ".env",
@@ -441,6 +455,33 @@ mod tests {
         assert_eq!(found, root.join("deploy/docker-compose.yml"));
 
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ssh_and_local_compose_locations_match_for_root_and_nested_layouts() {
+        let root = temp_root("compose-layout's directory");
+        fs::create_dir_all(root.join("deploy")).unwrap();
+        for name in [
+            "deploy/docker-compose.yml", "deploy/docker-compose.lan.yml",
+            "docker-compose.yml", "docker-compose.lan.yml",
+        ] {
+            fs::write(root.join(name), "services: {}\n").unwrap();
+            let script = format!(
+                "set -eu\nINSTALL={}\n{}\nprintf '%s\\n%s\\n' \"$COMPOSE_FILE\" \"$DEPLOY\"\n",
+                super::super::remote_ssh::shell_quote(&root.to_string_lossy()),
+                compose_location_script(),
+            );
+            let output = Command::new("sh").args(["-c", &script]).output().unwrap();
+            assert!(output.status.success());
+            let text = String::from_utf8(output.stdout).unwrap();
+            let lines: Vec<_> = text.lines().collect();
+            let expected = root.join(name);
+            assert_eq!(resolve_compose_file(&root).unwrap(), expected);
+            assert_eq!(lines[0], expected.to_str().unwrap());
+            assert_eq!(lines[1], expected.parent().unwrap().to_str().unwrap());
+        }
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

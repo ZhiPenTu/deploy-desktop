@@ -33,6 +33,7 @@ struct Replacement {
 
 struct UpdatePlan {
     root: PathBuf,
+    deploy_dir: PathBuf,
     compose: PathBuf,
     bundle_compose: PathBuf,
     replacements: Vec<Replacement>,
@@ -100,7 +101,12 @@ fn run_update(
     let mut plan = build_plan(bundle_dir, install_dir, &components, deployment_profile())?;
     check_local_docker()?;
     let current = compose_config(&plan, &plan.compose)?;
-    let incoming = compose_config(&plan, &plan.bundle_compose)?;
+    // Unselected configuration must not block an artifact-only update.
+    let incoming = if components.iter().any(|item| item == "config") {
+        compose_config(&plan, &plan.bundle_compose)?
+    } else {
+        current.clone()
+    };
     validate_effective_configs(&plan, &components, &current, &incoming)?;
     if compose_output(&plan, &plan.compose, &["ps", "-a", "-q"])?
         .trim()
@@ -172,7 +178,7 @@ fn run_update(
             docker_output(&["load", "-i", &image.to_string_lossy()], "导入镜像")?;
         }
         let effective = if components.iter().any(|item| item == "config") {
-            preferred_compose(&plan.root.join("deploy"))?
+            preferred_compose(&plan.deploy_dir)?
         } else {
             plan.compose.clone()
         };
@@ -369,7 +375,11 @@ fn build_plan(
     if bundle.starts_with(&root) || root.starts_with(&bundle) {
         return Err("交付包与部署目录不能重叠，请先将交付包解压到独立目录".to_string());
     }
-    let compose = preferred_compose(&root.join("deploy"))?;
+    let compose = super::docker_ops::resolve_compose_file(&root)
+        .ok_or_else(|| "未找到 Compose 清单，请检查部署目录".to_string())?;
+    let deploy_dir = compose.parent().unwrap().to_path_buf();
+    let deploy_relative = deploy_dir.strip_prefix(&root).unwrap();
+    let deploy_path = |name: &str| deploy_relative.join(name).to_string_lossy().into_owned();
     let bundle_compose = preferred_compose(&bundle.join("deploy"))?;
     reject_symlinks(&compose)?;
     reject_symlinks(&bundle_compose)?;
@@ -455,29 +465,25 @@ fn build_plan(
                 if !bundle.join("app/frontend-dist/index.html").is_file() {
                     return Err("交付包缺少前端入口文件，请重新获取完整制品".to_string());
                 }
-                add("app/frontend-dist", "deploy/frontend_dist", true)?;
+                add("app/frontend-dist", &deploy_path("frontend_dist"), true)?;
             }
             "config" => {
                 add(
                     "deploy/docker-compose.yml",
-                    "deploy/docker-compose.yml",
+                    &deploy_path("docker-compose.yml"),
                     true,
                 )?;
-                add(
-                    "deploy/docker-compose.lan.yml",
-                    "deploy/docker-compose.lan.yml",
-                    false,
-                )?;
-                add("deploy/nginx", "deploy/nginx", false)?;
-                add("deploy/oceanbase", "deploy/oceanbase", false)?;
-                if root.join("deploy/docker-compose.lan.yml").is_file()
-                    && !bundle.join("deploy/docker-compose.lan.yml").is_file()
+                let lan_source = if !bundle.join("deploy/docker-compose.lan.yml").is_file()
+                    && compose.file_name().and_then(|name| name.to_str()) == Some("docker-compose.lan.yml")
                 {
-                    return Err(
-                        "当前部署使用局域网清单，交付包缺少对应清单，请补齐后再更新配置"
-                            .to_string(),
-                    );
-                }
+                    // Keep the active filename when a new bundle supplies only the base manifest.
+                    "deploy/docker-compose.yml"
+                } else {
+                    "deploy/docker-compose.lan.yml"
+                };
+                add(lan_source, &deploy_path("docker-compose.lan.yml"), false)?;
+                add("deploy/nginx", &deploy_path("nginx"), false)?;
+                add("deploy/oceanbase", &deploy_path("oceanbase"), false)?;
             }
             "image" => {
                 let dir = bundle.join("images");
@@ -522,6 +528,7 @@ fn build_plan(
     images.sort();
     Ok(UpdatePlan {
         root,
+        deploy_dir,
         compose,
         bundle_compose,
         replacements,
@@ -575,25 +582,28 @@ fn check_local_docker() -> Result<(), String> {
     Ok(())
 }
 
-fn compose_output(plan: &UpdatePlan, compose: &Path, action: &[&str]) -> Result<String, String> {
+fn compose_command(plan: &UpdatePlan, compose: &Path, action: &[&str]) -> Result<Command, String> {
     let mut command = Command::new(find_binary("docker"));
     command
         .arg("compose")
         .arg("--project-directory")
-        .arg(plan.root.join("deploy"));
+        .arg(&plan.deploy_dir);
     for env in super::docker_ops::resolve_env_files(&plan.root) {
         reject_symlinks(&env)?;
         command.arg("--env-file").arg(env);
     }
     command.arg("-f").arg(compose);
-    let override_file = plan.root.join("deploy/docker-compose.frontend-bind.yml");
+    let override_file = plan.deploy_dir.join("docker-compose.frontend-bind.yml");
     if override_file.is_file() {
         reject_symlinks(&override_file)?;
         command.arg("-f").arg(override_file);
     }
-    let output = command
-        .args(action)
-        .current_dir(plan.root.join("deploy"))
+    command.args(action).current_dir(&plan.deploy_dir);
+    Ok(command)
+}
+
+fn compose_output(plan: &UpdatePlan, compose: &Path, action: &[&str]) -> Result<String, String> {
+    let output = compose_command(plan, compose, action)?
         .output()
         .map_err(|_| "无法运行 Docker Compose，请确认 Docker 已启动".to_string())?;
     if !output.status.success() {
@@ -617,7 +627,9 @@ fn validate_effective_configs(
     current: &Value,
     incoming: &Value,
 ) -> Result<(), String> {
-    if current.get("name").and_then(Value::as_str) != incoming.get("name").and_then(Value::as_str) {
+    if components.iter().any(|item| item == "config")
+        && current.get("name").and_then(Value::as_str) != incoming.get("name").and_then(Value::as_str)
+    {
         return Err("交付包的 Compose 项目名称与当前部署不同，请确认制品与目标".to_string());
     }
     for component in components {
@@ -627,7 +639,7 @@ fn validate_effective_configs(
                 deployment_profile().backend_artifact
             ))],
             "gateway" => vec![plan.root.join("backend-java/gateway-app/target/classes")],
-            "frontend" => vec![plan.root.join("deploy/frontend_dist")],
+            "frontend" => vec![plan.deploy_dir.join("frontend_dist")],
             _ => Vec::new(),
         };
         for service in deployment_profile().component_services(component) {
@@ -1003,6 +1015,90 @@ mod tests {
         );
     }
 
+    #[test]
+    fn root_compose_configuration_changes_follow_active_paths_and_back_up_old_files() {
+        let fixture = Fixture::new();
+        let current = "services:\n  frontend:\n    image: nginx\n    environment: { MODE: current }\n";
+        let incoming = "services:\n  frontend:\n    image: nginx\n    environment: { MODE: updated }\n";
+        fixture.write("target/docker-compose.yml", current);
+        fixture.write("target/deploy/docker-compose.lan.yml", "services: {}\n");
+        fixture.write("target/nginx/default.conf", "old");
+        fixture.write("bundle/deploy/docker-compose.yml", incoming);
+        fixture.write("bundle/deploy/nginx/default.conf", "new");
+        fixture.write("bundle/app/frontend-dist/index.html", "new page");
+        let components = vec!["config".to_string(), "frontend".to_string()];
+        let plan = build_plan(
+            fixture.0.join("bundle").to_str().unwrap(),
+            fixture.0.join("target").to_str().unwrap(),
+            &components,
+            deployment_profile(),
+        ).unwrap();
+        assert_eq!(plan.compose, plan.root.join("docker-compose.yml"));
+        assert_eq!(plan.deploy_dir, plan.root);
+        assert_eq!(fs::read_to_string(&plan.compose).unwrap(), current);
+        assert!(!plan.root.join("backup").exists());
+        assert!(plan.replacements.iter().any(|item| item.relative == Path::new("frontend_dist")));
+        let command = compose_command(&plan, &plan.bundle_compose, &["config", "--format", "json"]).unwrap();
+        assert_eq!(command.get_current_dir(), Some(plan.root.as_path()));
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args[2], plan.root.as_os_str());
+        let backup = create_backup(&plan).unwrap();
+        for item in &plan.replacements {
+            replace_path(&item.source, &plan.root.join(&item.relative)).unwrap();
+        }
+        assert_eq!(fs::read_to_string(backup.join("docker-compose.yml")).unwrap(), current);
+        assert_eq!(fs::read_to_string(backup.join("nginx/default.conf")).unwrap(), "old");
+        assert_eq!(fs::read_to_string(&plan.compose).unwrap(), incoming);
+        assert_eq!(fs::read_to_string(plan.root.join("frontend_dist/index.html")).unwrap(), "new page");
+        assert_eq!(fs::read_to_string(plan.root.join("deploy/docker-compose.lan.yml")).unwrap(), "services: {}\n");
+    }
+
+    #[test]
+    fn artifact_only_plan_preserves_customized_configuration_in_both_layouts() {
+        for layout in ["", "deploy/"] {
+            let fixture = Fixture::new();
+            let current = "services:\n  frontend:\n    image: nginx\n    environment: { MODE: customized }\n";
+            fixture.write(&format!("target/{layout}docker-compose.yml"), current);
+            fixture.write("bundle/deploy/docker-compose.yml", "name: incoming-project\nservices:\n  frontend:\n    image: nginx\n    environment: { MODE: '${UNSET_REQUIRED:?missing}' }\n");
+            fixture.write("bundle/app/frontend-dist/index.html", "new page");
+            let plan = build_plan(
+                fixture.0.join("bundle").to_str().unwrap(),
+                fixture.0.join("target").to_str().unwrap(),
+                &["frontend".to_string()],
+                deployment_profile(),
+            ).unwrap();
+            assert_eq!(plan.replacements.len(), 1);
+            for item in &plan.replacements {
+                replace_path(&item.source, &plan.root.join(&item.relative)).unwrap();
+            }
+            assert_eq!(fs::read_to_string(&plan.compose).unwrap(), current);
+            assert_eq!(fs::read_to_string(plan.deploy_dir.join("frontend_dist/index.html")).unwrap(), "new page");
+        }
+    }
+
+    #[test]
+    fn base_manifest_updates_existing_lan_filename_after_backup() {
+        for layout in ["", "deploy/"] {
+            let fixture = Fixture::new();
+            let current = "services:\n  frontend:\n    image: nginx\n    environment: { MODE: previous }\n";
+            let incoming = current.replace("previous", "updated");
+            fixture.write(&format!("target/{layout}docker-compose.lan.yml"), current);
+            fixture.write("bundle/deploy/docker-compose.yml", &incoming);
+            let plan = build_plan(
+                fixture.0.join("bundle").to_str().unwrap(),
+                fixture.0.join("target").to_str().unwrap(),
+                &["config".to_string()],
+                deployment_profile(),
+            ).unwrap();
+            let backup = create_backup(&plan).unwrap();
+            for item in &plan.replacements {
+                replace_path(&item.source, &plan.root.join(&item.relative)).unwrap();
+            }
+            assert_eq!(fs::read_to_string(backup.join(format!("{layout}docker-compose.lan.yml"))).unwrap(), current);
+            assert_eq!(fs::read_to_string(preferred_compose(&plan.deploy_dir).unwrap()).unwrap(), incoming);
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn rejects_symlink_sources_and_destination_parents() {
@@ -1035,11 +1131,12 @@ mod tests {
     }
 
     #[test]
-    fn rejects_project_or_mount_mismatch_before_artifact_update() {
+    fn ignores_unselected_config_but_rejects_project_changes_and_wrong_artifact_mounts() {
         let fixture = Fixture::new();
         let root = fs::canonicalize(&fixture.0).unwrap();
         let destination = root.join("deploy/frontend_dist");
         let plan = UpdatePlan {
+            deploy_dir: root.join("deploy"),
             root,
             compose: PathBuf::new(),
             bundle_compose: PathBuf::new(),
@@ -1056,7 +1153,12 @@ mod tests {
         assert!(validate_effective_configs(&plan, &components, &current, &current).is_ok());
         let mut other_project = current.clone();
         other_project["name"] = Value::String("another-project".to_string());
-        assert!(validate_effective_configs(&plan, &components, &current, &other_project).is_err());
+        assert!(validate_effective_configs(&plan, &components, &current, &other_project).is_ok());
+        assert!(validate_effective_configs(&plan, &["config".to_string()], &current, &other_project).is_err());
+        let mut changed = current.clone();
+        changed["services"]["frontend"]["environment"] = serde_json::json!({"MODE": "updated"});
+        changed["services"]["frontend"]["ports"] = serde_json::json!([{"target": 80, "published": "8081"}]);
+        assert!(validate_effective_configs(&plan, &["config".to_string(), "frontend".to_string()], &current, &changed).is_ok());
         let without_bind =
             serde_json::json!({ "name": "same-project", "services": { "frontend": {} } });
         assert!(validate_effective_configs(&plan, &components, &without_bind, &current).is_err());

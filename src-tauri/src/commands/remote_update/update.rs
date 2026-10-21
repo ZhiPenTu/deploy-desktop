@@ -62,7 +62,6 @@ fn update_remote_deployment_blocking(
 
     let key = resolve_existing_key(key_path, &host)?;
     let install_dir = normalize_install_dir(&install_dir);
-    let deploy_dir = format!("{install_dir}/deploy");
 
     emit_progress(
         window,
@@ -72,6 +71,7 @@ fn update_remote_deployment_blocking(
         "确认目标机部署目录与容器状态...",
     );
     let status = inspect_remote_deployment_inner(&host, port, &user, key.as_deref(), &install_dir)?;
+    let deploy_dir = status.deploy_dir.clone();
     if !status.deployed {
         return Err(format!(
             "目标机未检测到已部署服务（{}）。请先使用部署向导完成首次安装。",
@@ -226,7 +226,10 @@ fn update_remote_deployment_blocking(
             path,
             &format!("{deploy_dir}/docker-compose.yml"),
         )?;
-        if let Some(lan) = &bundle.compose_lan_file {
+        let lan = bundle.compose_lan_file.as_ref().or_else(|| {
+            (status.compose_file == "docker-compose.lan.yml").then_some(path)
+        });
+        if let Some(lan) = lan {
             upload_file_replace(
                 &host,
                 port,
