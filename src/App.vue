@@ -60,6 +60,8 @@
           @go-settings="openSettings"
         />
 
+        <McpService v-else-if="currentTab === 'mcp'" />
+
         <Settings
           v-else-if="currentTab === 'settings'"
           :connection="connection"
@@ -93,6 +95,7 @@ import Dashboard from './features/monitoring/views/Dashboard.vue';
 import ImageManager from './features/images/views/ImageManager.vue';
 import ArtifactCenter from './features/artifacts/views/ArtifactCenter.vue';
 import Settings from './features/settings/views/Settings.vue';
+import McpService from './features/mcp/views/McpService.vue';
 import LogViewer from './features/monitoring/views/LogViewer.vue';
 import { getDefaultContainer } from './config/cluster.js';
 
@@ -105,6 +108,7 @@ const pages = {
   logs: { title: '日志诊断', group: '运行' },
   artifacts: { title: '制品中心', group: '资源' },
   images: { title: '镜像与离线包', group: '资源' },
+  mcp: { title: 'MCP 服务', group: '高级' },
   settings: { title: '设置', group: '高级' }
 };
 

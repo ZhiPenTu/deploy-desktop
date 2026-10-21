@@ -122,6 +122,8 @@ env = { DEPLOY_DESKTOP_ROOT = "/absolute/path/to/deploy-desktop" }
 
 共 39 个工具，按能力分组：
 
+桌面应用的「高级 / MCP 服务」页面按以下分类展示全部能力，可按名称、用途和操作类型筛选。该页面用于查看能力，服务仍由 MCP 客户端启动与调用，连接状态请在客户端中查看。MCP 的主机、镜像仓库与更新源配置独立保存。
+
 | 分类 | 工具 |
 | --- | --- |
 | 部署配置 | `deploy_profile_get`、`deploy_profile_update` |

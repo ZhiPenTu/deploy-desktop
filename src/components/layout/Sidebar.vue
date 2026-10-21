@@ -46,6 +46,7 @@ import {
   Document,
   Files,
   Box,
+  Connection,
   Setting,
   Key,
   Monitor
@@ -94,6 +95,7 @@ const navGroups = [
   {
     label: '高级',
     items: [
+      { key: 'mcp', icon: Connection, title: 'MCP 服务' },
       { key: 'settings', icon: Setting, title: '设置' }
     ]
   }
