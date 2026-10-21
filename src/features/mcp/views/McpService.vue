@@ -1,18 +1,10 @@
 <template>
   <div class="page-view mcp-view">
-    <div class="page-header">
-      <div>
-        <h2 class="page-title">MCP 服务</h2>
-        <p class="page-subtitle">通过支持 MCP 的 AI 客户端使用主机、镜像与部署能力</p>
-      </div>
-      <el-tag type="info" effect="plain">能力概览</el-tag>
-    </div>
-
     <section class="card-surface service-overview" aria-label="MCP 服务概览">
       <div class="service-intro">
         <span class="icon-tile"><el-icon><Connection /></el-icon></span>
         <div>
-          <h3>让 AI 客户端协助部署与运维</h3>
+          <h2>让 AI 客户端协助部署与运维</h2>
           <p>服务由 MCP 客户端启动并调用，连接状态请在客户端中查看。</p>
         </div>
       </div>
@@ -24,80 +16,90 @@
       <p class="config-note">MCP 的主机、镜像仓库与更新源单独保存，使用前请在 MCP 客户端中核对目标与配置。</p>
     </section>
 
-    <nav class="category-nav" aria-label="MCP 能力分类">
-      <button
-        v-for="category in categoryOptions"
-        :key="category.id"
-        type="button"
-        class="category-button"
-        :class="{ active: activeCategory === category.id }"
-        :aria-pressed="activeCategory === category.id"
-        @click="activeCategory = category.id"
-      >
-        <span>{{ category.title }}</span>
-        <span class="category-count">{{ category.count }}</span>
-      </button>
-    </nav>
+    <div class="capability-workspace">
+      <nav class="card-surface category-nav" aria-label="MCP 能力分类">
+        <h3 class="nav-heading">能力分类</h3>
+        <button
+          v-for="category in categoryOptions"
+          :key="category.id"
+          type="button"
+          class="category-button"
+          :class="{ active: activeCategory === category.id }"
+          :aria-pressed="activeCategory === category.id"
+          @click="activeCategory = category.id"
+        >
+          <el-icon><component :is="category.id === 'all' ? Grid : categoryIcons[category.id]" /></el-icon>
+          <span>{{ category.title }}</span>
+          <span class="category-count">{{ category.count }}</span>
+        </button>
+      </nav>
 
-    <div class="capability-toolbar">
-      <el-input
-        v-model="query"
-        class="capability-search"
-        placeholder="搜索能力名称或用途"
-        aria-label="搜索 MCP 能力"
-        :prefix-icon="Search"
-        clearable
-      />
-      <el-select v-model="accessFilter" class="access-filter" aria-label="筛选操作类型">
-        <el-option label="全部操作" value="all" />
-        <el-option label="只读查询" value="read" />
-        <el-option label="更改操作" value="write" />
-        <el-option label="含确认步骤" value="confirm" />
-      </el-select>
-      <span class="result-count" role="status">{{ visibleToolCount }} 项能力</span>
-      <el-button v-if="hasFilters" link type="primary" @click="resetFilters">重置筛选</el-button>
-    </div>
-
-    <div v-if="visibleCategories.length" class="capability-grid">
-      <section
-        v-for="category in visibleCategories"
-        :key="category.id"
-        class="card-surface capability-category"
-        :aria-labelledby="`mcp-category-${category.id}`"
-      >
-        <div class="category-heading">
-          <span class="icon-tile neutral"><el-icon><component :is="categoryIcons[category.id]" /></el-icon></span>
-          <div class="category-copy">
-            <h3 :id="`mcp-category-${category.id}`">{{ category.title }}</h3>
-            <p>{{ category.description }}</p>
-          </div>
-          <el-tag type="info" effect="plain" size="small">{{ category.tools.length }} 项</el-tag>
+      <div class="card-surface capability-panel">
+        <div class="capability-toolbar">
+          <el-input
+            v-model="query"
+            class="capability-search"
+            placeholder="搜索能力名称或用途"
+            aria-label="搜索 MCP 能力"
+            :prefix-icon="Search"
+            clearable
+          />
+          <el-select v-model="accessFilter" class="access-filter" aria-label="筛选操作类型">
+            <el-option label="全部操作" value="all" />
+            <el-option label="只读查询" value="read" />
+            <el-option label="更改操作" value="write" />
+            <el-option label="含确认步骤" value="confirm" />
+          </el-select>
+          <span class="result-count" role="status" aria-live="polite">{{ visibleToolCount }} 项能力</span>
+          <el-button v-if="hasFilters" link type="primary" @click="resetFilters">重置筛选</el-button>
         </div>
-        <ul class="capability-list">
-          <li v-for="tool in category.tools" :key="tool.id" class="capability-item">
-            <div class="tool-heading">
-              <h4>{{ tool.title }}</h4>
-              <el-tag :type="tool.confirmation ? 'warning' : 'info'" effect="plain" size="small">
-                {{ tool.confirmation || (tool.access === 'read' ? '只读' : '更改操作') }}
-              </el-tag>
-            </div>
-            <p>{{ tool.description }}</p>
-            <p v-if="tool.requirement" class="requirement-note">{{ tool.requirement }}</p>
-          </li>
-        </ul>
-      </section>
-    </div>
-    <div v-else class="card-surface empty-results">
-      <el-empty description="没有匹配的 MCP 能力，请调整关键词或筛选条件。">
-        <el-button type="primary" plain @click="resetFilters">重置筛选</el-button>
-      </el-empty>
+
+        <div ref="resultsPanel" class="capability-results" role="region" aria-label="MCP 能力列表" tabindex="0">
+          <div v-if="visibleCategories.length" class="capability-groups">
+            <section
+              v-for="category in visibleCategories"
+              :key="category.id"
+              class="capability-category"
+              :aria-labelledby="`mcp-category-${category.id}`"
+            >
+              <div class="category-heading">
+                <span class="icon-tile neutral"><el-icon><component :is="categoryIcons[category.id]" /></el-icon></span>
+                <div class="category-copy">
+                  <h3 :id="`mcp-category-${category.id}`">{{ category.title }}</h3>
+                  <p>{{ category.description }}</p>
+                </div>
+                <el-tag type="info" effect="plain" size="small" disable-transitions>{{ category.tools.length }} 项</el-tag>
+              </div>
+              <ul class="capability-list">
+                <li v-for="tool in category.tools" :key="tool.id" class="capability-item">
+                  <div class="tool-copy">
+                    <h4>{{ tool.title }}</h4>
+                    <div class="tool-description">
+                      <p>{{ tool.description }}</p>
+                      <p v-if="tool.requirement" class="requirement-note">{{ tool.requirement }}</p>
+                    </div>
+                  </div>
+                  <el-tag :type="tool.confirmation ? 'warning' : 'info'" effect="plain" size="small" disable-transitions>
+                    {{ tool.confirmation || (tool.access === 'read' ? '只读' : '更改操作') }}
+                  </el-tag>
+                </li>
+              </ul>
+            </section>
+          </div>
+          <div v-else class="empty-results">
+            <el-empty description="没有匹配的 MCP 能力，请调整关键词或筛选条件。">
+              <el-button type="primary" plain @click="resetFilters">重置筛选</el-button>
+            </el-empty>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { computed, ref } from 'vue';
-import { Box, Connection, Document, Download, Files, Monitor, Operation, Search, Setting } from '@element-plus/icons-vue';
+import { computed, ref, watch } from 'vue';
+import { Box, Connection, Document, Download, Files, Grid, Monitor, Operation, Search, Setting } from '@element-plus/icons-vue';
 import { mcpCategories } from '../catalog.js';
 
 const categoryIcons = {
@@ -113,6 +115,7 @@ const categoryOptions = [
 const activeCategory = ref('all');
 const query = ref('');
 const accessFilter = ref('all');
+const resultsPanel = ref(null);
 const hasFilters = computed(() => activeCategory.value !== 'all' || Boolean(query.value) || accessFilter.value !== 'all');
 const visibleCategories = computed(() => {
   const keyword = query.value.trim().toLocaleLowerCase();
@@ -131,6 +134,10 @@ const visibleCategories = computed(() => {
 });
 const visibleToolCount = computed(() => visibleCategories.value.reduce((total, category) => total + category.tools.length, 0));
 
+watch([activeCategory, query, accessFilter], () => {
+  resultsPanel.value?.scrollTo({ top: 0 });
+}, { flush: 'post' });
+
 function resetFilters() {
   activeCategory.value = 'all';
   query.value = '';
@@ -139,38 +146,54 @@ function resetFilters() {
 </script>
 
 <style scoped>
+.mcp-view {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  overflow: hidden;
+  padding-top: 24px;
+  padding-bottom: 24px;
+}
+
 .service-overview {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  gap: 18px 28px;
-  padding: 22px 24px;
+  align-items: center;
+  flex: none;
+  gap: 14px 24px;
+  padding: 20px;
 }
 
 .service-intro,
-.category-heading,
-.tool-heading {
+.category-heading {
   display: flex;
   align-items: center;
   gap: 12px;
 }
 
-.service-intro h3 {
+.service-intro h2 {
   font-size: 15px;
+  line-height: 1.5;
 }
 
 .service-intro p,
 .config-note,
 .category-copy p,
 .capability-item p {
-  margin-top: 6px;
   font-size: 12px;
   line-height: 1.65;
   color: var(--text-muted);
 }
 
+.service-intro p {
+  margin-top: 4px;
+}
+
 .overview-stats {
   display: flex;
-  gap: 30px;
+  gap: 24px;
+  padding-left: 24px;
+  border-left: 1px solid var(--border-color);
 }
 
 .overview-stats dt {
@@ -179,8 +202,8 @@ function resetFilters() {
 }
 
 .overview-stats dd {
-  margin-top: 4px;
-  font-size: 24px;
+  margin-top: 3px;
+  font-size: 22px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
@@ -195,81 +218,141 @@ function resetFilters() {
 .config-note {
   grid-column: 1 / -1;
   margin: 0;
-  padding-top: 14px;
+  padding-top: 12px;
   border-top: 1px solid var(--border-color);
+}
+
+.capability-workspace {
+  display: grid;
+  grid-template-columns: 176px minmax(0, 1fr);
+  align-items: start;
+  flex: 1;
+  min-height: 0;
+  gap: 20px;
 }
 
 .category-nav {
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin: 22px 0 18px;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 100%;
+  padding: 12px;
+  overflow-y: auto;
+}
+
+.nav-heading {
+  margin: 4px 10px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
 }
 
 .category-button {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  border: 1px solid var(--border-color);
+  flex: none;
+  gap: 10px;
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 1px solid transparent;
   border-radius: var(--radius-sm);
-  background: var(--panel-bg);
+  background: transparent;
   color: var(--text-secondary);
   font: inherit;
   font-size: 12px;
+  text-align: left;
   cursor: pointer;
 }
 
-.category-button:hover,
+.category-button:hover {
+  background: var(--panel-subtle);
+}
+
 .category-button.active {
-  border-color: var(--primary-color);
   color: var(--primary-color);
   background: var(--primary-soft);
 }
 
-.category-button:focus-visible {
+.category-button:focus-visible,
+.capability-results:focus-visible {
   outline: 2px solid var(--primary-color);
-  outline-offset: 2px;
+  outline-offset: -2px;
+}
+
+.category-button .el-icon {
+  font-size: 15px;
 }
 
 .category-count {
+  margin-left: auto;
   font-size: 11px;
   font-variant-numeric: tabular-nums;
   opacity: 0.8;
 }
 
+.capability-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
 .capability-toolbar {
   display: flex;
   align-items: center;
+  flex: none;
   flex-wrap: wrap;
-  gap: 12px;
-  margin-bottom: 18px;
+  gap: 10px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border-color);
 }
 
 .capability-search {
-  width: 300px;
-  max-width: 100%;
+  flex: 1;
+  min-width: 180px;
+  max-width: 360px;
 }
 
 .access-filter {
-  width: 156px;
+  width: 140px;
 }
 
 .result-count {
+  margin-left: auto;
   color: var(--text-muted);
   font-size: 12px;
+  white-space: nowrap;
 }
 
-.capability-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  align-items: start;
-  gap: 18px;
+.capability-toolbar .el-button {
+  margin-left: 0;
+}
+
+.capability-results {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.capability-category + .capability-category {
+  border-top: 1px solid var(--border-color);
 }
 
 .category-heading {
-  padding: 18px 20px;
+  padding: 14px 20px;
+  background: var(--panel-subtle);
   border-bottom: 1px solid var(--border-color);
+}
+
+.category-heading .icon-tile {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  font-size: 16px;
+  background: var(--panel-bg);
 }
 
 .category-copy {
@@ -282,7 +365,7 @@ function resetFilters() {
 }
 
 .category-copy p {
-  margin-top: 3px;
+  margin-top: 2px;
 }
 
 .capability-list {
@@ -291,51 +374,109 @@ function resetFilters() {
 }
 
 .capability-item {
-  padding: 15px 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 16px;
+  padding: 16px 0;
 }
 
 .capability-item + .capability-item {
   border-top: 1px solid var(--border-color);
 }
 
-.tool-heading {
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 6px;
+.tool-copy {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 16px;
+  min-width: 0;
 }
 
-.tool-heading h4 {
+.tool-copy h4 {
   font-size: 13px;
   font-weight: 500;
+  line-height: 1.65;
+}
+
+.capability-item > .el-tag {
+  margin-top: 1px;
 }
 
 .capability-item .requirement-note {
+  margin-top: 6px;
   color: var(--warning-color);
 }
 
-@media (max-width: 1180px) {
+.empty-results {
+  display: grid;
+  place-items: center;
+  min-height: 100%;
+  padding: 20px;
+}
+
+@media (max-width: 1280px) {
+  .tool-copy {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+}
+
+@media (max-width: 1000px) {
   .service-overview {
     grid-template-columns: 1fr;
   }
 
   .overview-stats {
-    gap: 42px;
+    grid-row: 2;
+    gap: 36px;
+    padding-left: 0;
+    border-left: 0;
+  }
+  .mcp-view {
+    overflow-y: auto;
   }
 
-  .capability-grid {
+  .capability-workspace {
     grid-template-columns: 1fr;
+    flex: none;
+    gap: 14px;
+  }
+
+  .category-nav {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 6px;
+    max-height: none;
+    overflow: visible;
+    padding: 8px;
+  }
+
+  .nav-heading {
+    display: none;
+  }
+
+  .category-button {
+    white-space: nowrap;
+  }
+
+  .capability-panel {
+    height: auto;
+  }
+
+  .capability-results {
+    overflow: visible;
+    scrollbar-gutter: auto;
+  }
+
+  .capability-toolbar {
+    padding: 14px 16px;
   }
 }
 
 @media (max-width: 700px) {
   .mcp-view {
     padding: 22px 16px 30px;
-  }
-
-  .mcp-view .page-header {
-    align-items: flex-start;
-    flex-wrap: wrap;
-    gap: 10px;
   }
 
   .service-overview {
@@ -347,8 +488,27 @@ function resetFilters() {
   }
 
   .overview-stats {
-    flex-wrap: wrap;
-    gap: 18px;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .capability-search {
+    flex-basis: 100%;
+    min-width: 0;
+    max-width: none;
+  }
+
+  .access-filter {
+    width: 132px;
+  }
+
+  .capability-toolbar > .el-button {
+    flex-basis: 100%;
+    justify-content: flex-start;
+  }
+
+  .category-button .el-icon {
+    display: none;
   }
 
   .category-heading {
@@ -358,6 +518,10 @@ function resetFilters() {
 
   .capability-list {
     padding: 0 16px;
+  }
+
+  .capability-item {
+    gap: 8px;
   }
 }
 </style>
