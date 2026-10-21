@@ -97,6 +97,7 @@ pub fn run() {
             save_artifact_source,
             delete_artifact_source,
             list_artifact_releases,
+            list_cached_artifact_releases,
             list_connection_inventory,
             save_ssh_credential,
             delete_ssh_credential,

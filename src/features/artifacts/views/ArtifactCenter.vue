@@ -196,7 +196,8 @@
         >
           <template #title>{{ releasesError }}</template>
           <div class="alert-actions">
-            <span>请检查制品源配置后重试。</span>
+            <span v-if="releases.length">已显示本机缓存的版本，连接恢复后刷新即可获取最新构建。</span>
+            <span v-else>请检查网络或制品源配置后重试。</span>
             <el-button size="small" @click="loadReleases({ reset: true })">重试</el-button>
             <el-button size="small" @click="goSourceSettings">前往设置</el-button>
           </div>
@@ -204,7 +205,7 @@
 
         <el-table
           v-if="releases.length"
-          v-loading="releasesLoading"
+          v-loading="releasesLoading && !releases.length"
           :data="releases"
           :row-key="releaseKey"
           size="small"
@@ -237,7 +238,13 @@
                   运行 #{{ row.runId }}<template v-if="row.branch"> · 分支 {{ row.branch }}</template>
                 </span>
               </div>
-              <span v-else class="subtle">直接下载源，无构建信息</span>
+              <div v-else-if="row.commitShort || row.commit" class="stacked-cell">
+                <div class="commit-line">
+                  <code>{{ row.commitShort || row.commit }}</code>
+                </div>
+                <span class="subtle">本机缓存版本<template v-if="row.branch"> · 分支 {{ row.branch }}</template></span>
+              </div>
+              <span v-else class="subtle">{{ activeSource && activeSource.type === 'url' ? '直接下载源，无构建信息' : '本机缓存版本' }}</span>
             </template>
           </el-table-column>
           <el-table-column label="构建时间" width="180">
@@ -265,8 +272,8 @@
               >
                 {{ isCurrentBundle(row) ? '使用中' : '使用' }}
               </el-button>
-              <el-button v-else link type="primary" @click="openRelease(row)">下载</el-button>
-              <el-button v-if="row.localDir" link @click="openRelease(row)">重新下载</el-button>
+              <el-button v-else-if="row.downloadUrl" link type="primary" @click="openRelease(row)">下载</el-button>
+              <el-button v-if="row.localDir && row.downloadUrl" link @click="openRelease(row)">重新下载</el-button>
               <el-button v-if="row.runUrl" link @click="openRunUrl(row)">运行详情</el-button>
             </template>
           </el-table-column>
@@ -357,6 +364,7 @@ import {
   deleteLocalBundle,
   downloadArtifact,
   listArtifactReleases,
+  listCachedArtifactReleases,
   listArtifactSources,
   openArtifactBundleVersion,
   inspectBundlePlan,
@@ -537,9 +545,6 @@ async function loadReleases({ reset = false } = {}) {
   if (reset) {
     releasesLoading.value = true;
     releasesError.value = '';
-    releases.value = [];
-    releasePage.value = 0;
-    hasMore.value = false;
   } else {
     loadingMore.value = true;
   }
@@ -573,13 +578,32 @@ async function loadReleases({ reset = false } = {}) {
   }
 }
 
-function openSource(row) {
+async function loadCachedReleases() {
+  const source = activeSource.value;
+  if (!source) return;
+  const requestId = ++releaseRequestId;
+  const sourceId = source.id;
+  releasesLoading.value = true;
+  try {
+    const result = await listCachedArtifactReleases(sourceId);
+    if (requestId !== releaseRequestId || activeSourceId.value !== sourceId) return;
+    releases.value = result.items || [];
+    releasePage.value = result.page || 1;
+    hasMore.value = Boolean(result.hasMore);
+  } catch {
+    // 本地缓存不可读时继续请求在线列表，不在这里中断页面。
+  }
+}
+
+async function openSource(row) {
   activeSourceId.value = row.id;
   releases.value = [];
   releasesError.value = '';
   releasePage.value = 0;
   hasMore.value = false;
-  loadReleases({ reset: true });
+  await loadCachedReleases();
+  if (activeSourceId.value !== row.id) return;
+  await loadReleases({ reset: true });
 }
 
 function backToSources() {

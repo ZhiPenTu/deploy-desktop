@@ -21,6 +21,10 @@ export async function listArtifactReleases(id, page = 1) {
   return await invokeDesktop('list_artifact_releases', { id, page });
 }
 
+export async function listCachedArtifactReleases(id) {
+  return await invokeDesktop('list_cached_artifact_releases', { id });
+}
+
 export async function downloadArtifact(id, release, onProgress) {
   return await invokeWithProgress('download_artifact', { id, release }, onProgress);
 }

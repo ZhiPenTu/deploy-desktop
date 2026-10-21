@@ -7,6 +7,7 @@ export {
   deleteArtifactSource,
   fetchArtifactRelease,
   listArtifactReleases,
+  listCachedArtifactReleases,
   downloadArtifact,
   openArtifactBundle,
   openArtifactBundleVersion,
