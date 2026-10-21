@@ -25,12 +25,12 @@
       </el-form-item>
       <template v-if="!isLocal">
         <el-row :gutter="18">
-          <el-col :span="16">
+          <el-col :span="14">
             <el-form-item label="主机地址" required>
               <el-input v-model="form.address" placeholder="例如：192.0.2.10" />
             </el-form-item>
           </el-col>
-          <el-col :span="8">
+          <el-col :span="10">
             <el-form-item label="SSH 端口" label-width="84px">
               <el-input-number v-model="form.port" :min="1" :max="65535" style="width: 100%" />
             </el-form-item>
