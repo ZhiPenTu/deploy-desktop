@@ -67,6 +67,9 @@
         <el-form-item label="部署目录">
           <span class="path-text">{{ config.installDir || '未设置' }}</span>
         </el-form-item>
+        <el-form-item v-if="config.deployDir && config.deployDir !== config.installDir" label="Compose 目录">
+          <span class="path-text">{{ config.deployDir }}</span>
+        </el-form-item>
         <el-form-item v-if="isRemote" label="连接检查">
           <div class="input-row wrap">
             <el-button :loading="testingSsh" :disabled="busy" @click="testConnection"> 测试连接 </el-button>

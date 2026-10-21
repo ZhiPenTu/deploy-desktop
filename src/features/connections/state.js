@@ -53,37 +53,53 @@ export function credentialLabel(id) {
   return `${credential.name} · ${credential.username}`;
 }
 
-function clearHost(connectionState) {
-  connectionState.activeHostId = '';
-  connectionState.mode = 'local';
-  connectionState.remoteHost = '';
-  connectionState.remotePort = 22;
-  connectionState.remoteUser = 'root';
-  connectionState.remoteKey = '';
-  connectionState.remoteCredentialId = '';
-  connectionState.remotePassword = '';
+/**
+ * 连接信息按“整体赋值”写入：先清空再回填会让 activeHostId 出现一次瞬时变化，
+ * 监听连接状态的页面（如部署向导）会误判成切换了目标。这里一次性算出目标值再写入。
+ */
+function assignHost(connectionState, values) {
+  Object.assign(connectionState, values);
 }
 
 function applyHost(hostId) {
   const host = hostById(hostId);
   if (!host) {
-    clearHost(connection);
+    assignHost(connection, {
+      activeHostId: '',
+      mode: 'local',
+      remoteHost: '',
+      remotePort: 22,
+      remoteUser: 'root',
+      remoteKey: '',
+      remoteCredentialId: '',
+      remotePassword: ''
+    });
     return;
   }
-  connection.activeHostId = host.id;
   if (isLocalHost(host)) {
-    clearHost(connection);
-    connection.activeHostId = host.id;
+    assignHost(connection, {
+      activeHostId: host.id,
+      mode: 'local',
+      remoteHost: '',
+      remotePort: 22,
+      remoteUser: 'root',
+      remoteKey: '',
+      remoteCredentialId: '',
+      remotePassword: ''
+    });
     return;
   }
   const credential = credentialById(host.credentialId);
-  connection.mode = 'remote';
-  connection.remoteHost = host.address;
-  connection.remotePort = host.port || 22;
-  connection.remoteUser = credential?.username || connection.remoteUser || 'root';
-  connection.remoteKey = credential?.privateKeyPath || '';
-  connection.remoteCredentialId = host.credentialId;
-  connection.remotePassword = '';
+  assignHost(connection, {
+    activeHostId: host.id,
+    mode: 'remote',
+    remoteHost: host.address,
+    remotePort: host.port || 22,
+    remoteUser: credential?.username || connection.remoteUser || 'root',
+    remoteKey: credential?.privateKeyPath || '',
+    remoteCredentialId: host.credentialId,
+    remotePassword: ''
+  });
 }
 
 /** 按当前项目刷新连接：主机、部署目录与交付包目录。 */
@@ -95,7 +111,7 @@ export function syncConnectionFromProject() {
     connection.mediaDir = '';
     connection.deployDir = '';
     connection.installDir = '';
-    clearHost(connection);
+    applyHost('');
     return;
   }
   connection.projectId = project.id;

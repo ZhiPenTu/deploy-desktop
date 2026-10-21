@@ -6,7 +6,7 @@
     </div>
 
     <el-table v-if="projects.length" :data="projects" size="small" class="project-table">
-      <el-table-column label="项目" min-width="170">
+      <el-table-column label="项目" min-width="130">
         <template #default="{ row }">
           <div class="name-cell">
             <span>{{ row.name }}</span>
@@ -15,29 +15,29 @@
           </div>
         </template>
       </el-table-column>
-      <el-table-column label="目标主机" min-width="170">
+      <el-table-column label="目标主机" min-width="110">
         <template #default="{ row }">{{ hostText(row.hostId) }}</template>
       </el-table-column>
-      <el-table-column label="部署目录" min-width="200">
+      <el-table-column label="部署目录" min-width="160" show-overflow-tooltip>
         <template #default="{ row }">
           <span class="mono-text">{{ row.installDir }}</span>
         </template>
       </el-table-column>
-      <el-table-column label="制品源" min-width="130">
+      <el-table-column label="制品源" min-width="120" show-overflow-tooltip>
         <template #default="{ row }">
           <span :class="sourceText(row.sourceId) ? '' : 'muted-text'">{{ sourceText(row.sourceId) || '未指定' }}</span>
         </template>
       </el-table-column>
-      <el-table-column label="交付包" min-width="120">
+      <el-table-column label="交付包" min-width="105">
         <template #default="{ row }">
           <span :class="row.lastVersion ? 'mono-text' : 'muted-text'">{{ row.lastVersion || '未绑定' }}</span>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="190">
+      <el-table-column label="操作" width="150">
         <template #default="{ row }">
-          <el-button link type="primary" @click="deploy(row)">部署</el-button>
-          <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
-          <el-button link type="danger" @click="remove(row)">删除</el-button>
+          <el-button link type="primary" :aria-label="`部署 ${row.name}`" @click="deploy(row)">部署</el-button>
+          <el-button link type="primary" :aria-label="`编辑 ${row.name}`" @click="openEdit(row)">编辑</el-button>
+          <el-button link type="danger" :aria-label="`删除 ${row.name}`" @click="remove(row)">删除</el-button>
         </template>
       </el-table-column>
     </el-table>
@@ -82,7 +82,7 @@
         </el-select>
       </el-form-item>
       <el-form-item label="部署目录">
-        <el-input v-model="form.installDir" placeholder="例如：/opt/deploy" />
+        <el-input v-model="form.installDir" placeholder="例如：/opt/demo" />
       </el-form-item>
       <el-form-item label="制品源">
         <el-select v-model="form.sourceId" placeholder="可选" clearable class="full-width">
@@ -91,7 +91,7 @@
       </el-form-item>
     </el-form>
     <p class="field-hint">
-      部署目录是目标主机上的绝对路径；交付包中的文件按包内声明写入该目录下的对应位置。
+      部署目录是目标主机上的绝对路径，填写安装根目录（例如 /opt/demo）。交付包内的文件按包内声明写入该目录及其子目录，Compose 清单通常落在其下的 deploy 子目录。
     </p>
     <template #footer>
       <el-button @click="editorVisible = false">取消</el-button>
@@ -274,6 +274,10 @@ onMounted(load);
 .project-table {
   width: 100%;
   background: transparent;
+}
+
+.project-table :deep(.el-button + .el-button) {
+  margin-left: 10px;
 }
 
 .mono-text {

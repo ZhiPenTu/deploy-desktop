@@ -83,8 +83,13 @@
                 <template v-if="item.sizeBytes">，大小：{{ formatSize(item.sizeBytes) }}</template>
               </p>
             </div>
-            <el-button size="small" :disabled="controlsDisabled" @click="chooseVersion(item)">
-              {{ item.localDir ? '使用此版本' : '下载此版本' }}
+            <el-button
+              size="small"
+              :type="isChosen(item) ? 'primary' : ''"
+              :disabled="controlsDisabled || isChosen(item)"
+              @click="chooseVersion(item)"
+            >
+              {{ isChosen(item) ? '已选择' : item.localDir ? '使用此版本' : '下载此版本' }}
             </el-button>
           </div>
           <el-button
@@ -105,7 +110,13 @@
             <el-tag v-if="release.commitShort" size="small" type="info" effect="plain">{{ release.commitShort }}</el-tag>
           </div>
           <p v-if="release.sizeBytes" class="field-hint">交付包大小：{{ formatSize(release.sizeBytes) }}</p>
-          <el-button type="primary" :disabled="controlsDisabled" @click="chooseRelease">选择此版本</el-button>
+          <el-button
+            type="primary"
+            :disabled="controlsDisabled || isChosen(release)"
+            @click="chooseRelease"
+          >
+            {{ isChosen(release) ? '已选择' : '选择此版本' }}
+          </el-button>
         </div>
       </section>
 
@@ -138,6 +149,7 @@
         <el-icon><DocumentChecked /></el-icon>
         <div>
           <strong>已选择：{{ candidate.label }}</strong>
+          <p v-if="candidate.version" class="field-hint">版本：{{ displayVersion(candidate.version) }}</p>
           <p v-if="candidate.path" class="path-text">{{ candidate.path }}</p>
           <p class="field-hint">下一步将{{ preparationLabel }}，通过后读取部署清单。</p>
         </div>
@@ -366,10 +378,17 @@ function chooseRelease() {
   choose({
     kind: 'release',
     sourceId: source.id,
-    label: source.name,
+    label: `${source.name}（${displayVersion(release.value.version)}）`,
     version: release.value.version,
     release: release.value
   });
+}
+
+function isChosen(item) {
+  if (!item || !candidate.value) return false;
+  if (candidate.value.sourceId !== sourceId.value) return false;
+  const version = String(item.version || '').trim();
+  return Boolean(version) && candidate.value.version === version;
 }
 
 function releaseKey(item) {
@@ -433,7 +452,7 @@ function chooseVersion(item) {
   choose({
     kind: 'release',
     sourceId: source.id,
-    label: source.name,
+    label: `${source.name}（${displayVersion(version)}）`,
     version: item.version,
     release: item
   });

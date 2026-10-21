@@ -56,7 +56,7 @@
       </div>
       <div class="terminal-body" ref="termBody">
         <pre v-if="filteredLogs">{{ filteredLogs }}</pre>
-        <div v-else class="empty-tip">暂无日志或该容器尚未产生输出</div>
+        <div v-else class="empty-tip">{{ emptyTip }}</div>
       </div>
     </div>
   </div>
@@ -119,6 +119,14 @@ const filteredLogs = computed(() => {
     .join('\n');
 });
 
+const emptyTip = computed(() => {
+  if (filteredLogs.value) return '';
+  if (searchKeyword.value.trim()) {
+    return rawLogs.value.trim() ? '没有匹配该关键字的日志，可调整关键字后重试' : '暂无日志或该容器尚未产生输出';
+  }
+  return '暂无日志或该容器尚未产生输出';
+});
+
 const fetchLogs = async () => {
   const ticket = logRequests.begin();
   loading.value = true;
@@ -160,11 +168,16 @@ const handleAutoRefreshChange = (val) => {
 };
 
 const copyLogs = async () => {
+  const content = filteredLogs.value;
+  if (!content.trim()) {
+    ElMessage.warning('当前没有可复制的日志');
+    return;
+  }
   try {
-    await navigator.clipboard.writeText(rawLogs.value);
-    ElMessage.success('日志已复制到剪贴板！');
+    await navigator.clipboard.writeText(content);
+    ElMessage.success(searchKeyword.value.trim() ? '已复制当前筛选结果' : '日志已复制到剪贴板');
   } catch (e) {
-    ElMessage.error('复制失败');
+    ElMessage.error('复制失败，请检查系统剪贴板权限后重试');
   }
 };
 

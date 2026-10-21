@@ -186,29 +186,34 @@ export function useDeploymentWizard(config, emit) {
     clearExecution();
   }
 
-  watch(
-    () => [
-      config.projectId,
-      config.activeHostId,
-      config.mode,
-      config.remoteHost,
-      config.remotePort,
-      config.remoteUser,
-      config.remoteKey,
-      config.installDir
-    ],
-    () => {
-      if (executing.value) return;
-      envRevision += 1;
-      candidate.value = null;
-      preparedBundle.value = null;
-      clearReview();
-      envData.value = null;
-      envError.value = '';
-      sshMessage.value = '';
-      if (activeStep.value > 0) activeStep.value = 0;
-    }
-  );
+  // 只有部署目标真的变了才需要重来：绑定交付包会刷新项目上下文并回写连接信息，
+  // 逐项比较可避免这种同目标刷新把已经走过的步骤清空。
+  const connectionKeys = [
+    'projectId',
+    'activeHostId',
+    'mode',
+    'remoteHost',
+    'remotePort',
+    'remoteUser',
+    'remoteKey',
+    'installDir'
+  ];
+  const connectionSnapshot = () => connectionKeys.map((key) => String(config[key] ?? ''));
+  let lastConnection = connectionSnapshot();
+
+  watch(connectionSnapshot, (next) => {
+    const changed = next.some((value, index) => value !== lastConnection[index]);
+    lastConnection = next;
+    if (!changed || executing.value) return;
+    envRevision += 1;
+    candidate.value = null;
+    preparedBundle.value = null;
+    clearReview();
+    envData.value = null;
+    envError.value = '';
+    sshMessage.value = '';
+    if (activeStep.value > 0) activeStep.value = 0;
+  });
 
   watch(() => [deploymentAction.value, selectedComponents.value.join(','), backup.value], clearExecution);
 

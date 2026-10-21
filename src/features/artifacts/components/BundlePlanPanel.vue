@@ -186,7 +186,7 @@ function stateLabel(state) {
 }
 
 function rootLabel(root) {
-  return root === 'install' ? '安装目录' : '部署目录';
+  return root === 'install' ? '安装根目录' : '部署根目录';
 }
 
 function targetLabel(artifact) {

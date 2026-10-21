@@ -53,7 +53,7 @@
           <span class="hint">令牌仅保存在本机，供当前用户读取</span>
         </div>
         <el-table :data="sources" size="small" class="source-table">
-          <el-table-column label="名称" min-width="220">
+          <el-table-column label="名称" min-width="160">
             <template #default="{ row }">
               <div class="name-cell">
                 <el-button link class="source-name" @click="openSource(row)">
@@ -68,7 +68,7 @@
               </div>
             </template>
           </el-table-column>
-          <el-table-column label="连接" min-width="190">
+          <el-table-column label="连接" min-width="130">
             <template #default="{ row }">
               <div v-if="row.type !== 'url'" class="stacked-cell">
                 <span>流水线 #{{ row.pipelineId }}</span>
@@ -77,12 +77,12 @@
               <span v-else class="subtle">直接下载地址</span>
             </template>
           </el-table-column>
-          <el-table-column label="制品名" min-width="140">
+          <el-table-column label="制品名" min-width="100">
             <template #default="{ row }">
               <code>{{ row.artifactName }}</code>
             </template>
           </el-table-column>
-          <el-table-column label="本地版本" min-width="150">
+          <el-table-column label="本地版本" min-width="140">
             <template #default="{ row }">
               <div class="stacked-cell">
                 <span :class="{ muted: !row.lastVersion }">{{ row.lastVersion || '尚未下载' }}</span>
@@ -92,7 +92,7 @@
               </div>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="120">
+          <el-table-column label="操作" width="105">
             <template #default="{ row }">
               <el-button link type="primary" @click="openSource(row)">查看制品</el-button>
             </template>
@@ -210,12 +210,7 @@
           size="small"
           class="versions-table"
         >
-          <el-table-column label="制品名" min-width="160">
-            <template #default="{ row }">
-              <code>{{ row.artifactName || activeSource.artifactName }}</code>
-            </template>
-          </el-table-column>
-          <el-table-column label="版本" min-width="175">
+          <el-table-column label="版本" min-width="150">
             <template #default="{ row }">
               <div class="version-cell">
                 <div class="version-title">
@@ -226,7 +221,7 @@
               </div>
             </template>
           </el-table-column>
-          <el-table-column label="构建信息" min-width="260">
+          <el-table-column label="构建信息" min-width="180">
             <template #default="{ row }">
               <div v-if="row.runId" class="stacked-cell">
                 <div class="commit-line">
@@ -234,32 +229,26 @@
                   <span class="commit-title">{{ row.commitTitle || '无提交说明' }}</span>
                 </div>
                 <span class="subtle">
-                  运行 #{{ row.runId }}<template v-if="row.branch"> · 分支 {{ row.branch }}</template>
+                  运行 #{{ row.runId }}<template v-if="row.branch"> · 分支 {{ row.branch }}</template> ·
+                  {{ formatSize(row.sizeBytes) }}
                 </span>
               </div>
               <div v-else-if="row.commitShort || row.commit" class="stacked-cell">
                 <div class="commit-line">
                   <code>{{ row.commitShort || row.commit }}</code>
                 </div>
-                <span class="subtle">本机缓存版本<template v-if="row.branch"> · 分支 {{ row.branch }}</template></span>
+                <span class="subtle">
+                  本机缓存版本<template v-if="row.branch"> · 分支 {{ row.branch }}</template> ·
+                  {{ formatSize(row.sizeBytes) }}
+                </span>
               </div>
               <span v-else class="subtle">{{ activeSource && activeSource.type === 'url' ? '直接下载源，无构建信息' : '本机缓存版本' }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="构建时间" width="180">
+          <el-table-column label="构建时间" width="145">
             <template #default="{ row }">{{ formatTime(row.builtAt) }}</template>
           </el-table-column>
-          <el-table-column label="大小" width="100">
-            <template #default="{ row }">{{ formatSize(row.sizeBytes) }}</template>
-          </el-table-column>
-          <el-table-column label="本地状态" width="120">
-            <template #default="{ row }">
-              <el-tag :type="localStatusType(row)" size="small" effect="plain">
-                {{ localStatusText(row) }}
-              </el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column label="操作" min-width="200">
+          <el-table-column label="操作" width="185">
             <template #default="{ row }">
               <el-button
                 v-if="row.localDir"
@@ -806,6 +795,10 @@ onMounted(loadSources);
   min-width: 0;
 }
 
+.version-title {
+  flex-wrap: wrap;
+}
+
 .source-name {
   min-width: 0;
   max-width: 230px;
@@ -814,6 +807,13 @@ onMounted(loadSources);
   text-overflow: ellipsis;
   white-space: nowrap;
   font-weight: 600;
+}
+
+.commit-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
 
 .stacked-cell,

@@ -138,7 +138,7 @@ import {
   VideoPause,
   VideoPlay
 } from '@element-plus/icons-vue';
-import { ElMessage } from 'element-plus';
+import { ElMessage, ElMessageBox } from 'element-plus';
 import {
   getContainersStatus,
   dockerComposeAction,
@@ -244,7 +244,31 @@ const fetchStatus = async () => {
   }
 };
 
+const stackActionConfirmText = (action) => {
+  const projectName = projectState.project?.name || '当前项目';
+  const target = isRemote.value ? `${targetLabel.value}` : '本机';
+  if (action === 'stop') {
+    return `将停止「${projectName}」在${target}的全部服务，停止期间业务不可用。\n\n部署目录：${deployDir.value || '未配置'}\n\n停止后可在此页面重新启动。`;
+  }
+  if (action === 'restart') {
+    return `将重启「${projectName}」在${target}的全部服务，重启期间业务会短暂中断。\n\n部署目录：${deployDir.value || '未配置'}`;
+  }
+  return '';
+};
+
 const handleStackAction = async (action) => {
+  const confirmText = stackActionConfirmText(action);
+  if (confirmText) {
+    try {
+      await ElMessageBox.confirm(confirmText, action === 'stop' ? '停止全栈' : '重启全栈', {
+        type: 'warning',
+        confirmButtonText: action === 'stop' ? '停止' : '重启',
+        cancelButtonText: '取消'
+      });
+    } catch {
+      return;
+    }
+  }
   operating.value = true;
   try {
     if (isRemote.value) {
