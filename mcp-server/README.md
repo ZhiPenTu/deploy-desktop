@@ -1,6 +1,6 @@
 # deploy-desktop MCP 服务
 
-`deploy-desktop-mcp` 是一个基于 stdio 的 [Model Context Protocol](https://modelcontextprotocol.io/) 服务，把 `deploy-desktop` 的仓库、镜像、离线包、部署与更新能力暴露给支持 MCP 的 AI 客户端。它复用系统 `docker`、`ssh` 与本机部署配置（默认读取桌面端用户配置目录下的 `profile.json`），不依赖桌面 UI。
+`deploy-desktop-mcp` 是一个基于 stdio 的 [Model Context Protocol](https://modelcontextprotocol.io/) 服务，把 `deploy-desktop` 的仓库、镜像、离线包、部署与更新能力暴露给支持 MCP 的 AI 客户端。它复用系统 `docker`、`ssh` 与本机项目配置（读取桌面端用户配置目录下的 `projects.json` 与当前项目绑定的交付包），不依赖桌面 UI。
 
 ## 环境要求
 
@@ -65,15 +65,17 @@ env = { DEPLOY_DESKTOP_ROOT = "/absolute/path/to/deploy-desktop" }
 
 | 变量 | 说明 | 默认值 |
 | --- | --- | --- |
-| `DEPLOY_DESKTOP_ROOT` | 仓库根目录，用于读取 `package.json`、`profile.example.json` 与示例清单 | `mcp-server/..` |
-| `DEPLOY_DESKTOP_PROFILE` | 指定 `profile.json` 路径，优先级最高 | 空 |
+| `DEPLOY_DESKTOP_ROOT` | 仓库根目录，用于读取 `package.json` 与示例清单 | `mcp-server/..` |
+| `DEPLOY_DESKTOP_APP_CONFIG_DIR` | 桌面端应用配置目录，用于读取 `projects.json` 与 `connections.json` | 按平台推导 |
 | `DEPLOY_DESKTOP_CONFIG_DIR` | MCP 配置目录 | `~/.deploy-desktop` |
 | `DEPLOY_DESKTOP_CONFIG_FILE` | MCP 配置文件路径 | `<CONFIG_DIR>/mcp.json` |
 | `DEPLOY_DESKTOP_SSH_KEY` | 默认 SSH 私钥路径 | 自动查找 `~/.ssh/id_ed25519` 等 |
 | `DEPLOY_REGISTRY_PASSWORD` | 仓库密码兜底来源 | 空 |
 | `DEPLOY_MCP_DEBUG` | 设为 `1` 时向 stderr 输出启动信息 | 空 |
 
-`profile.json` 的解析顺序：`DEPLOY_DESKTOP_PROFILE` → `mcp.json` 的 `profilePath` → 桌面端用户配置目录（macOS `~/Library/Application Support/com.deploydesktop.app/profile.json`，Windows `%APPDATA%\com.deploydesktop.app\profile.json`，Linux `~/.config/com.deploydesktop.app/profile.json`）→ `<DEPLOY_DESKTOP_ROOT>/profile.json` → `profile.example.json`。
+桌面端应用配置目录：macOS `~/Library/Application Support/com.deploydesktop.app`，Windows `%APPDATA%\com.deploydesktop.app`，Linux `~/.config/com.deploydesktop.app`；也可用 `DEPLOY_DESKTOP_APP_CONFIG_DIR` 覆盖。
+
+服务按 `projects.json` 的 `activeProjectId` 取当前项目，再从项目的 `lastBundleDir` 读取交付包描述符。拓扑（服务、数据库、产物映射、镜像）全部来自该描述符，不再读取 `profile.json`。没有当前项目或没有缓存交付包时，相关工具返回明确错误，提示先在桌面端创建项目并绑定交付包。
 
 ## 本地配置
 
@@ -82,7 +84,6 @@ env = { DEPLOY_DESKTOP_ROOT = "/absolute/path/to/deploy-desktop" }
 ```json
 {
   "version": 1,
-  "profilePath": null,
   "registries": {
     "acr": {
       "name": "acr",
@@ -120,13 +121,13 @@ env = { DEPLOY_DESKTOP_ROOT = "/absolute/path/to/deploy-desktop" }
 
 ## 工具覆盖
 
-共 39 个工具，按能力分组：
+共 38 个工具，按能力分组：
 
 桌面应用的「高级 / MCP 服务」页面按以下分类展示全部能力，可按名称、用途和操作类型筛选。该页面用于查看能力，服务仍由 MCP 客户端启动与调用，连接状态请在客户端中查看。MCP 的主机、镜像仓库与更新源配置独立保存。
 
 | 分类 | 工具 |
 | --- | --- |
-| 部署配置 | `deploy_profile_get`、`deploy_profile_update` |
+| 部署配置 | `deploy_profile_get`（当前项目与交付包拓扑，只读） |
 | SSH 主机 | `deploy_host_list`、`deploy_host_save`、`deploy_host_remove`、`deploy_ssh_test`、`deploy_ssh_setup_key`、`deploy_env_check` |
 | 镜像仓库 | `deploy_registry_list`、`deploy_registry_save`、`deploy_registry_remove`、`deploy_registry_probe`、`deploy_registry_tags`、`deploy_registry_digest`、`deploy_registry_login`、`deploy_registry_logout` |
 | 镜像清单 | `deploy_manifest_load`、`deploy_manifest_validate`、`deploy_manifest_write` |
@@ -188,7 +189,7 @@ deploy_app_update_check  {}
 - 仓库密码不落盘；配置文件权限为 `0600`，目录权限为 `0700`。
 - 镜像清单必须使用 `sha256` digest，拒绝仅 tag 的引用。
 - 远程命令使用 `ssh -o BatchMode=yes`，依赖密钥登录；不会保存 SSH 私钥。
-- 下列操作要求 `confirm=true`：修改 `profile.json`、删除主机/仓库/镜像/离线包、一键部署、`compose down`、远程构建部署、数据库导入、离线安装 Docker、实际执行远程更新、保存自定义更新源。
+- 下列操作要求 `confirm=true`：删除主机/仓库/镜像/离线包、一键部署、`compose down`、远程构建部署、数据库导入、离线安装 Docker、实际执行远程更新、保存自定义更新源。
 - `deploy_remote_run` 调用仓库根目录的 `deploy-lan.sh`；本仓库默认不包含该脚本，缺失时会返回明确错误。没有脚本时请使用 `deploy_bundle_deploy` 或 `deploy_update_remote`。
 - `deploy_app_update_check` 不执行安装；应用更新仍由桌面端完成签名校验与替换。
 

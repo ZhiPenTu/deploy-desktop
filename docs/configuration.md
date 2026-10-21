@@ -1,26 +1,77 @@
 # 部署配置与主机管理
 
-## 部署拓扑
+## 项目
 
-仓库内的 [`profile.example.json`](../profile.example.json) 只保留通用示例，不包含任何真实产品拓扑。桌面端启动时优先读取应用配置目录下的 `profile.json`，不存在时使用内置示例：
+一个项目对应一套部署目标：主机 + 部署目录 + 制品源。生产与测试各建一个项目，在侧边栏品牌区下方的项目选择器切换；切换后监控、日志诊断、环境检查、数据库与部署向导都跟随当前项目。
 
-| 平台 | 配置文件位置 |
+项目配置保存在应用配置目录的 `projects.json`：
+
+```json
+{
+  "schemaVersion": 1,
+  "activeProjectId": "prod",
+  "projects": [
+    {
+      "id": "prod",
+      "name": "生产环境",
+      "product": "demo-stack",
+      "hostId": "host-1",
+      "installDir": "/opt/demo-stack",
+      "sourceId": "pipeline-demo",
+      "lastVersion": "12-a1b2c3d",
+      "lastBundleDir": "bundles/pipeline-demo/12-a1b2c3d"
+    }
+  ]
+}
+```
+
+| 字段 | 说明 |
 | --- | --- |
-| macOS | `~/Library/Application Support/com.deploydesktop.app/profile.json` |
-| Windows | `%APPDATA%\com.deploydesktop.app\profile.json` |
-| Linux | `~/.config/com.deploydesktop.app/profile.json` |
+| `id` | 项目唯一标识，创建后不再变化 |
+| `name` | 显示名称，非空，最多 60 个字符 |
+| `product` | 交付包的产品标识。首次绑定交付包时写入；后续包的 `metadata.product` 不一致会阻止部署 |
+| `hostId` | 绑定的主机，必须存在于主机管理中 |
+| `installDir` | 部署目录，必须是绝对路径，不能包含 `..` |
+| `sourceId` | 制品源，必须存在于制品设置中 |
+| `lastVersion` / `lastBundleDir` | 最近一次绑定的交付包版本与本地目录 |
 
-字段说明：
+写入 `projects.json` 时整份文件原子替换，不会留下半份配置。删除项目只移除记录，不删除已缓存的交付包，也不改动目标机上的文件；需要清理目标机请单独操作。
 
-- `containerPrefix`：容器名前缀，实际容器名为 `<prefix>-<serviceKey>`
-- `containers`：服务键、显示名、端口、协议与说明
-- `database`：数据库容器、客户端命令、端口与库名
-- `images`：离线镜像包文件名与镜像引用
-- `installDir` / `deployDir` / `bundleDir`：默认部署路径
-- `backendArtifact`：后端 Fat Jar 在部署目录中的文件名
-- `components`：更新时各组件对应的 Compose 服务键，未声明时回退到旧默认值
+`projects.json` 只保存“部署到哪里、用哪个制品源”，服务清单、数据库、产物映射与镜像需求全部来自当前项目绑定的交付包，见[制品源与交付包](artifact-source.md)。
 
-真实环境把 `profile.example.json` 复制到上表位置并改为自己的拓扑即可，不需要重新编译，也不会污染开源仓库。
+### 与旧版 profile 的关系
+
+0.3.0 起不再读取 `profile.json`，也不迁移或删除旧文件。旧配置里的容器前缀、服务、数据库、产物名不再有作用；如果本机还留着它，可以自行删除，应用不会使用其中任何内容。旧格式交付包同样不再支持，需要用新版流水线重新构建。
+
+## 当前项目与部署目录
+
+- `deploy` 目录由部署目录与交付包推导：`<installDir>/<runtime.compose 所在目录>`。例如清单是 `deploy/docker-compose.yml`，则 `deploy` 根为 `<installDir>/deploy`。
+- 侧边栏切换项目后，页面重新读取当前项目上下文；没有项目时显示「尚无项目」，到「设置 → 项目管理」新建。
+- 监控不再跨项目切换主机。需要观察另一套环境时切换项目，或临时把项目的主机改为目标主机。
+
+## 部署记录
+
+部署成功后在部署目录写入 `.deploy-desktop/deployed.json`：
+
+```json
+{
+  "schemaVersion": 1,
+  "projectId": "prod",
+  "product": "demo-stack",
+  "version": "12-a1b2c3d",
+  "installedAt": "2026-10-21T09:30:00Z",
+  "artifacts": [
+    {
+      "key": "server-jar",
+      "root": "install",
+      "path": "backend-java/server/target/server.jar",
+      "type": "file"
+    }
+  ]
+}
+```
+
+远程状态读取该文件逐个探活已写入的产物，确认产物仍在目标机；记录缺失或写入失败时只显示容器状态，不影响部署结果，也不推测产物信息。
 
 ## 凭证与主机
 
@@ -29,14 +80,15 @@
 - 凭证保存凭证名称、登录用户名、私钥路径和可选的初始密码。私钥保留在本机原位置，应用只记录路径，不复制私钥内容。
 - 主机分为「本机」与「远程主机（SSH）」两类。本机代表运行部署助手的当前电脑，不需要地址与登录凭证；远程主机保存 SSH 地址、端口与绑定凭证。
 - 首次启动会自动加入一台「本机」主机，新配置会将其设为当前主机；删除后不会再次自动添加，可在新增主机时重新选择本机类型。
-- 主机保存名称、部署目录和备注，远程主机额外保存 SSH 信息。列表中的「当前主机」会同步到部署向导、主机状态、集群监控与日志诊断；集群监控页也可直接切换监控主机，切换后按新主机读取容器状态。
+- 主机保存名称、部署目录和备注，远程主机额外保存 SSH 信息。项目通过 `hostId` 使用某台主机，部署向导按当前项目的主机执行。
 - 初始密码只用于首次下发免密公钥；配置完成后可保留或清除，界面与列表不会回显密码。
-- 删除仍被主机引用的凭证前，需要先为相关主机更换凭证。
+- 删除仍被主机引用的凭证或仍被项目引用的主机前，需要先解除引用。
 
-连接配置与 `profile.json` 位于同一应用配置目录：
+连接配置与项目配置位于同一应用配置目录：
 
 | 文件 | 内容 |
 | --- | --- |
+| `projects.json` | 项目列表与当前项目 |
 | `connections.json` | 凭证与主机信息，不含密码 |
 | `connection-secrets.json` | 凭证的初始 SSH 密码，Unix 权限为 0600 |
 
@@ -47,4 +99,4 @@
 - 镜像源与仓库密码：[镜像源管理](registry-sources.md#存储与安全)。
 - 制品源、云效令牌与交付包缓存：[制品源与交付包](artifact-source.md)。
 - 离线包目录在「设置」中维护，默认位于用户文档目录的 `部署舱/离线镜像包`。升级用户若仍在使用旧目录 `离线部署助手/离线镜像包`，会继续沿用旧目录，不会自动迁移或重新扫描。导出时生成的 `images.json` 用于记录离线包对应的镜像。
-- MCP 使用独立配置文件，详见 [MCP 本地配置](../mcp-server/README.md#本地配置)。
+- MCP 使用独立配置，但同样读取 `projects.json` 与当前项目的交付包；无当前项目或无缓存交付包时，相关工具会返回明确错误。详见 [MCP 本地配置](../mcp-server/README.md#本地配置)。

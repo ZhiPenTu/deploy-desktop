@@ -36,7 +36,7 @@
 
 Rust 命令集中在 `src-tauri/src/commands/registry_sources.rs`；前端仅通过 `src/api/tauri.js` 调用。
 
-配置保存在应用配置目录（与 `profile.json` 同目录），运行时维护的镜像源与部署拓扑配置独立：
+配置保存在应用配置目录（与 `projects.json` 同目录），镜像源与项目配置相互独立：
 
 - `registry-sources.json`：名称、地址、命名空间、用户名与密码存在标记，不含密码原文。
 - `registry-secrets.json`：按镜像源 ID 保存密码。Unix 上文件创建权限为 0600，通过同目录临时文件替换写入；不应复制到仓库或分享。

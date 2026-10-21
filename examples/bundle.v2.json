@@ -1,0 +1,174 @@
+{
+  "apiVersion": "deploy.desktop/bundle/v2",
+  "kind": "DeploymentBundle",
+  "metadata": {
+    "product": "demo-stack",
+    "displayName": "示例应用",
+    "version": "12-a1b2c3d",
+    "buildNumber": "12",
+    "commit": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+    "commitShort": "a1b2c3d",
+    "branch": "main",
+    "builtAt": "2026-10-21T09:00:00Z",
+    "minToolVersion": "0.3.0"
+  },
+  "runtime": {
+    "type": "compose",
+    "compose": "deploy/compose.yaml",
+    "variant": "deploy/compose.lan.yaml",
+    "containerPrefix": "demo",
+    "services": [
+      {
+        "key": "web",
+        "label": "网页服务",
+        "port": 8080,
+        "protocol": "TCP",
+        "description": "对外提供管理界面"
+      },
+      {
+        "key": "api",
+        "label": "接口服务",
+        "port": 9000,
+        "protocol": "TCP",
+        "description": "业务接口"
+      },
+      {
+        "key": "db",
+        "label": "数据库",
+        "port": 5432,
+        "protocol": "TCP",
+        "description": "业务数据存储"
+      }
+    ],
+    "database": {
+      "serviceKey": "db",
+      "name": "demo",
+      "client": "psql",
+      "port": 5432
+    }
+  },
+  "components": [
+    {
+      "key": "web",
+      "label": "网页资源",
+      "artifacts": ["web-dist"],
+      "services": ["web"]
+    },
+    {
+      "key": "api",
+      "label": "接口程序",
+      "artifacts": ["api-bin"],
+      "services": ["api"]
+    },
+    {
+      "key": "config",
+      "label": "部署配置",
+      "artifacts": ["compose", "compose-lan"],
+      "services": []
+    }
+  ],
+  "artifacts": [
+    {
+      "key": "web-dist",
+      "label": "网页文件",
+      "source": "app/web",
+      "root": "deploy",
+      "path": "site",
+      "type": "dir"
+    },
+    {
+      "key": "api-bin",
+      "label": "接口程序",
+      "source": "app/bin",
+      "root": "install",
+      "path": "bin",
+      "type": "dir"
+    },
+    {
+      "key": "compose",
+      "label": "Compose 清单",
+      "source": "deploy/compose.yaml",
+      "root": "deploy",
+      "path": "compose.yaml",
+      "type": "file"
+    },
+    {
+      "key": "compose-lan",
+      "label": "局域网 Compose 清单",
+      "source": "deploy/compose.lan.yaml",
+      "root": "deploy",
+      "path": "compose.lan.yaml",
+      "type": "file"
+    }
+  ],
+  "images": [
+    {
+      "name": "nginx",
+      "ref": "nginx:1.27-alpine",
+      "role": "base",
+      "required": true
+    },
+    {
+      "name": "postgres",
+      "ref": "postgres:16-alpine",
+      "role": "base",
+      "required": true
+    }
+  ],
+  "plan": {
+    "steps": [
+      {
+        "key": "artifact",
+        "title": "获取交付包",
+        "hint": "从流水线下载制品，得到 app/、deploy/ 与 bundle.json。"
+      },
+      {
+        "key": "images",
+        "title": "准备基础镜像",
+        "hint": "首次部署前在目标机导入或拉取交付包声明的镜像。"
+      },
+      {
+        "key": "distribute",
+        "title": "分发交付包",
+        "hint": "按组件把产物写入部署目录，覆盖同名文件。"
+      },
+      {
+        "key": "start",
+        "title": "启动容器栈",
+        "hint": "使用包内 Compose 清单启动服务。"
+      },
+      {
+        "key": "verify",
+        "title": "验证与验收",
+        "hint": "检查健康接口、登录与关键页面。"
+      }
+    ]
+  },
+  "files": [
+    {
+      "path": "app/bin/api",
+      "size": 1024,
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+    },
+    {
+      "path": "app/web/assets/app.css",
+      "size": 512,
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000002"
+    },
+    {
+      "path": "app/web/index.html",
+      "size": 256,
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000003"
+    },
+    {
+      "path": "deploy/compose.lan.yaml",
+      "size": 768,
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000004"
+    },
+    {
+      "path": "deploy/compose.yaml",
+      "size": 640,
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000005"
+    }
+  ]
+}
