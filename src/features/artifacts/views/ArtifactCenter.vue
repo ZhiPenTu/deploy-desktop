@@ -109,7 +109,6 @@
           v-else-if="plan"
           :plan="plan"
           :target="remoteTarget"
-          :image-dir="imageDir"
         >
           <template #actions>
             <el-button size="small" :loading="planLoading" @click="loadPlan">
@@ -400,7 +399,6 @@ const bundle = ref(null);
 const progress = reactive({ percent: 0, stage: '' });
 const plan = ref(null);
 const planLoading = ref(false);
-const imageDir = ref(localStorage.getItem('image-local-dir') || '');
 let releaseRequestId = 0;
 
 const activeSource = computed(

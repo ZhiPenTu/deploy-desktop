@@ -321,6 +321,7 @@ fn compose_config_lists_services_and_images() {
         None,
         None,
         None,
+        None,
     )
     .unwrap();
 
@@ -352,6 +353,84 @@ fn compose_config_lists_services_and_images() {
         .unwrap();
     assert_eq!(redis.local_file, "redis.tar");
     assert_eq!(redis.match_source, "images.json");
+
+    fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn compose_file_bundle_discovers_packages_in_configured_offline_directory() {
+    let root = std::env::temp_dir().join(format!(
+        "deploy-desktop-compose-library-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let bundle = root.join("bundle");
+    let library = root.join("offline-library");
+    write(
+        &bundle.join("deploy/docker-compose.yml"),
+        "services:\n  cache:\n    image: redis:7.2.8\n",
+    );
+    write(&library.join("redis_7.2.8.tar"), "archive fixture");
+    write(
+        &library.join("images.json"),
+        r#"{"files":[{"file":"redis_7.2.8.tar","images":["redis:7.2.8"]}]}"#,
+    );
+
+    let view = super::config::inspect_bundle_config_blocking(
+        bundle.to_string_lossy().to_string(),
+        "deploy/docker-compose.yml".to_string(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(library.clone()),
+    )
+    .unwrap();
+    assert_eq!(view.image_dir, library.to_string_lossy());
+    assert!(view.image_dir_exists);
+    assert_eq!(view.images[0].local_file, "redis_7.2.8.tar");
+    assert_eq!(view.images[0].match_source, "images.json");
+    assert!(view.images[0].local_bytes > 0);
+    assert_ne!(view.images[0].status, "missing");
+    assert!(view.issues.is_empty());
+
+    fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn compose_package_directory_preserves_explicit_selection_and_bundled_images() {
+    use super::config::config_image_dir;
+
+    let root = std::env::temp_dir().join(format!(
+        "deploy-desktop-compose-directory-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let bundle = root.join("bundle");
+    let library = root.join("offline-library");
+    let selected = root.join("selected-media");
+    write(&bundle.join("deploy/docker-compose.yml"), "services: {}\n");
+    write(&library.join("cache.tar"), "library archive");
+    write(&selected.join("images/cache.tar"), "selected archive");
+
+    assert_eq!(config_image_dir(&bundle, None, Some(&library)), library);
+    assert_eq!(config_image_dir(&bundle, Some("  "), Some(&library)), library);
+
+    write(&bundle.join("cache.tar"), "root archive");
+    assert_eq!(config_image_dir(&bundle, None, Some(&library)), bundle);
+    write(&bundle.join("images/cache.tar"), "bundled archive");
+    assert_eq!(config_image_dir(&bundle, None, Some(&library)), bundle.join("images"));
+    assert_eq!(
+        config_image_dir(&bundle, selected.to_str(), Some(&library)),
+        selected.join("images")
+    );
+
+    let missing = root.join("missing-media");
+    assert_eq!(config_image_dir(&bundle, missing.to_str(), Some(&library)), missing);
+    let file_bundle = root.join("file-bundle");
+    fs::create_dir_all(&file_bundle).unwrap();
+    assert_eq!(config_image_dir(&file_bundle, None, Some(&missing)), missing);
 
     fs::remove_dir_all(&root).ok();
 }
@@ -414,6 +493,7 @@ fn bundle_config_rejects_paths_outside_bundle() {
     let error = super::config::inspect_bundle_config_blocking(
         bundle.to_string_lossy().to_string(),
         "../secret.txt".to_string(),
+        None,
         None,
         None,
         None,

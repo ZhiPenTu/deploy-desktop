@@ -57,6 +57,7 @@ pub struct BundleConfigView {
 /// 不再依赖手工维护的 images 列表，避免清单与实际编排漂移。
 #[tauri::command]
 pub async fn inspect_bundle_config(
+    app: tauri::AppHandle,
     bundle_dir: String,
     file: String,
     image_dir: Option<String>,
@@ -66,7 +67,10 @@ pub async fn inspect_bundle_config(
     key_path: Option<String>,
 ) -> Result<BundleConfigView, String> {
     crate::commands::blocking::run(move || {
-        inspect_bundle_config_blocking(bundle_dir, file, image_dir, host, port, user, key_path)
+        let offline_dir = crate::commands::image_library::effective_offline_dir(&app);
+        inspect_bundle_config_blocking(
+            bundle_dir, file, image_dir, host, port, user, key_path, Some(offline_dir),
+        )
     })
     .await
 }
@@ -79,6 +83,7 @@ pub(crate) fn inspect_bundle_config_blocking(
     port: Option<u16>,
     user: Option<String>,
     key_path: Option<String>,
+    offline_dir: Option<PathBuf>,
 ) -> Result<BundleConfigView, String> {
     let root = PathBuf::from(bundle_dir.trim());
     if !root.is_dir() {
@@ -126,31 +131,7 @@ pub(crate) fn inspect_bundle_config_blocking(
         issues.push("配置文件超过 1 MB，界面只展示前 1 MB 内容".to_string());
     }
 
-    // 与镜像包管理保持一致：给了目录时优先用其下的 images/，否则用目录本身；
-    // 未给目录时先看交付包内的 images/，没有就退回交付包根目录。
-    let image_dir_path = match image_dir
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-    {
-        Some(dir) => {
-            let nested = dir.join("images");
-            if nested.is_dir() {
-                nested
-            } else {
-                dir
-            }
-        }
-        None => {
-            let nested = root.join("images");
-            if nested.is_dir() {
-                nested
-            } else {
-                root.clone()
-            }
-        }
-    };
+    let image_dir_path = config_image_dir(&root, image_dir.as_deref(), offline_dir.as_deref());
     let image_dir_exists = image_dir_path.is_dir();
     if !image_dir_exists {
         issues.push(format!(
@@ -222,6 +203,29 @@ pub(crate) fn inspect_bundle_config_blocking(
         image_check,
         issues,
     })
+}
+
+/// 显式选择保持优先；随包镜像沿用包内目录；文件交付包使用设置中的离线包目录。
+/// 不回退到一个存在但没有镜像的交付包根目录，避免漏掉镜像库中已导出的离线包。
+pub(super) fn config_image_dir(
+    root: &Path,
+    selected: Option<&str>,
+    offline_dir: Option<&Path>,
+) -> PathBuf {
+    let selected = selected.map(str::trim).filter(|value| !value.is_empty());
+    let dir = if let Some(selected) = selected {
+        PathBuf::from(selected)
+    } else if root.join("images").is_dir() || !scan_image_files(root).is_empty() {
+        root.to_path_buf()
+    } else {
+        offline_dir.unwrap_or(root).to_path_buf()
+    };
+    let nested = dir.join("images");
+    if nested.is_dir() {
+        nested
+    } else {
+        dir
+    }
 }
 
 pub(in crate::commands) fn resolve_bundle_file(root: &Path, file: &str) -> Result<PathBuf, String> {

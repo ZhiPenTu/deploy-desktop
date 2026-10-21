@@ -2,7 +2,7 @@
   <el-dialog
     :model-value="modelValue"
     :title="dialogTitle"
-    width="1080px"
+    width="min(1080px, calc(100vw - 32px))"
     top="6vh"
     append-to-body
     destroy-on-close
@@ -10,7 +10,10 @@
     @update:model-value="emit('update:modelValue', $event)"
   >
     <div v-loading="loading" class="compose-body">
-      <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon />
+      <div v-if="error" class="read-error">
+        <el-alert :title="error" type="error" :closable="false" show-icon />
+        <el-button :loading="loading" @click="load">重新检查</el-button>
+      </div>
 
       <template v-else-if="view">
         <div class="meta-row">
@@ -28,15 +31,23 @@
             type="button"
             class="summary-card"
             :class="[card.tone, { active: filter === card.key }]"
+            :aria-pressed="filter === card.key"
             @click="toggleFilter(card.key)"
           >
             <span class="summary-num">{{ card.count }}</span>
             <span class="summary-label">{{ card.label }}</span>
           </button>
           <div class="summary-note">
-            <span>镜像包目录 <code>{{ view.imageDir }}</code></span>
+            <span>离线包目录 <code>{{ view.imageDir }}</code></span>
             <span v-if="!view.imageDirExists" class="note-warn">目录不存在</span>
-            <span v-else-if="view.manifest !== 'none'" class="note-ok">清单来源 {{ view.manifest }}</span>
+            <div class="directory-actions">
+              <el-button size="small" :loading="selectingDirectory" :disabled="loading" @click="chooseImageDir">
+                选择目录
+              </el-button>
+              <el-button size="small" :loading="loading" :disabled="selectingDirectory" @click="load">
+                重新检查
+              </el-button>
+            </div>
           </div>
         </div>
 
@@ -46,15 +57,12 @@
               :data="filteredImages"
               size="small"
               :row-class-name="rowClass"
-              empty-text="配置文件中没有 image 声明"
+              :empty-text="filter ? '没有符合此状态的镜像' : '此配置没有需要检查的镜像'"
             >
               <el-table-column label="镜像" min-width="320">
                 <template #default="{ row }">
                   <div class="image-cell">
                     <code>{{ row.imageRef }}</code>
-                    <span v-if="row.matchRef !== row.imageRef" class="image-sub">
-                      比对键 {{ row.matchRef }}
-                    </span>
                   </div>
                 </template>
               </el-table-column>
@@ -75,7 +83,9 @@
                 <template #default="{ row }">
                   <div class="image-cell">
                     <code v-if="row.localFile" class="file-name">{{ row.localFile }}</code>
-                    <span v-else class="missing-text">未找到镜像包</span>
+                    <span v-else :class="row.dockerPresent || view.imageCheck === 'unavailable' ? 'muted' : 'missing-text'">
+                      {{ row.dockerPresent ? '未保存离线包' : '未找到离线包' }}
+                    </span>
                     <span v-if="row.localFile" class="image-sub">
                       {{ formatSize(row.localBytes) }} · {{ sourceLabel(row.matchSource) }}
                     </span>
@@ -104,7 +114,7 @@
           </el-tab-pane>
 
           <el-tab-pane label="服务清单" name="services">
-            <el-table :data="view.services" size="small" empty-text="配置文件中没有 services">
+            <el-table :data="view.services" size="small" empty-text="未发现服务">
               <el-table-column prop="name" label="服务" width="190" />
               <el-table-column label="镜像" min-width="280">
                 <template #default="{ row }">
@@ -183,8 +193,10 @@
 </template>
 
 <script setup>
-import { computed, ref, watch } from 'vue';
-import { inspectBundleConfig } from '../../../api/tauri.js';
+import { computed, onBeforeUnmount, ref, watch } from 'vue';
+import { ElMessage } from 'element-plus';
+import { inspectBundleConfig, selectLocalPath } from '../../../api/tauri.js';
+import { createRequestScope } from '../../../shared/async/requestScope.js';
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -203,6 +215,10 @@ const error = ref('');
 const view = ref(null);
 const tab = ref('images');
 const filter = ref('');
+const selectedImageDir = ref('');
+const selectingDirectory = ref(false);
+const requests = createRequestScope();
+const availableLabel = computed(() => view.value?.imageCheck === 'remote' ? '目标机可用' : '本机可用');
 
 const dialogTitle = computed(() => {
   const name = String(props.file || '').split('/').filter(Boolean).pop() || '配置文件';
@@ -239,7 +255,7 @@ const summaryCards = computed(() => {
     { key: 'to_import', label: '待导入', count: count('to_import'), tone: 'warn' },
     { key: 'missing', label: '缺失', count: count('missing'), tone: 'danger' },
     { key: 'unconfirmed', label: '未确认', count: count('unconfirmed'), tone: 'unknown' },
-    { key: 'loaded', label: '仅本机已有', count: count('loaded'), tone: 'info' }
+    { key: 'loaded', label: availableLabel.value, count: count('loaded'), tone: 'ok' }
   ];
 });
 
@@ -257,9 +273,10 @@ const dockerColumnLabel = computed(() => {
 
 const footerHint = computed(() => {
   if (!view.value) return '';
-  if (view.value.kind !== 'compose') return '该文件仅展示内容，镜像对比只针对含 services 的 compose 文件';
-  if (!view.value.images.length) return '配置文件中没有 image 声明';
-  return '镜像清单由 compose 的 image 字段推导，镜像包按交付包清单、部署配置映射、文件名依次匹配';
+  if (view.value.kind !== 'compose') return '查看部署配置内容。';
+  if (!view.value.images.length) return '此配置没有需要检查的镜像。';
+  if (view.value.imageCheck === 'unavailable') return '镜像状态未确认，请检查 Docker 或目标机连接后重新检查。离线包存在不代表镜像已导入。';
+  return `${view.value.imageCheck === 'remote' ? '目标机' : '本机'}已有镜像可直接使用。离线包用于导入缺失镜像或保留备份。`;
 });
 
 function formatSize(bytes) {
@@ -272,23 +289,23 @@ function formatSize(bytes) {
 }
 
 function sourceLabel(source) {
-  if (source === 'images.json') return '交付包清单';
-  if (source === 'profile') return '部署配置映射';
-  if (source === 'filename') return '按文件名推断';
+  if (source === 'images.json') return '镜像包清单';
+  if (source === 'profile') return '部署配置';
+  if (source === 'filename') return '文件名匹配';
   return '来源未知';
 }
 
 function statusLabel(status) {
   if (status === 'ready') return '就绪';
   if (status === 'to_import') return '待导入';
-  if (status === 'loaded') return '仅本机已有';
+  if (status === 'loaded') return availableLabel.value;
   if (status === 'missing') return '缺失';
   if (status === 'unconfirmed') return '未确认';
   return status;
 }
 
 function statusTone(status) {
-  if (status === 'ready') return 'success';
+  if (status === 'ready' || status === 'loaded') return 'success';
   if (status === 'to_import') return 'warning';
   if (status === 'missing') return 'danger';
   if (status === 'unconfirmed') return 'info';
@@ -314,6 +331,7 @@ function toggleFilter(key) {
 }
 
 async function load() {
+  const ticket = requests.begin();
   if (!props.modelValue) return;
   const bundleDir = String(props.bundleDir || '').trim();
   const file = String(props.file || '').trim();
@@ -321,30 +339,62 @@ async function load() {
 
   loading.value = true;
   error.value = '';
-  view.value = null;
-  tab.value = 'images';
-  filter.value = '';
   try {
-    view.value = await inspectBundleConfig(bundleDir, file, props.target, props.imageDir);
+    const result = await inspectBundleConfig(bundleDir, file, props.target, selectedImageDir.value || props.imageDir);
+    if (!requests.isCurrent(ticket)) return;
+    view.value = result;
     if (view.value.kind !== 'compose') {
       tab.value = 'content';
     }
   } catch (caught) {
+    if (!requests.isCurrent(ticket)) return;
     error.value = `读取配置失败：${caught}`;
   } finally {
-    loading.value = false;
+    if (requests.isCurrent(ticket)) loading.value = false;
+  }
+}
+
+async function chooseImageDir() {
+  const ticket = requests.begin();
+  selectingDirectory.value = true;
+  try {
+    const selected = await selectLocalPath({ directory: true, multiple: false, title: '选择离线包目录' });
+    if (!requests.isCurrent(ticket) || !selected) return;
+    selectedImageDir.value = selected;
+    filter.value = '';
+    await load();
+  } catch {
+    if (requests.isCurrent(ticket)) ElMessage.error('无法选择目录，请重试。');
+  } finally {
+    selectingDirectory.value = false;
   }
 }
 
 watch(
-  () => [props.modelValue, props.file, props.bundleDir],
-  () => load()
+  () => [props.modelValue, props.file, props.bundleDir, props.imageDir, props.target?.host, props.target?.port, props.target?.user, props.target?.keyPath],
+  () => {
+    selectedImageDir.value = '';
+    view.value = null;
+    tab.value = 'images';
+    filter.value = '';
+    load();
+  },
+  { immediate: true }
 );
+
+onBeforeUnmount(() => requests.dispose());
 </script>
 
 <style scoped>
 .compose-body {
   min-height: 280px;
+}
+
+.read-error {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
 }
 
 .meta-row {
@@ -443,6 +493,8 @@ watch(
   justify-content: center;
   gap: 4px;
   margin-left: auto;
+  flex: 1 1 280px;
+  min-width: 0;
   font-size: 11.5px;
   color: var(--text-faint);
   text-align: right;
@@ -451,6 +503,12 @@ watch(
 .summary-note code {
   font-size: 11px;
   color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.directory-actions {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .note-warn {

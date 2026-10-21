@@ -588,7 +588,7 @@ fn read_settings(app: &AppHandle) -> ImageLibrarySettingsFile {
     serde_json::from_str(&content).unwrap_or_default()
 }
 
-fn effective_offline_dir(app: &AppHandle) -> PathBuf {
+pub(super) fn effective_offline_dir(app: &AppHandle) -> PathBuf {
     let settings = read_settings(app);
     let saved = settings.offline_dir.trim();
     if saved.is_empty() {
