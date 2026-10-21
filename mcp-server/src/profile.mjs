@@ -36,6 +36,7 @@ export function buildProfile(project, bundle, options = {}) {
     bundleDir: bundle.root,
     installDir,
     deployDir,
+    deploySourceRel: bundle.deploySourceRel(),
     compose: {
       source: bundle.descriptor.runtime.compose,
       variant,

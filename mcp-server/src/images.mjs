@@ -29,6 +29,13 @@ export function remoteImagesDir(bundleDir) {
   return `${root}/images`;
 }
 
+/** 交付包是否附带离线镜像文件；只声明镜像清单的交付包不需要上传与导入。 */
+export function bundleShipsImages(descriptor, files = []) {
+  if (Array.isArray(files) && files.length > 0) return true;
+  const images = Array.isArray(descriptor?.images) ? descriptor.images : [];
+  return images.some((image) => Boolean(image?.bundleFile));
+}
+
 export async function listArchiveFiles(dir) {
   const imagesDir = await resolveImagesDir(dir);
   const entries = await fs.readdir(imagesDir, { withFileTypes: true });

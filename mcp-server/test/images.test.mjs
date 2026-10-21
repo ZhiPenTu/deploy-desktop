@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 import {
+  bundleShipsImages,
   listArchiveFiles,
   remoteImagesDir,
   resolveImagesDir,
@@ -13,6 +14,15 @@ import { makeTempDir } from './helpers.mjs';
 function makeProfile(overrides = {}) {
   return { images: [], ...overrides };
 }
+
+test('bundleShipsImages 只认可包内真实存在的镜像文件', () => {
+  const declared = { images: [{ name: 'base', ref: 'nginx:1.27-alpine', role: 'base', required: true }] };
+  assert.equal(bundleShipsImages(declared), false);
+  assert.equal(bundleShipsImages(declared, ['base.tar']), true);
+  assert.equal(bundleShipsImages({ images: [{ name: 'app', bundleFile: 'images/app.tar' }] }), true);
+  assert.equal(bundleShipsImages({ images: [] }), false);
+  assert.equal(bundleShipsImages(undefined), false);
+});
 
 async function createBundle() {
   const root = await makeTempDir();

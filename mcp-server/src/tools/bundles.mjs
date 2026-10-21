@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { DeployError } from '../errors.mjs';
 import { loadProfile } from '../profile.mjs';
 import { composeAction, dbImport, inspectLocalDeployment, inspectRemoteDeployment } from '../deploy.mjs';
-import { inspectRemoteBundle, loadLocalImages, loadRemoteImages, removeRemoteBundleFiles, resolveImagesDir, scanLocalBundle, uploadBundle } from '../images.mjs';
+import { bundleShipsImages, inspectRemoteBundle, loadLocalImages, loadRemoteImages, removeRemoteBundleFiles, resolveImagesDir, scanLocalBundle, uploadBundle } from '../images.mjs';
 import { targetSchema, hostSchema, remoteFields, remoteReadOnly, mutating, destructive, hostFrom } from './shared.mjs';
 
 export function registerBundlesTools(register) {
@@ -82,18 +82,19 @@ export function registerBundlesTools(register) {
     if (args.confirm !== true) {
       throw new DeployError('一键部署会导入镜像并启动服务，需要 confirm=true', { code: 'CONFIRM_REQUIRED' });
     }
-    const { profile } = await loadProfile({ bundleDir: args.bundleDir });
+    const { profile, bundle } = await loadProfile({ bundleDir: args.bundleDir });
     const bundleDir = args.bundleDir || profile.bundleDir;
     const files = args.files || [];
+    const hasImages = bundleShipsImages(bundle.descriptor, files);
     if (args.target === 'remote') {
       const host = await hostFrom(args);
       const remoteBundleDir = args.remoteBundleDir || host.bundleDir;
-      if (!remoteBundleDir) throw new DeployError('请填写远程镜像包目录');
+      if (!remoteBundleDir && hasImages) throw new DeployError('请填写远程镜像包目录');
       let uploads = [];
-      if (args.upload !== false) {
+      if (hasImages && args.upload !== false) {
         uploads = await uploadBundle(host, bundleDir, remoteBundleDir, files, { overwrite: false });
       }
-      const loaded = await loadRemoteImages(host, remoteBundleDir, files);
+      const loaded = hasImages ? await loadRemoteImages(host, remoteBundleDir, files) : [];
       const compose = await composeAction(profile, {
         target: 'remote',
         hostConfig: host,
@@ -107,7 +108,7 @@ export function registerBundlesTools(register) {
       const status = await inspectRemoteDeployment(profile, host, host.installDir).catch(() => null);
       return { target: 'remote', remoteBundleDir, uploads, loaded, compose, database, status };
     }
-    const loaded = await loadLocalImages(bundleDir, files);
+    const loaded = hasImages ? await loadLocalImages(bundleDir, files) : [];
     const compose = await composeAction(profile, {
       target: 'local',
       action: 'up',

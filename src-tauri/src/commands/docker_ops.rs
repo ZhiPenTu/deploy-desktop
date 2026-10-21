@@ -74,6 +74,18 @@ pub fn resolve_env_files(root: &Path) -> Vec<std::path::PathBuf> {
     .collect()
 }
 
+/// 交付包的部署根目录不一定是 `deploy`，这里按实际部署目录补齐环境变量文件。
+pub fn resolve_env_files_for(install_dir: &Path, deploy_dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut files = resolve_env_files(install_dir);
+    for name in [".env", ".env.local"] {
+        let path = deploy_dir.join(name);
+        if path.is_file() && !files.contains(&path) {
+            files.push(path);
+        }
+    }
+    files
+}
+
 /// 交付包通过 bind mount 替换产物，compose 不会因此重建容器；
 /// 这里返回需要重启才能加载新产物的容器名。
 pub fn artifact_containers() -> Vec<String> {

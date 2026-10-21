@@ -143,6 +143,12 @@ fn run_update(
     if !plan.image_selected {
         check_images_available(effective_config)?;
     }
+    let compose_for_env = if plan.config_selected {
+        preferred_compose(&plan.deploy_dir)?
+    } else {
+        plan.compose.clone()
+    };
+    ensure_compose_env(&plan.root, &plan.deploy_dir, &compose_for_env)?;
     if dry_run {
         progress(
             window,
@@ -192,6 +198,7 @@ fn run_update(
         } else {
             plan.compose.clone()
         };
+        ensure_compose_env(&plan.root, &plan.deploy_dir, &effective)?;
         check_images_available(&compose_config(&plan, &effective)?)?;
         progress(
             window,
@@ -558,7 +565,7 @@ fn compose_command(plan: &UpdatePlan, compose: &Path, action: &[&str]) -> Result
         .arg("compose")
         .arg("--project-directory")
         .arg(&plan.deploy_dir);
-    for env in super::docker_ops::resolve_env_files(&plan.root) {
+    for env in super::docker_ops::resolve_env_files_for(&plan.root, &plan.deploy_dir) {
         reject_symlinks(&env)?;
         command.arg("--env-file").arg(env);
     }
@@ -572,9 +579,101 @@ fn compose_output(plan: &UpdatePlan, compose: &Path, action: &[&str]) -> Result<
         .output()
         .map_err(|_| "无法运行 Docker Compose，请确认 Docker 已启动".to_string())?;
     if !output.status.success() {
-        return Err("Compose 操作失败，请检查镜像、配置和目录权限".to_string());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = stderr
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .take(3)
+            .collect::<Vec<_>>()
+            .join("；");
+        return Err(if detail.is_empty() {
+            "Compose 操作失败，请检查镜像、配置和目录权限".to_string()
+        } else {
+            format!("Compose 操作失败：{detail}")
+        });
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// 提取 `${VAR:?...}` 形式的变量；`$${VAR}` 是转义写法，不参与插值。
+fn compose_required_env(compose: &Path) -> Result<Vec<String>, String> {
+    let text = fs::read_to_string(compose)
+        .map_err(|_| "无法读取 Compose 清单".to_string())?
+        .replace("$$", "\u{0}");
+    let mut names: Vec<String> = Vec::new();
+    let mut rest = text.as_str();
+    while let Some(start) = rest.find("${") {
+        let after = &rest[start + 2..];
+        let Some(end) = after.find('}') else { break };
+        rest = &after[end + 1..];
+        let Some((name, _)) = after[..end].split_once(":?") else {
+            continue;
+        };
+        let name = name.trim();
+        if name.is_empty()
+            || !name
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        {
+            continue;
+        }
+        if !names.iter().any(|item| item == name) {
+            names.push(name.to_string());
+        }
+    }
+    Ok(names)
+}
+
+fn env_file_keys(path: &Path) -> BTreeSet<String> {
+    let Ok(text) = fs::read_to_string(path) else {
+        return BTreeSet::new();
+    };
+    text.lines()
+        .filter_map(|line| {
+            let line = line.trim().strip_prefix("export ").unwrap_or(line.trim());
+            if line.is_empty() || line.starts_with('#') {
+                return None;
+            }
+            let (key, value) = line.split_once('=')?;
+            let key = key.trim();
+            let value = value.trim().trim_matches(['"', '\'']);
+            if key.is_empty() || value.is_empty() {
+                None
+            } else {
+                Some(key.to_string())
+            }
+        })
+        .collect()
+}
+
+/// Compose 插值缺变量时先给出可执行的提示，避免把原始报错留给用户。
+fn ensure_compose_env(install_dir: &Path, deploy_dir: &Path, compose: &Path) -> Result<(), String> {
+    let required = compose_required_env(compose)?;
+    if required.is_empty() {
+        return Ok(());
+    }
+    let mut provided = BTreeSet::new();
+    for file in super::docker_ops::resolve_env_files_for(install_dir, deploy_dir) {
+        provided.extend(env_file_keys(&file));
+    }
+    let missing: Vec<String> = required
+        .into_iter()
+        .filter(|name| {
+            let from_process = std::env::var(name)
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false);
+            !provided.contains(name) && !from_process
+        })
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "缺少 Compose 需要的环境变量：{}；请在 {} 中填写后重试，交付包内附 .env.example 可作参考",
+        missing.join("、"),
+        deploy_dir.join(".env").display()
+    ))
 }
 
 fn compose_config(plan: &UpdatePlan, compose: &Path) -> Result<Value, String> {
@@ -1238,5 +1337,35 @@ mod tests {
             "maintenance": { "image": "tool", "profiles": ["maintenance"] }
         } });
         assert_eq!(active_services(&config), vec!["frontend"]);
+    }
+
+    #[test]
+    fn compose_required_env_only_counts_mandatory_variables() {
+        let fixture = Fixture::new();
+        fixture.write(
+            "deploy/docker-compose.yml",
+            "services:\n  api:\n    environment:\n      A: ${DEMO_PLAIN}\n      B: ${DEMO_CHECK:?必填}\n      C: ${DEMO_DEFAULT:-x}\n      D: $${DEMO_ESCAPED}\n      E: ${DEMO_CHECK:?必填}\n",
+        );
+        let names = compose_required_env(&fixture.0.join("deploy/docker-compose.yml")).unwrap();
+        assert_eq!(names, vec!["DEMO_CHECK".to_string()]);
+    }
+
+    #[test]
+    fn ensure_compose_env_reports_missing_and_accepts_env_file() {
+        let fixture = Fixture::new();
+        fixture.write(
+            "deploy/docker-compose.yml",
+            "services:\n  api:\n    environment:\n      PW: ${MCP_TEST_ONLY_PASSWORD:?必填}\n",
+        );
+        let compose = fixture.0.join("deploy/docker-compose.yml");
+        let install = fixture.0.clone();
+        let deploy = fixture.0.join("deploy");
+        let error = ensure_compose_env(&install, &deploy, &compose).unwrap_err();
+        assert!(error.contains("MCP_TEST_ONLY_PASSWORD"), "{error}");
+        assert!(error.contains(".env"), "{error}");
+        fixture.write("deploy/.env", "MCP_TEST_ONLY_PASSWORD=\n");
+        assert!(ensure_compose_env(&install, &deploy, &compose).is_err());
+        fixture.write("deploy/.env", "MCP_TEST_ONLY_PASSWORD=secret\n");
+        assert!(ensure_compose_env(&install, &deploy, &compose).is_ok());
     }
 }

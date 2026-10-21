@@ -23,6 +23,7 @@ test('buildProfile 完全按交付包推导运行时视图', async () => {
   const profile = await demoProfile();
   assert.equal(profile.containerPrefix, 'demo');
   assert.equal(profile.deployDir, '/opt/demo/deploy');
+  assert.equal(profile.deploySourceRel, 'deploy');
   assert.equal(profile.installDir, '/opt/demo');
   assert.equal(profile.compose.file, '/opt/demo/deploy/docker-compose.yml');
   assert.equal(profile.compose.fileRelative, 'docker-compose.yml');

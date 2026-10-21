@@ -204,6 +204,49 @@ done
   };
 }
 
+const COMPOSE_VAR = /\$\{([A-Za-z_][A-Za-z0-9_]*):?\?[^}]*\}/g;
+
+/** 从 Compose 文本中提取 ${VAR:?} 形式的必需变量；$${VAR} 是转义写法，不算插值。 */
+export function composeRequiredEnv(content) {
+  const names = new Set();
+  for (const match of String(content || '').replaceAll('$$', '\u0000').matchAll(COMPOSE_VAR)) {
+    names.add(match[1]);
+  }
+  return [...names];
+}
+
+async function envFileValues(file) {
+  const content = await fs.readFile(file, 'utf8').catch(() => '');
+  const values = new Map();
+  for (const line of content.split('\n')) {
+    const text = line.trim().replace(/^export\s+/, '');
+    if (!text || text.startsWith('#')) continue;
+    const index = text.indexOf('=');
+    if (index <= 0) continue;
+    values.set(text.slice(0, index).trim(), text.slice(index + 1).trim().replace(/^["']|["']$/g, ''));
+  }
+  return values;
+}
+
+/** Compose 插值缺变量时给出可执行的错误，而不是把 compose 的原始报错透传出去。 */
+export async function assertComposeEnv(deployDir, composeFile) {
+  const content = await fs.readFile(composeFile, 'utf8').catch(() => '');
+  const required = composeRequiredEnv(content);
+  if (required.length === 0) return [];
+  const fromFile = await envFileValues(path.join(deployDir, '.env'));
+  const missing = required.filter((name) => {
+    const value = fromFile.get(name) || process.env[name] || '';
+    return !String(value).trim();
+  });
+  if (missing.length > 0) {
+    throw new DeployError(`缺少 Compose 需要的环境变量：${missing.join('、')}`, {
+      code: 'ENV_MISSING',
+      hint: `在 ${path.join(deployDir, '.env')} 中填写这些变量后重试，交付包内附 .env.example 可作参考。`
+    });
+  }
+  return required;
+}
+
 function resolvedArtifacts(profile, installDir, deployDir) {
   return profile.artifacts.map((artifact) => ({
     ...artifact,
@@ -434,6 +477,7 @@ else docker-compose -f "$COMPOSE_FILE" ${actionArg}; fi
   const deployDir = path.resolve(expandHome(options.deployDir || profile.deployDir));
   const file = await firstExisting([profile.compose.variantFile, profile.compose.file].filter(Boolean));
   if (!file) throw new DeployError(`部署目录未找到 Compose 清单: ${deployDir}`);
+  if (action === 'up') await assertComposeEnv(deployDir, file);
   const docker = requireBinary('docker');
   const args = ['compose', '-f', file, action];
   if (action === 'up') args.push('-d');
@@ -772,8 +816,9 @@ export async function runRemoteDeploy(profile, hostConfig, options) {
       hint: '请在包含源码和构建环境的仓库根目录运行 MCP 服务，或设置 DEPLOY_DESKTOP_ROOT。'
     });
   }
-  const deployDir = String(options.deployDir || hostConfig.deployDir || `${hostConfig.installDir}/deploy`).replace(/\/+$/, '');
-  const lanRoot = deployDir.endsWith('/deploy') ? deployDir.slice(0, -'/deploy'.length) : deployDir;
+  const deployDir = String(options.deployDir || hostConfig.deployDir || profile.deployDir).replace(/\/+$/, '');
+  const deploySuffix = profile.deploySourceRel ? `/${profile.deploySourceRel}` : '/deploy';
+  const lanRoot = deployDir.endsWith(deploySuffix) ? deployDir.slice(0, -deploySuffix.length) : deployDir;
   const args = [script, '--host', hostConfig.host, '--user', hostConfig.user, '--port', String(hostConfig.port), '--dir', lanRoot];
   if (hostConfig.keyPath) args.push('--key', hostConfig.keyPath);
   args.push(modes[mode]);
