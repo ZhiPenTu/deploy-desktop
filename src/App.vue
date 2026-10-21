@@ -2,9 +2,7 @@
   <div class="app-layout" :class="{ 'platform-macos': isMacDesktop }">
     <Sidebar
       :current-tab="currentTab"
-      :switching="switchingProject"
       @update:tab="navigateTab"
-      @switch-project="handleSwitchProject"
     />
 
     <div class="workspace">
@@ -13,6 +11,7 @@
         :group="currentPage.group"
         :deploy-mode="connection.mode"
         :remote-host="connection.remoteHost"
+        :project-name="projectState.project?.name || ''"
         @quick-check="handleQuickCheck"
       />
 
@@ -20,6 +19,7 @@
         <Projects
           v-if="currentTab === 'projects'"
           @go-hosts="navigateTab('hosts')"
+          @deploy="handleDeployProject"
         />
 
         <Credentials
@@ -94,6 +94,7 @@
 import { computed, ref } from 'vue';
 import { ElMessage } from 'element-plus';
 import { isDesktopApp } from './api/tauri.js';
+import { projectState } from './config/project.js';
 import {
   connection,
   hostById,
@@ -136,7 +137,6 @@ function openSettings(section) {
 }
 const isMacDesktop = isDesktopApp() && /mac os x/i.test(navigator.userAgent);
 const wizardBusy = ref(false);
-const switchingProject = ref(false);
 const selectedStatusHostId = ref('');
 const selectedStatusHost = computed(() => hostById(selectedStatusHostId.value));
 function navigateTab(tab) {
@@ -151,17 +151,14 @@ const handleViewLog = (containerName) => {
   currentTab.value = 'logs';
 };
 
-async function handleSwitchProject(id) {
-  if (!id || wizardBusy.value || switchingProject.value) return;
-  switchingProject.value = true;
+async function handleDeployProject(id) {
+  if (!id || wizardBusy.value) return;
   try {
-    await switchActiveProject(id);
+    if (projectState.project?.id !== id) await switchActiveProject(id);
     activeLogContainer.value = '';
-    ElMessage.success('已切换项目');
+    navigateTab('wizard');
   } catch (error) {
     ElMessage.error(String(error));
-  } finally {
-    switchingProject.value = false;
   }
 }
 

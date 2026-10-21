@@ -35,13 +35,7 @@
       </el-table-column>
       <el-table-column label="操作" width="190">
         <template #default="{ row }">
-          <el-button
-            link
-            type="primary"
-            :disabled="row.id === activeId"
-            :loading="switchingId === row.id"
-            @click="activate(row)"
-          >使用</el-button>
+          <el-button link type="primary" @click="deploy(row)">部署</el-button>
           <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
           <el-button link type="danger" @click="remove(row)">删除</el-button>
         </template>
@@ -120,17 +114,16 @@ import { projectState } from '../../../config/project.js';
 import {
   connectionInventory,
   hostById,
-  reloadProjectState,
-  switchActiveProject
+  reloadProjectState
 } from '../../connections/state.js';
 
+const emit = defineEmits(['deploy']);
 const projects = computed(() => projectState.projects);
 const activeId = computed(() => projectState.project?.id || '');
 const hosts = computed(() => connectionInventory.hosts);
 const sources = ref([]);
 const loading = ref(false);
 const saving = ref(false);
-const switchingId = ref('');
 const editorVisible = ref(false);
 const editingId = ref('');
 const form = reactive({ name: '', hostId: '', installDir: '', sourceId: '' });
@@ -220,16 +213,8 @@ async function save() {
   }
 }
 
-async function activate(row) {
-  switchingId.value = row.id;
-  try {
-    await switchActiveProject(row.id);
-    ElMessage.success(`当前项目已切换为「${row.name}」`);
-  } catch (error) {
-    ElMessage.error(String(error));
-  } finally {
-    switchingId.value = '';
-  }
+function deploy(row) {
+  emit('deploy', row.id);
 }
 
 async function remove(row) {

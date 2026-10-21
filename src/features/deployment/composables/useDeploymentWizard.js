@@ -31,7 +31,7 @@ import { safeText, failureText } from '../domain/errors.js';
 import { invokeIncremental } from '../services/operations.js';
 
 export function useDeploymentWizard(config, emit) {
-  const steps = ['选择主机', '检测环境', '选择制品', '解压制品', '清单比对', '选择更新'];
+  const steps = ['选择项目', '检测环境', '选择制品', '解压制品', '清单比对', '选择更新'];
 
   const activeStep = ref(0);
 
@@ -188,6 +188,7 @@ export function useDeploymentWizard(config, emit) {
 
   watch(
     () => [
+      config.projectId,
       config.activeHostId,
       config.mode,
       config.remoteHost,
@@ -199,6 +200,8 @@ export function useDeploymentWizard(config, emit) {
     () => {
       if (executing.value) return;
       envRevision += 1;
+      candidate.value = null;
+      preparedBundle.value = null;
       clearReview();
       envData.value = null;
       envError.value = '';

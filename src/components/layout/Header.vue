@@ -9,6 +9,8 @@
     </div>
 
     <div class="header-actions" data-tauri-drag-region="false">
+      <span v-if="projectName" class="project-chip" :title="projectName">{{ projectName }}</span>
+
       <div class="mode-chip" :class="isRemote ? 'remote' : 'local'">
         <span class="mode-indicator"></span>
         <div class="mode-copy">
@@ -47,6 +49,10 @@ const props = defineProps({
     default: 'local'
   },
   remoteHost: {
+    type: String,
+    default: ''
+  },
+  projectName: {
     type: String,
     default: ''
   }
@@ -95,6 +101,19 @@ const remoteTarget = computed(() => props.remoteHost || '未填写目标主机')
   align-items: center;
   gap: 9px;
   flex: none;
+}
+
+.project-chip {
+  max-width: 220px;
+  padding: 5px 11px;
+  border-radius: 9px;
+  border: 1px solid var(--border-color);
+  background: #f7f9fc;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .mode-chip {

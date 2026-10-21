@@ -3,7 +3,7 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">部署向导</h2>
-        <p class="page-subtitle">选择目标主机与制品，核对服务和镜像后执行首次部署或增量更新</p>
+        <p class="page-subtitle">选择项目与制品，核对服务和镜像后执行首次部署或增量更新</p>
       </div>
     </div>
     <div class="steps-header card-surface">
@@ -26,7 +26,7 @@
 
     <div v-if="activeStep === 0" class="step-card">
       <h3>确认部署目标</h3>
-      <p class="desc">当前项目决定目标主机与部署目录，切换项目请使用侧边栏或项目管理。</p>
+      <p class="desc">选择要部署的项目，项目决定目标主机与部署目录。</p>
       <el-alert
         v-if="connectionInventory.error"
         title="无法读取主机列表，请在主机管理中检查后重试。"
@@ -43,7 +43,20 @@
       </div>
       <el-form v-else label-width="110px" class="host-form" @submit.prevent>
         <el-form-item label="项目">
-          <span>{{ projectName }}</span>
+          <el-select
+            :model-value="selectedProjectId"
+            class="project-select"
+            placeholder="请选择项目"
+            :disabled="busy || switchingProject"
+            @change="selectProject"
+          >
+            <el-option
+              v-for="item in projects"
+              :key="item.id"
+              :value="item.id"
+              :label="item.name"
+            />
+          </el-select>
         </el-form-item>
         <el-form-item label="目标主机">
           <div class="input-row">
@@ -63,7 +76,7 @@
         </el-form-item>
       </el-form>
       <div class="step-footer">
-        <span class="field-hint">{{ hasProject ? `当前目标：${targetLabel}` : '请先创建项目' }}</span>
+        <span class="field-hint">{{ hasProject ? `部署目标：${targetLabel}` : '请先创建项目' }}</span>
         <el-button type="primary" :disabled="!hostReady || busy" @click="nextStep">
           下一步：检测环境
           <el-icon class="el-icon--right"><ArrowRight /></el-icon>
@@ -410,24 +423,40 @@
 
 <script setup>
 import { computed, ref, watch } from 'vue';
+import { ElMessage } from 'element-plus';
 import { ArrowRight, Check, Loading } from '@element-plus/icons-vue';
 import ConfigDiffDialog from '../components/ConfigDiffDialog.vue';
 import WizardArtifactPicker from '../../artifacts/components/WizardArtifactPicker.vue';
 import { useDeploymentWizard } from '../composables/useDeploymentWizard.js';
-import { connectionInventory } from '../../connections/state.js';
+import { connectionInventory, switchActiveProject } from '../../connections/state.js';
 import { projectState } from '../../../config/project.js';
 import { safeText } from '../domain/errors.js';
 
 const props = defineProps({ connection: { type: Object, required: true } });
 const emit = defineEmits(['go-dashboard', 'go-images', 'go-artifacts', 'go-projects', 'busy-change']);
 const hasProject = computed(() => Boolean(projectState.project?.id));
-const projectName = computed(() => projectState.project?.name || '');
+const projects = computed(() => projectState.projects);
+const selectedProjectId = computed(() => projectState.project?.id || '');
+const switchingProject = ref(false);
 const config = props.connection;
 const configDiffOpen = ref(false);
 const configDiffService = ref('');
 function openConfigDiff(serviceName = '') {
   configDiffService.value = serviceName;
   configDiffOpen.value = true;
+}
+
+async function selectProject(id) {
+  if (!id || id === selectedProjectId.value || switchingProject.value) return;
+  switchingProject.value = true;
+  try {
+    await switchActiveProject(id);
+    ElMessage.success(`已选择项目「${projectState.project?.name || ''}」`);
+  } catch (error) {
+    ElMessage.error(String(error));
+  } finally {
+    switchingProject.value = false;
+  }
 }
 const {
   steps,
@@ -601,6 +630,12 @@ h3 {
   margin-top: 26px;
   max-width: 850px;
 }
+
+.project-select {
+  width: 100%;
+  max-width: 360px;
+}
+
 .input-row,
 .status-row,
 .section-heading {

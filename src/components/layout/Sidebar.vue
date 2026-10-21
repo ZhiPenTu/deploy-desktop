@@ -9,25 +9,6 @@
       </div>
     </div>
 
-    <div class="project-block">
-      <span class="project-label">当前项目</span>
-      <template v-if="projects.length">
-        <select
-          class="project-select"
-          :value="activeProjectId || undefined"
-          :disabled="switching"
-          aria-label="切换当前项目"
-          @change="$emit('switch-project', $event.target.value)"
-        >
-          <option v-for="item in projects" :key="item.id" :value="item.id">{{ item.name }}</option>
-        </select>
-        <span class="project-meta">{{ projectMeta }}</span>
-      </template>
-      <button v-else type="button" class="project-empty" @click="$emit('update:tab', 'projects')">
-        尚无项目，前往创建
-      </button>
-    </div>
-
     <div class="nav-scroll">
       <div v-for="group in navGroups" :key="group.label" class="nav-group">
         <div class="nav-label">{{ group.label }}</div>
@@ -72,9 +53,6 @@ import {
   FolderOpened
 } from '@element-plus/icons-vue';
 import appIcon from '../../assets/app-icon.png';
-import { computed } from 'vue';
-import { projectState } from '../../config/project.js';
-import { hostById, isLocalHost } from '../../features/connections/state.js';
 
 const appVersion = __APP_VERSION__;
 
@@ -82,25 +60,10 @@ defineProps({
   currentTab: {
     type: String,
     default: 'wizard'
-  },
-  switching: {
-    type: Boolean,
-    default: false
   }
 });
 
-defineEmits(['update:tab', 'switch-project']);
-
-const projects = computed(() => projectState.projects);
-const activeProjectId = computed(() => projectState.project?.id || '');
-const projectMeta = computed(() => {
-  const project = projectState.project;
-  if (!project) return '';
-  const host = hostById(project.hostId);
-  const hostText = host ? (isLocalHost(host) ? '本机' : host.address || host.name) : '主机未配置';
-  const version = projectState.bundle?.version ? ` · ${projectState.bundle.version}` : '';
-  return `${hostText}${version}`;
-});
+defineEmits(['update:tab']);
 
 const navGroups = [
   {
@@ -209,76 +172,17 @@ const navGroups = [
   white-space: nowrap;
 }
 
-.project-block {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 12px 14px;
-  border-bottom: 1px solid var(--sidebar-border);
-}
-
-.project-label {
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.12em;
-  color: #64748b;
-}
-
-.project-select {
-  width: 100%;
-  height: 32px;
-  padding: 0 8px;
-  border: 1px solid rgba(120, 150, 255, 0.22);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.06);
-  color: #f1f5f9;
-  font: inherit;
-  font-size: 12.5px;
-  cursor: pointer;
-  appearance: none;
-}
-
-.project-select option {
-  color: #0f172a;
-  background: #ffffff;
-}
-
-.project-select:disabled {
-  opacity: 0.6;
-  cursor: default;
-}
-
-.project-meta {
-  font-size: 11px;
-  color: #7f8ea6;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.project-empty {
-  width: 100%;
-  min-height: 32px;
-  padding: 6px 10px;
-  border: 1px dashed rgba(120, 150, 255, 0.35);
-  border-radius: 8px;
-  background: rgba(51, 92, 255, 0.08);
-  color: #c3d0e2;
-  font: inherit;
-  font-size: 12px;
-  text-align: left;
-  cursor: pointer;
-}
-
-.project-empty:hover {
-  background: rgba(51, 92, 255, 0.16);
-  color: #f1f5f9;
-}
-
 .nav-scroll {
   flex: 1;
   padding: 12px 12px 16px;
   overflow-y: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.nav-scroll::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }
 
 .nav-group + .nav-group {
