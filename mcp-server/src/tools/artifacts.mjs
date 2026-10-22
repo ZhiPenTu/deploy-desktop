@@ -4,6 +4,7 @@ import { formatBytes } from '../util.mjs';
 import {
   artifactCacheRoot,
   artifactSourcePath,
+  loadArtifactTokenLibrary,
   loadArtifactSources,
   mutateArtifactSources,
   nextArtifactSourceId,
@@ -27,7 +28,7 @@ async function resolveSource(selector) {
 
 function mergeSourceInput(args, existing) {
   const input = existing ? { ...existing } : {};
-  for (const key of ['name', 'type', 'orgId', 'pipelineId', 'artifactName', 'version', 'downloadUrl']) {
+  for (const key of ['name', 'type', 'orgId', 'pipelineId', 'artifactName', 'version', 'downloadUrl', 'tokenId']) {
     if (args[key] !== undefined) input[key] = args[key];
   }
   return input;
@@ -43,6 +44,7 @@ function publicSource(source) {
     artifactName: source.artifactName,
     version: source.version,
     downloadUrl: source.downloadUrl,
+    tokenId: source.tokenId,
     hasToken: source.hasToken,
     lastVersion: source.lastVersion,
     lastBundleDir: source.lastBundleDir
@@ -74,6 +76,7 @@ export function registerArtifactsTools(register) {
       version: z.string().optional().describe('直接下载源的版本号'),
       downloadUrl: z.string().optional().describe('直接下载源的 HTTPS 地址'),
       token: z.string().optional().describe('云效个人访问令牌；仅用于本次保存，不会出现在返回结果中'),
+      tokenId: z.string().optional().describe('复用访问令牌库中的令牌 ID；与 token 二选一，token 优先'),
       clearToken: z.boolean().optional().default(false).describe('清除已保存的令牌')
     },
     annotations: mutating
@@ -86,15 +89,29 @@ export function registerArtifactsTools(register) {
     }
     const id = existing?.id || nextArtifactSourceId(sources);
     const record = validateArtifactSource(mergeSourceInput(args, existing), existing);
-    if (args.clearToken === true) {
-      await removeArtifactToken(id);
-    } else if (String(args.token ?? '').trim()) {
-      await writeArtifactToken(id, args.token);
+    const requestedTokenId = String(args.tokenId ?? '').trim();
+    const explicitToken = String(args.token ?? '').trim();
+    if (requestedTokenId && !explicitToken) {
+      const library = await loadArtifactTokenLibrary();
+      if (!library.some((token) => token.id === requestedTokenId)) {
+        throw new DeployError(`访问令牌不存在：${requestedTokenId}`, {
+          code: 'ARTIFACT_TOKEN_NOT_FOUND',
+          hint: '请在桌面端设置中创建访问令牌，或改用 token 直接传入令牌内容。'
+        });
+      }
+      if (!(await readArtifactToken({ id, tokenId: requestedTokenId }))) {
+        throw new DeployError(`访问令牌 ${requestedTokenId} 没有令牌内容`, { code: 'ARTIFACT_TOKEN_EMPTY' });
+      }
     }
-    let hasToken = Boolean(await readArtifactToken(id));
-    if (args.clearToken === true) hasToken = false;
-    else if (String(args.token ?? '').trim()) hasToken = true;
-    else if (existing?.hasToken) hasToken = true;
+    if (args.clearToken === true) {
+      record.tokenId = '';
+      await removeArtifactToken(id);
+    } else if (explicitToken) {
+      // 直接传入的令牌先按制品源保存，桌面端下次加载时会收进令牌库并复用。
+      record.tokenId = '';
+      await writeArtifactToken(id, explicitToken);
+    }
+    const hasToken = Boolean(await readArtifactToken({ id, tokenId: record.tokenId }));
     let saved = null;
     const path = (await mutateArtifactSources((list) => {
       const index = list.findIndex((source) => source.id === id);

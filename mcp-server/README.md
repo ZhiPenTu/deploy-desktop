@@ -177,6 +177,8 @@ deploy_project_bind_bundle { project: "生产环境", bundleDir: "<下载结果�
 
 直接下载源使用 `type: "url"`，并填写 `version` 与 HTTPS `downloadUrl`。令牌只在本次保存时传入，不会出现在工具返回结果中；更新其他字段时留空 `token` 即可保留原令牌，`clearToken: true` 会清除令牌。
 
+桌面端令牌库中已有令牌时，改用 `tokenId` 复用该令牌，无需重复输入令牌内容；`tokenId` 与 `token` 二选一，同时传入时以 `token` 为准。
+
 下载会限制为 HTTPS；云效构建物只允许从 `aliyuncs.com` / `aliyun.com` 域名下载。保存前会校验 MD5（源提供时）、交付包版本、`bundle.json` 文件清单与大小，并拒绝越界路径、链接和特殊文件。`deploy_artifact_releases` 的 `cachedOnly: true` 只读取本机版本缓存与已下载交付包。
 
 ### 3. 拉取镜像并导出离线包

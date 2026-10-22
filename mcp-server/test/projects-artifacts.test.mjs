@@ -184,6 +184,58 @@ test('制品源支持新增、令牌保存、编辑、清除令牌与删除', as
   });
 });
 
+test('制品源可复用访问令牌库的令牌，且不影响其他源', async () => {
+  await withConfigDir(async (dir) => {
+    await fs.writeFile(path.join(dir, 'artifact-sources.json'), JSON.stringify({
+      sources: [{
+        id: 'src-main',
+        name: '主流水线',
+        type: 'yunxiaoFlow',
+        orgId: 'org',
+        pipelineId: '111',
+        artifactName: 'deploy-bundle',
+        version: '',
+        downloadUrl: '',
+        tokenId: 'tok-shared',
+        hasToken: true,
+        lastVersion: '1.0.0',
+        lastBundleDir: '/tmp/bundle'
+      }]
+    }));
+    await fs.writeFile(path.join(dir, 'artifact-token-library.json'), JSON.stringify({
+      tokens: [{ id: 'tok-shared', name: '云效令牌', createdAt: 1, updatedAt: 1 }]
+    }));
+    await fs.writeFile(path.join(dir, 'artifact-tokens.json'), JSON.stringify({ 'token:tok-shared': 'shared-token' }));
+
+    const created = await call('deploy_artifact_source_save', {
+      name: '局域网流水线',
+      type: 'yunxiaoFlow',
+      orgId: 'org',
+      pipelineId: '5340973',
+      artifactName: 'lan-deploy-bundle',
+      tokenId: 'tok-shared'
+    });
+    assert.equal(created.result.isError, undefined);
+    assert.equal(created.body.source.tokenId, 'tok-shared');
+    assert.equal(created.body.source.hasToken, true);
+
+    const file = JSON.parse(await fs.readFile(path.join(dir, 'artifact-sources.json'), 'utf8'));
+    assert.equal(file.sources.length, 2);
+    assert.equal(file.sources[0].tokenId, 'tok-shared');
+    assert.equal(file.sources[0].lastVersion, '1.0.0');
+    assert.equal(file.sources[1].tokenId, 'tok-shared');
+
+    const tokens = JSON.parse(await fs.readFile(path.join(dir, 'artifact-tokens.json'), 'utf8'));
+    assert.deepEqual(tokens, { 'token:tok-shared': 'shared-token' });
+
+    const missing = await call('deploy_artifact_source_save', {
+      name: '错误令牌源', type: 'yunxiaoFlow', orgId: 'org', pipelineId: '9', tokenId: 'tok-missing'
+    });
+    assert.equal(missing.body.code, 'ARTIFACT_TOKEN_NOT_FOUND');
+    assert.equal((await call('deploy_artifact_source_list')).body.sources.length, 2);
+  });
+});
+
 test('直接下载源可查看版本并下载校验交付包', async () => {
   await withConfigDir(async (dir) => {
     const sourceDir = await makeTempDir('deploy-mcp-artifact-bundle-');

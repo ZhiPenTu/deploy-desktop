@@ -217,7 +217,7 @@ async function urlRelease(source) {
 }
 
 async function flowToken(source, token) {
-  const value = String(token || '').trim() || await readArtifactToken(source.id);
+  const value = String(token || '').trim() || await readArtifactToken(source);
   if (!value) {
     throw fail('尚未配置云效个人访问令牌', 'ARTIFACT_TOKEN_REQUIRED', '请编辑制品源填写令牌，或在本次调用中传入 token。');
   }

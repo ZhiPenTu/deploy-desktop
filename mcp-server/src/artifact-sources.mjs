@@ -6,6 +6,7 @@ import { isObject } from './util.mjs';
 
 export const ARTIFACT_SOURCES_FILE = 'artifact-sources.json';
 export const ARTIFACT_TOKENS_FILE = 'artifact-tokens.json';
+export const ARTIFACT_TOKEN_LIBRARY_FILE = 'artifact-token-library.json';
 export const ARTIFACT_RELEASE_CACHE_FILE = 'artifact-releases-cache.json';
 export const ARTIFACT_BUNDLES_DIR = 'bundles';
 
@@ -19,6 +20,10 @@ export function artifactSourcePath() {
 
 export function artifactTokenPath() {
   return path.join(appConfigDir(), ARTIFACT_TOKENS_FILE);
+}
+
+export function artifactTokenLibraryPath() {
+  return path.join(appConfigDir(), ARTIFACT_TOKEN_LIBRARY_FILE);
 }
 
 export function artifactReleaseCachePath() {
@@ -62,6 +67,7 @@ function normalizeSource(source) {
     artifactName: String(source.artifactName || 'deploy-bundle'),
     version: String(source.version || ''),
     downloadUrl: String(source.downloadUrl || ''),
+    tokenId: String(source.tokenId || ''),
     hasToken: Boolean(source.hasToken),
     lastVersion: String(source.lastVersion || ''),
     lastBundleDir: String(source.lastBundleDir || '')
@@ -181,6 +187,7 @@ export function validateArtifactSource(input, existing = null) {
     artifactName,
     version,
     downloadUrl,
+    tokenId: String(input.tokenId ?? existing?.tokenId ?? '').trim(),
     hasToken: Boolean(existing?.hasToken),
     lastVersion: String(existing?.lastVersion || ''),
     lastBundleDir: String(existing?.lastBundleDir || '')
@@ -231,9 +238,30 @@ async function loadTokenFile() {
   return raw;
 }
 
-export async function readArtifactToken(sourceId) {
+/// 访问令牌库由桌面端维护，只保存名称与时间；令牌内容在凭据文件中按 `token:<id>` 存放。
+export async function loadArtifactTokenLibrary() {
+  const raw = await readJson(artifactTokenLibraryPath(), '访问令牌列表');
+  if (raw === null) return [];
+  if (!isObject(raw) || !Array.isArray(raw.tokens)) {
+    throw new DeployError('访问令牌列表格式不正确，请检查本机令牌配置', {
+      code: 'ARTIFACT_TOKEN_LIBRARY_INVALID',
+      details: { path: artifactTokenLibraryPath() }
+    });
+  }
+  return raw.tokens.filter(isObject).map((token) => ({
+    id: String(token.id || '').trim(),
+    name: String(token.name || '').trim()
+  }));
+}
+
+/// 读取令牌内容：源绑定令牌库条目时读共享令牌，否则读按制品源保存的历史记录。
+export async function readArtifactToken(target) {
+  const source = isObject(target) ? target : { id: String(target || '').trim(), tokenId: '' };
   const tokens = await loadTokenFile();
-  const value = tokens[String(sourceId || '').trim()];
+  const tokenId = String(source.tokenId || '').trim();
+  const value = tokenId
+    ? tokens[`token:${tokenId}`]
+    : tokens[String(source.id || '').trim()];
   return typeof value === 'string' && value.trim() ? value : '';
 }
 
