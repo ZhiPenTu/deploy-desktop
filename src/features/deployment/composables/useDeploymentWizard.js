@@ -3,23 +3,16 @@ import { ElMessageBox } from 'element-plus';
 import { selectLocalPath as open } from '../../../api/tauri.js';
 import { connectionInventory } from '../../connections/state.js';
 import {
-  checkLocalEnv,
-  checkRemoteEnv,
-  installOfflineDockerEngine,
-  installRemoteDockerEngine,
   dockerComposeAction,
   remoteDockerComposeAction,
   installBundle,
   inspectBundlePlan,
   inspectDeploymentReview,
   isDesktopApp,
-  testManagedHostConnection,
-  setupManagedHostAccess,
   scanLocalImageBundle,
   loadOfflineImages,
   uploadRemoteImageBundle,
-  importRemoteImageBundle,
-  onRemoteUpdateProgress,
+  importRemoteImageBundle
 } from '../../../api/tauri.js';
 import { validInstallDir, createDeploymentContext, contextTarget } from '../domain/context.js';
 import {
@@ -30,7 +23,9 @@ import {
 } from '../domain/components.js';
 import { safeText, failureText } from '../domain/errors.js';
 import { invokeIncremental } from '../services/operations.js';
-import { createProgressSubscription } from '../../../shared/async/progressSubscription.js';
+import { useEnvironmentCheck } from './useEnvironmentCheck.js';
+import { useExecutionFeedback } from './useExecutionFeedback.js';
+import { useHostAccess } from './useHostAccess.js';
 
 export function useDeploymentWizard(config, emit) {
   const steps = ['选择项目', '检测环境', '选择制品', '解压制品', '清单比对', '选择更新'];
@@ -61,16 +56,6 @@ export function useDeploymentWizard(config, emit) {
     )
   );
 
-  const testingSsh = ref(false),
-    settingKey = ref(false),
-    sshMessage = ref(''),
-    sshOk = ref(false);
-
-  const envData = ref(null),
-    envError = ref(''),
-    checkingEnv = ref(false),
-    installingDocker = ref(false);
-
   const artifactPicker = ref(null),
     candidate = ref(null),
     preparedBundle = ref(null),
@@ -97,55 +82,30 @@ export function useDeploymentWizard(config, emit) {
     diagnostics = ref(''),
     result = ref(null);
 
-  const progressStep = ref(''),
-    progressPercent = ref(0),
-    progressMessage = ref(''),
-    elapsedSeconds = ref(0);
+  const hostAccess = useHostAccess({ config, targetLabel, desktopGuard });
+  const { testingSsh, settingKey, sshMessage, sshOk, testConnection, setupAccess } = hostAccess;
 
-  let progressSubscription = null,
-    elapsedTimer = null;
+  const executionFeedback = useExecutionFeedback();
 
-  const elapsedText = computed(() => {
-    const minutes = Math.floor(elapsedSeconds.value / 60);
-    const seconds = elapsedSeconds.value % 60;
-    return minutes ? `${minutes} 分 ${String(seconds).padStart(2, '0')} 秒` : `${seconds} 秒`;
+  const environment = useEnvironmentCheck({
+    config,
+    isRemote,
+    targetLabel,
+    desktopGuard,
+    onInvalidateReview: () => {
+      review.value = null;
+      clearExecution();
+    }
   });
-
-  function startExecutionFeedback() {
-    stopExecutionFeedback();
-    progressStep.value = '准备执行';
-    progressPercent.value = 2;
-    progressMessage.value = '';
-    elapsedSeconds.value = 0;
-    progressSubscription = createProgressSubscription(
-      onRemoteUpdateProgress,
-      (payload) => {
-        if (!payload) return;
-        const percent = Number(payload.percent);
-        if (Number.isFinite(percent)) {
-          progressPercent.value = Math.max(0, Math.min(100, Math.round(percent)));
-        }
-        if (payload.step) progressStep.value = String(payload.step);
-        if (payload.message) {
-          progressMessage.value = String(payload.message);
-          phase.value = progressMessage.value;
-        }
-      },
-      () => {
-        progressMessage.value = '无法订阅执行进度，完成结果不受影响。';
-      }
-    );
-    elapsedTimer = setInterval(() => {
-      elapsedSeconds.value += 1;
-    }, 1000);
-  }
-
-  function stopExecutionFeedback() {
-    progressSubscription?.dispose();
-    progressSubscription = null;
-    if (elapsedTimer) clearInterval(elapsedTimer);
-    elapsedTimer = null;
-  }
+  const {
+    envData,
+    envError,
+    checkingEnv,
+    installingDocker,
+    environmentReady,
+    checkEnvironment,
+    installDocker
+  } = environment;
 
   const busy = computed(
     () =>
@@ -158,10 +118,6 @@ export function useDeploymentWizard(config, emit) {
       importingImages.value ||
       executing.value ||
       preflighting.value
-  );
-
-  const environmentReady = computed(() =>
-    Boolean(envData.value?.docker_running && envData.value?.compose_installed && !envError.value)
   );
 
   const componentOptions = computed(() => planComponentOptions(bundlePlan.value));
@@ -179,7 +135,6 @@ export function useDeploymentWizard(config, emit) {
   );
 
   let revision = 0,
-    envRevision = 0,
     disposed = false;
 
   // Read-only SSH checks may continue after leaving; destructive work keeps its guard.
@@ -189,10 +144,10 @@ export function useDeploymentWizard(config, emit) {
   watch(navigationBlocked, (value) => emit('busy-change', value), { flush: 'sync' });
 
   onBeforeUnmount(() => {
-    stopExecutionFeedback();
+    executionFeedback.stop();
     disposed = true;
     revision += 1;
-    envRevision += 1;
+    environment.dispose();
     emit('busy-change', false);
   });
 
@@ -245,13 +200,13 @@ export function useDeploymentWizard(config, emit) {
     const changed = next.some((value, index) => value !== lastConnection[index]);
     lastConnection = next;
     if (!changed || executing.value) return;
-    envRevision += 1;
+    environment.invalidate();
     candidate.value = null;
     preparedBundle.value = null;
     clearReview();
     envData.value = null;
     envError.value = '';
-    sshMessage.value = '';
+    hostAccess.reset();
     if (activeStep.value > 0) activeStep.value = 0;
   });
 
@@ -266,102 +221,6 @@ export function useDeploymentWizard(config, emit) {
   function artifactPrepared(value) {
     preparedBundle.value = value;
     clearReview();
-  }
-
-  async function testConnection() {
-    testingSsh.value = true;
-    sshMessage.value = '';
-    try {
-      desktopGuard();
-      const response = await testManagedHostConnection(config.activeHostId);
-      sshOk.value = Boolean(response.success);
-      sshMessage.value = response.success ? '连接正常' : '连接未通过，请检查凭证与网络。';
-    } catch (error) {
-      sshOk.value = false;
-      sshMessage.value = failureText(error, '连接检查');
-    } finally {
-      testingSsh.value = false;
-    }
-  }
-
-  async function setupAccess() {
-    try {
-      await ElMessageBox.confirm(
-        `将为 ${targetLabel.value} 配置免密登录，使用该主机保存的凭证。`,
-        '确认配置免密登录',
-        { type: 'warning', confirmButtonText: '开始配置', cancelButtonText: '取消' }
-      );
-    } catch {
-      return;
-    }
-    settingKey.value = true;
-    try {
-      desktopGuard();
-      const response = await setupManagedHostAccess(config.activeHostId);
-      sshOk.value = Boolean(response.success);
-      sshMessage.value = response.success ? '免密登录已配置' : '配置未完成，请检查凭证后重试。';
-    } catch (error) {
-      sshOk.value = false;
-      sshMessage.value = failureText(error, '配置免密登录');
-    } finally {
-      settingKey.value = false;
-    }
-  }
-
-  async function checkEnvironment() {
-    const current = ++envRevision;
-    checkingEnv.value = true;
-    envError.value = '';
-    envData.value = null;
-    review.value = null;
-    clearExecution();
-    try {
-      desktopGuard();
-      const response = isRemote.value
-        ? await checkRemoteEnv(
-            config.remoteHost,
-            config.remotePort,
-            config.remoteUser,
-            config.remoteKey || null
-          )
-        : await checkLocalEnv(config.installDir);
-      if (current === envRevision && !disposed) envData.value = response;
-    } catch (error) {
-      if (current === envRevision && !disposed) envError.value = failureText(error, '环境检测');
-    } finally {
-      if (current === envRevision && !disposed) checkingEnv.value = false;
-    }
-  }
-
-  async function installDocker() {
-    try {
-      await ElMessageBox.confirm(
-        `将在 ${targetLabel.value} 安装并启动 Docker 引擎，可能修改系统服务配置。`,
-        '确认安装 Docker',
-        { type: 'warning', confirmButtonText: '安装', cancelButtonText: '取消' }
-      );
-    } catch {
-      return;
-    }
-    installingDocker.value = true;
-    try {
-      desktopGuard();
-      const response = isRemote.value
-        ? await installRemoteDockerEngine(
-            config.remoteHost,
-            config.remotePort,
-            config.remoteUser,
-            config.remoteKey || null,
-            config.mediaDir
-          )
-        : await installOfflineDockerEngine(config.mediaDir);
-      if (!response.success) throw new Error(response.error_message || 'Docker 安装失败');
-      await checkEnvironment();
-    } catch (error) {
-      envError.value = failureText(error, '安装 Docker');
-    } finally {
-      installingDocker.value = false;
-    }
   }
 
   async function nextStep() {
@@ -553,7 +412,9 @@ export function useDeploymentWizard(config, emit) {
       } catch {
         return;
       }
-      startExecutionFeedback();
+      executionFeedback.start((message) => {
+        phase.value = message;
+      });
       phase.value = `正在${action}，请等待执行结果`;
       let response;
       if (context.action === 'incremental') {
@@ -614,7 +475,7 @@ export function useDeploymentWizard(config, emit) {
       phase.value = '';
     } finally {
       executing.value = false;
-      stopExecutionFeedback();
+      executionFeedback.stop();
     }
   }
 
@@ -624,6 +485,8 @@ export function useDeploymentWizard(config, emit) {
       label: targetLabel.value, imageDir: imageMediaDir.value,
       allowedComponents: deploymentComponents(bundlePlan.value) });
   }
+
+  const { progressStep, progressPercent, progressMessage, elapsedText } = executionFeedback;
 
   return { steps, activeStep, selectedHost, isRemote, targetLabel, hostReady, testingSsh, settingKey, sshMessage, sshOk, envData, envError, checkingEnv, installingDocker, artifactPicker, candidate, preparedBundle, artifactBusy, review, reviewError, checkingReview, reviewTab, imageMediaDir, importingImages, deploymentAction, selectedComponents, backup, executing, preflighting, preflightPassed, phase, operationError, diagnostics, result, busy, environmentReady, componentOptions, canExecute, artifactChosen, artifactPrepared, testConnection, setupAccess, checkEnvironment, installDocker, nextStep, previousStep, loadReview, pickImageDirectory, prepareImages, runPreflight, executeDeployment, progressStep, progressPercent, progressMessage, elapsedText };
 }
