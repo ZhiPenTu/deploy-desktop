@@ -583,7 +583,7 @@ dependencies = [
 
 [[package]]
 name = "deploy-desktop"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "chrono",
  "dirs",
