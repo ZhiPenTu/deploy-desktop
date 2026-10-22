@@ -1219,7 +1219,7 @@ mod tests {
         let relative: Vec<String> = plan
             .replacements
             .iter()
-            .map(|item| item.relative.to_string_lossy().to_string())
+            .map(|item| item.relative.to_string_lossy().replace('\\', "/"))
             .collect();
         assert!(relative.contains(&"api/site".to_string()));
         assert!(relative.contains(&"bin".to_string()));
