@@ -345,3 +345,70 @@ test('清单比对步骤在没有镜像缺失时不显示准备面板', async ({
 
   expect(problems).toEqual([]);
 });
+
+test('选择更新步骤展示部署方式与更新内容', async ({ page }) => {
+  const problems = [];
+  page.on('pageerror', (error) => problems.push(`未捕获异常：${error.message}`));
+
+  await useDesktopBackend(page, {
+    hosts: [localHost],
+    projects: [localProject],
+    activeProjectId: localProject.id,
+    localEnv,
+    dialogPath: demoPreparedBundle.dir,
+    preparedBundle: demoPreparedBundle,
+    bundlePlan: demoBundlePlan,
+    deploymentReview: demoDeploymentReview
+  });
+
+  await openReviewStep(page);
+
+  const review = page
+    .locator('.step-card')
+    .filter({ has: page.getByRole('heading', { name: '核对服务清单与镜像' }) });
+  await review.getByRole('button', { name: '下一步：选择更新' }).click();
+
+  await expect(page.locator('.stepper [aria-current="step"]')).toHaveText('6选择更新');
+  const step = page
+    .locator('.step-card')
+    .filter({ has: page.getByRole('heading', { name: '选择部署操作' }) });
+  await expect(step.locator('.desc')).toContainText('部署目录 /srv/deploy-demo');
+  await expect(step.locator('.desc')).toContainText('制品版本 v1.4.0');
+
+  const actions = step.locator('.deployment-actions .el-radio');
+  await expect(actions).toHaveCount(2);
+  await expect(actions.nth(0)).toContainText('首次部署');
+  await expect(actions.nth(0)).toHaveClass(/is-disabled/);
+  await expect(actions.nth(1)).toContainText('增量更新');
+  await expect(actions.nth(1)).toHaveClass(/is-checked/);
+
+  const plan = page
+    .locator('.step-card')
+    .filter({ has: page.getByRole('heading', { name: '选择部署操作' }) })
+    .locator('form');
+  await expect(plan.getByText('更新内容')).toBeVisible();
+  // 第三个选项来自交付包随附的镜像包。
+  const checkboxes = plan.locator('.el-checkbox');
+  await expect(checkboxes).toHaveCount(3);
+  await expect(checkboxes.nth(0)).toContainText('Web 控制台');
+  await expect(checkboxes.nth(1)).toContainText('接口服务');
+  await expect(checkboxes.nth(2)).toContainText('随包镜像');
+  await expect(plan.getByText('更新前备份')).toBeVisible();
+
+  await expect(step.getByRole('button', { name: '执行预检' })).toBeEnabled();
+  await expect(step.getByRole('button', { name: '开始增量更新' })).toBeEnabled();
+  await expect(step.getByRole('button', { name: '查看集群监控' })).toHaveCount(0);
+
+  await checkboxes.nth(0).click();
+  await checkboxes.nth(1).click();
+  await checkboxes.nth(2).click();
+  await expect(step.getByRole('button', { name: '开始增量更新' })).toBeDisabled();
+
+  await checkboxes.nth(0).click();
+  await expect(step.getByRole('button', { name: '开始增量更新' })).toBeEnabled();
+
+  await step.getByRole('button', { name: '返回清单比对' }).click();
+  await expect(page.locator('.stepper [aria-current="step"]')).toHaveText('5清单比对');
+
+  expect(problems).toEqual([]);
+});
