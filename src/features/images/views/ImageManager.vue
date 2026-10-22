@@ -19,201 +19,42 @@
 
     <el-tabs v-model="activeTab" class="image-tabs" @tab-change="handleTabChange">
       <el-tab-pane label="镜像列表" name="images">
-        <div class="card-surface image-card">
-          <div class="card-title-bar">
-            <h3>本机 Docker 镜像</h3>
-            <span class="hint">{{ imageSummary }}</span>
-          </div>
-
-          <div class="toolbar-row">
-            <el-button :loading="loadingImages" @click="loadImages">
-              <el-icon><Refresh /></el-icon>
-              <span>刷新镜像</span>
-            </el-button>
-            <el-button type="primary" @click="openPullDialog">
-              <el-icon><Download /></el-icon>
-              <span>拉取镜像</span>
-            </el-button>
-          </div>
-
-          <div class="selection-row">
-            <span class="selection-hint">已选择 {{ selectedImages.length }} 个镜像</span>
-            <el-button
-              type="primary"
-              plain
-              :disabled="!selectedImages.length || busyLocal"
-              :loading="exporting"
-              @click="handleExport"
-            >
-              导出离线包
-            </el-button>
-            <el-button
-              type="danger"
-              plain
-              :disabled="!selectedImages.length || busyLocal"
-              :loading="deletingImages"
-              @click="handleDeleteImages"
-            >
-              删除选中镜像
-            </el-button>
-            <span class="field-hint inline-hint">离线包保存到 {{ offlineDir || '设置中的目录' }}</span>
-          </div>
-
-          <el-alert
-            v-if="imagesError"
-            type="warning"
-            :closable="false"
-            show-icon
-            class="error-alert"
-          >
-            <template #title>
-              <span>{{ imagesError }}</span>
-            </template>
-            <div class="error-actions">
-              <span>请确认 Docker 已安装并启动。</span>
-              <el-button size="small" @click="loadImages">重新读取</el-button>
-            </div>
-          </el-alert>
-
-          <el-table
-            v-if="dockerImages.length"
-            ref="imageTable"
-            :data="dockerImages"
-            row-key="reference"
-            size="small"
-            class="image-table"
-            @selection-change="handleImageSelection"
-          >
-            <el-table-column type="selection" width="44" />
-            <el-table-column label="镜像" min-width="300">
-              <template #default="{ row }">
-                <code v-if="row.exportable">{{ row.reference }}</code>
-                <span v-else class="muted-text">未标记镜像</span>
-              </template>
-            </el-table-column>
-            <el-table-column label="镜像 ID" width="140">
-              <template #default="{ row }">
-                <code class="muted-code">{{ shortId(row.id) }}</code>
-              </template>
-            </el-table-column>
-            <el-table-column label="大小" width="110">
-              <template #default="{ row }">{{ row.sizeText || formatSize(row.sizeBytes) }}</template>
-            </el-table-column>
-            <el-table-column label="创建时间" width="190">
-              <template #default="{ row }">{{ row.createdText || '-' }}</template>
-            </el-table-column>
-            <el-table-column label="状态" width="110">
-              <template #default="{ row }">
-                <el-tag :type="row.exportable ? 'success' : 'info'" size="small" effect="plain">
-                  {{ row.exportable ? '可导出' : '仅可删除' }}
-                </el-tag>
-              </template>
-            </el-table-column>
-          </el-table>
-
-          <div v-else-if="!imagesError" class="empty-state">
-            <span class="icon-tile neutral"><el-icon><Box /></el-icon></span>
-            <span class="empty-title">{{ loadingImages ? '正在读取本机镜像' : '本机还没有 Docker 镜像' }}</span>
-            <span class="empty-hint">
-              {{ loadingImages ? '请稍候' : '填写镜像地址后拉取，或先在目标机上导入离线包。' }}
-            </span>
-            <div v-if="!loadingImages" class="empty-actions">
-              <el-button size="small" type="primary" @click="openPullDialog">拉取镜像</el-button>
-            </div>
-          </div>
-
-        </div>
+        <ImageListPanel
+          ref="imageListRef"
+          :images="dockerImages"
+          :loading="loadingImages"
+          :error="imagesError"
+          :selected-count="selectedImages.length"
+          :busy="busyLocal"
+          :exporting="exporting"
+          :deleting="deletingImages"
+          :offline-dir="offlineDir"
+          @refresh="loadImages"
+          @pull="openPullDialog"
+          @export-selected="handleExport"
+          @delete-selected="handleDeleteImages"
+          @selection-change="handleImageSelection"
+        />
       </el-tab-pane>
 
       <el-tab-pane label="离线包列表" name="packages">
-        <div class="card-surface image-card">
-          <div class="card-title-bar">
-            <h3>离线镜像包</h3>
-            <span class="hint">{{ packageSummary }}</span>
-          </div>
-
-          <div class="dir-row">
-            <span class="dir-label">保存目录</span>
-            <code class="path-text">{{ offlineScan?.offlineDir || offlineDir || '未配置' }}</code>
-            <el-button size="small" @click="goSettings">修改目录</el-button>
-          </div>
-
-          <div class="selection-row">
-            <span class="selection-hint">已选择 {{ selectedPackages.length }} 个离线包</span>
-            <el-button
-              type="primary"
-              plain
-              :disabled="!selectedPackages.length || busyLocal"
-              :loading="importingPackages"
-              @click="handleImportPackages"
-            >
-              导入到本机 Docker
-            </el-button>
-            <el-button
-              type="danger"
-              plain
-              :disabled="!selectedPackages.length || busyLocal"
-              :loading="deletingPackages"
-              @click="handleDeletePackages"
-            >
-              删除选中离线包
-            </el-button>
-            <el-button :loading="loadingPackages" @click="loadPackages">
-              <el-icon><Refresh /></el-icon>
-              <span>刷新离线包</span>
-            </el-button>
-            <el-button @click="activeTab = 'images'">从镜像列表导出</el-button>
-          </div>
-
-          <el-alert
-            v-if="packagesError"
-            type="warning"
-            :closable="false"
-            show-icon
-            :title="packagesError"
-            class="error-alert"
-          />
-
-          <el-table
-            v-if="offlinePackages.length"
-            ref="packageTable"
-            :data="offlinePackages"
-            row-key="name"
-            size="small"
-            class="image-table"
-            @selection-change="handlePackageSelection"
-          >
-            <el-table-column type="selection" width="44" />
-            <el-table-column prop="name" label="离线包文件" min-width="260" />
-            <el-table-column label="对应镜像" min-width="300">
-              <template #default="{ row }">
-                <template v-if="row.imageRefs && row.imageRefs.length">
-                  <code v-for="image in row.imageRefs" :key="image" class="ref-line">{{ image }}</code>
-                </template>
-                <span v-else class="muted-text">未记录对应镜像</span>
-              </template>
-            </el-table-column>
-            <el-table-column label="大小" width="110">
-              <template #default="{ row }">{{ formatSize(row.sizeBytes) }}</template>
-            </el-table-column>
-            <el-table-column label="修改时间" width="180">
-              <template #default="{ row }">{{ formatTimestamp(row.modifiedMs) }}</template>
-            </el-table-column>
-          </el-table>
-
-          <div v-else-if="!packagesError" class="empty-state">
-            <span class="icon-tile neutral"><el-icon><Files /></el-icon></span>
-            <span class="empty-title">
-              {{ loadingPackages ? '正在读取离线包' : offlineScan?.exists === false ? '离线包目录尚未创建' : '还没有离线包' }}
-            </span>
-            <span class="empty-hint">
-              {{ loadingPackages ? '请稍候' : '在镜像列表勾选镜像并导出，生成的 tar 包会出现在这里。' }}
-            </span>
-            <div v-if="!loadingPackages" class="empty-actions">
-              <el-button size="small" type="primary" @click="activeTab = 'images'">前往镜像列表</el-button>
-            </div>
-          </div>
-        </div>
+        <OfflinePackagesPanel
+          ref="packageListRef"
+          :scan="offlineScan"
+          :loading="loadingPackages"
+          :error="packagesError"
+          :selected-count="selectedPackages.length"
+          :busy="busyLocal"
+          :importing="importingPackages"
+          :deleting="deletingPackages"
+          :configured-dir="offlineDir"
+          @refresh="loadPackages"
+          @import-selected="handleImportPackages"
+          @delete-selected="handleDeletePackages"
+          @edit-directory="goSettings"
+          @go-images="activeTab = 'images'"
+          @selection-change="handlePackageSelection"
+        />
       </el-tab-pane>
 
       <el-tab-pane v-if="isRemote" label="远程分发" name="remote">
@@ -262,7 +103,9 @@
 import { useDesktopProgress } from '../../../shared/composables/useDesktopProgress.js';
 import { computed, onMounted, ref } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { Box, Download, Files, Refresh } from '@element-plus/icons-vue';
+import { Refresh } from '@element-plus/icons-vue';
+import ImageListPanel from '../components/ImageListPanel.vue';
+import OfflinePackagesPanel from '../components/OfflinePackagesPanel.vue';
 import PullImageDialog from '../components/PullImageDialog.vue';
 import RemoteImageDistribution from '../components/RemoteImageDistribution.vue';
 import {
@@ -278,7 +121,7 @@ import {
   scanOfflinePackages
 } from '../../../api/tauri.js';
 import { errorText } from '../../../shared/errors.js';
-import { formatSize, formatTimestamp } from '../../../shared/format.js';
+import { formatImageId } from '../../../shared/format.js';
 
 const props = defineProps({
   connection: {
@@ -310,8 +153,8 @@ const progress = ref([]);
 const resultLog = ref('');
 const resultTitle = ref('');
 const pullDialogVisible = ref(false);
-const imageTable = ref(null);
-const packageTable = ref(null);
+const imageListRef = ref(null);
+const packageListRef = ref(null);
 const registrySources = ref([]);
 const loadingSources = ref(false);
 function goSourceSettings() {
@@ -332,22 +175,6 @@ const busyLocal = computed(
 );
 const selectedImages = computed(() => imageSelection.value);
 const selectedPackages = computed(() => packageSelection.value);
-const offlinePackages = computed(() => offlineScan.value?.files || []);
-const totalImageBytes = computed(() =>
-  dockerImages.value.reduce((sum, image) => sum + (Number(image.sizeBytes) || 0), 0)
-);
-const imageSummary = computed(() => {
-  if (loadingImages.value && !dockerImages.value.length) {
-    return '正在读取';
-  }
-  return `${dockerImages.value.length} 个镜像 · 共 ${formatSize(totalImageBytes.value)}`;
-});
-const packageSummary = computed(() => {
-  if (!offlineScan.value) {
-    return loadingPackages.value ? '正在读取' : '未读取';
-  }
-  return `${offlinePackages.value.length} 个文件 · 共 ${formatSize(offlineScan.value.totalBytes)}`;
-});
 const currentPercent = computed(() => {
   if (!progress.value.length) {
     return 0;
@@ -362,13 +189,8 @@ const progressMessage = computed(() => {
   return `${last.current} / ${last.total} · ${last.reference}`;
 });
 
-const shortId = (id) => {
-  const value = String(id || '').replace(/^sha256:/, '');
-  return value ? value.slice(0, 12) : '-';
-};
-
 const imageLabel = (image) =>
-  image.exportable ? image.reference : `未标记镜像（${shortId(image.id)}）`;
+  image.exportable ? image.reference : `未标记镜像（${formatImageId(image.id)}）`;
 
 const loadSettings = async () => {
   loadingSettings.value = true;
@@ -388,7 +210,7 @@ const loadImages = async () => {
   try {
     dockerImages.value = await listLocalDockerImages();
     imageSelection.value = [];
-    imageTable.value?.clearSelection?.();
+    imageListRef.value?.clearSelection?.();
   } catch (error) {
     dockerImages.value = [];
     imageSelection.value = [];
@@ -407,7 +229,7 @@ const loadPackages = async () => {
       offlineDir.value = offlineScan.value.offlineDir;
     }
     packageSelection.value = [];
-    packageTable.value?.clearSelection?.();
+    packageListRef.value?.clearSelection?.();
   } catch (error) {
     offlineScan.value = null;
     packageSelection.value = [];
@@ -668,11 +490,6 @@ onMounted(async () => {
   overflow: visible;
 }
 
-.image-card {
-  padding: 20px;
-  margin-bottom: 18px;
-}
-
 .result-card {
   padding: 20px;
   margin-bottom: 18px;
@@ -702,111 +519,6 @@ onMounted(async () => {
 .card-title-bar .hint {
   font-size: 11px;
   color: var(--text-muted);
-}
-
-.toolbar-row,
-.selection-row,
-.dir-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.toolbar-row {
-  margin-bottom: 12px;
-}
-
-.selection-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-  padding: 12px 14px;
-  margin-bottom: 14px;
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-sm);
-  background: var(--panel-subtle);
-}
-
-.selection-hint {
-  font-size: 12px;
-  color: var(--text-secondary);
-  margin-right: 4px;
-}
-
-.dir-row {
-  margin-bottom: 14px;
-}
-
-.dir-label {
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-
-.path-text {
-  font-size: 11px;
-  padding: 3px 8px;
-  border-radius: 6px;
-  color: var(--primary-color);
-  background: rgba(66, 133, 244, 0.08);
-  font-family: "SFMono-Regular", Menlo, Consolas, monospace;
-  overflow-wrap: anywhere;
-}
-
-.inline-hint {
-  width: auto;
-  margin-top: 0;
-}
-
-.field-hint {
-  font-size: 11px;
-  line-height: 1.55;
-  color: var(--text-muted);
-}
-
-.error-alert {
-  margin-bottom: 14px;
-}
-
-.error-actions {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-top: 6px;
-  font-size: 12px;
-}
-
-.image-table {
-  width: 100%;
-  background: transparent;
-}
-
-.image-table :deep(code) {
-  color: var(--primary-color);
-  font-size: 11px;
-  font-family: "SFMono-Regular", Menlo, Consolas, monospace;
-}
-
-.image-table :deep(.muted-code) {
-  color: var(--text-muted);
-}
-
-.ref-line {
-  display: block;
-  line-height: 1.7;
-}
-
-.muted-text {
-  color: var(--text-muted);
-  font-size: 12px;
-}
-
-.empty-actions {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-  justify-content: center;
 }
 
 .progress-card {

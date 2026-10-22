@@ -7,6 +7,12 @@ export function formatSize(bytes) {
   return `${value} B`;
 }
 
+/** 镜像 ID：去掉 sha256 前缀后取前 12 位。 */
+export function formatImageId(id) {
+  const value = String(id || '').replace(/^sha256:/, '');
+  return value ? value.slice(0, 12) : '-';
+}
+
 /** 完整时间：年-月-日 时:分:秒。 */
 export function formatTimestamp(ms) {
   if (!ms) return '-';

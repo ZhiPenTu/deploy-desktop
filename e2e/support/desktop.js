@@ -4,14 +4,33 @@
  */
 export async function useDesktopBackend(
   page,
-  { hosts = [], credentials = [], artifactSources = [], artifactTokens = [] } = {}
+  {
+    hosts = [],
+    credentials = [],
+    artifactSources = [],
+    artifactTokens = [],
+    dockerImages = [],
+    offlineDir = '',
+    offlinePackages = []
+  } = {}
 ) {
-  await page.addInitScript(({ initialHosts, initialCredentials, initialSources, initialTokens }) => {
+  await page.addInitScript(({
+    initialHosts,
+    initialCredentials,
+    initialSources,
+    initialTokens,
+    initialImages,
+    initialOfflineDir,
+    initialPackages
+  }) => {
     const state = {
       hosts: structuredClone(initialHosts),
       credentials: structuredClone(initialCredentials),
       sources: structuredClone(initialSources),
       tokens: structuredClone(initialTokens),
+      images: structuredClone(initialImages),
+      offlineDir: initialOfflineDir,
+      packages: structuredClone(initialPackages),
       activeHostId: ''
     };
     const callbacks = new Map();
@@ -105,6 +124,17 @@ export async function useDesktopBackend(
             return null;
           case 'list_registry_sources':
             return [];
+          case 'get_image_library_settings':
+            return { offlineDir: state.offlineDir };
+          case 'list_local_docker_images':
+            return state.images.map((item) => ({ ...item }));
+          case 'scan_offline_packages':
+            return {
+              offlineDir: state.offlineDir,
+              exists: true,
+              totalBytes: state.packages.reduce((sum, item) => sum + item.sizeBytes, 0),
+              files: state.packages.map((item) => ({ ...item }))
+            };
           case 'log_client_event':
             return null;
           default:
@@ -116,7 +146,10 @@ export async function useDesktopBackend(
     initialHosts: hosts,
     initialCredentials: credentials,
     initialSources: artifactSources,
-    initialTokens: artifactTokens
+    initialTokens: artifactTokens,
+    initialImages: dockerImages,
+    initialOfflineDir: offlineDir,
+    initialPackages: offlinePackages
   });
 }
 
