@@ -84,6 +84,13 @@ pub fn check_oceanbase_status() -> Result<OceanBaseHealth, String> {
         "OceanBase 正在启动初始化中，请等待其变为 healthy 状态...".to_string()
     };
 
+    log::info!(
+        target: "database",
+        "数据库状态检查：容器={} 就绪={} 健康={}",
+        container,
+        is_ready,
+        container_health
+    );
     Ok(OceanBaseHealth {
         is_running: true,
         is_ready,
@@ -150,6 +157,14 @@ pub fn import_oceanbase_sql(sql_file_path: String) -> Result<DbImportResult, Str
             let (table_count, tables) = query_table_list();
             let dict_count = query_row_count("parameter_dict");
             let user_count = query_row_count("users");
+            log::info!(
+                target: "database",
+                "数据库导入完成：{} 张表、{} 条字典、{} 个用户，脚本={}",
+                table_count,
+                dict_count,
+                user_count,
+                sql_file_path
+            );
 
             Ok(DbImportResult {
                 success: true,
@@ -166,6 +181,12 @@ pub fn import_oceanbase_sql(sql_file_path: String) -> Result<DbImportResult, Str
         }
         Ok(out) => {
             let err_text = String::from_utf8_lossy(&out.stderr).to_string();
+            log::error!(
+                target: "database",
+                "数据库导入失败：脚本={} 输出={}",
+                sql_file_path,
+                err_text.replace('\n', " ")
+            );
             Ok(DbImportResult {
                 success: false,
                 table_count: 0,

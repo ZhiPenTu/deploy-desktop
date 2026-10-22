@@ -232,6 +232,28 @@ fn run_update(
     })();
     let error = execution.err();
     let success = error.is_none();
+    let scope = if dry_run { "预检" } else { "更新" };
+    if success {
+        log::info!(
+            target: "deploy",
+            "本机部署{scope}完成：目录={} 组件 {} 个 服务 {} 个 备份={} 耗时 {}s",
+            plan.root.display(),
+            components.len(),
+            plan.services.len(),
+            backup_dir
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "无".to_string()),
+            started.elapsed().as_secs()
+        );
+    } else if let Some(reason) = &error {
+        log::error!(
+            target: "deploy",
+            "本机部署{scope}失败：目录={} 组件 {} 个：{reason}",
+            plan.root.display(),
+            components.len()
+        );
+    }
     if success {
         // 部署记录用于状态展示，写入失败不影响部署结果。
         if let Ok(bundle_root) = existing_directory(bundle_dir, "交付包目录") {
@@ -243,7 +265,7 @@ fn run_update(
                 if let Err(write_error) =
                     super::bundle::write_deployed_record(&plan.root, &record)
                 {
-                    log::warn!("写入本机部署记录失败: {write_error}");
+                    log::warn!(target: "deploy", "写入本机部署记录失败: {write_error}");
                 }
             }
         }

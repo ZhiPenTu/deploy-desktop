@@ -135,6 +135,7 @@ env = { DEPLOY_DESKTOP_ROOT = "/absolute/path/to/deploy-desktop" }
 | 离线包 | `deploy_bundle_scan`、`deploy_bundle_upload`、`deploy_bundle_import`、`deploy_bundle_deploy`、`deploy_bundle_remove` |
 | 部署运维 | `deploy_compose`、`deploy_inspect`、`deploy_remote_run`、`deploy_logs`、`deploy_db_check`、`deploy_db_import`、`deploy_docker_install` |
 | 更新 | `deploy_update_remote`、`deploy_update_settings`、`deploy_app_update_check` |
+| 日志 | `deploy_runtime_logs_read`、`deploy_runtime_logs_summary`（本机运行日志，只读） |
 
 大多数工具接受 `target: "local" | "remote"`；远程模式使用 `host`（已保存的主机配置名或 IP/域名）以及可选的 `port`、`user`、`keyPath`。
 
@@ -183,6 +184,16 @@ deploy_app_update_check  {}
 ```
 
 默认读取 `https://github.com/ZhiPenTu/deploy-desktop/releases/latest/download/latest.json`，无需配置。该工具只比较版本并返回当前平台下载信息，不会下载或替换正在运行的桌面应用。只有需要改用内网镜像等特殊场景时，才使用 `deploy_update_settings` 覆盖默认地址。
+
+### 6. 排查运行日志
+
+```text
+deploy_runtime_logs_summary {}
+deploy_runtime_logs_read    { level: "error", limit: 20 }
+deploy_runtime_logs_read    { keyword: "版本=13-79adcb33" }
+```
+
+日志目录按以下顺序确定：环境变量 `DEPLOY_DESKTOP_LOG_DIR`、桌面端「设置 → 运行日志」中保存的自定义目录（记录在应用配置目录的 `log-settings.json`）、系统默认目录（macOS 为 `~/Library/Logs/com.deploydesktop.app`）。工具只读取，不清空也不改写日志。
 
 ## 安全边界
 

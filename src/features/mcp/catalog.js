@@ -78,5 +78,12 @@ export const mcpCategories = [
       { id: 'deploy_update_settings', title: '管理应用更新源', description: '查看或保存 MCP 使用的应用更新地址。', access: 'write', confirmation: '保存时需确认' },
       { id: 'deploy_app_update_check', title: '检查应用更新', description: '查询新版本与下载信息；安装更新请在桌面应用中操作。', access: 'read' }
     ]
+  },
+  {
+    id: 'logs', title: '日志', description: '读取本机运行日志，定位下载、部署与连接问题',
+    tools: [
+      { id: 'deploy_runtime_logs_read', title: '读取运行日志', description: '按级别与关键词读取本机运行日志，最新记录在前。', access: 'read' },
+      { id: 'deploy_runtime_logs_summary', title: '运行日志概览', description: '汇总日志占用、各级别条数与最近的警告和错误。', access: 'read' }
+    ]
   }
 ];

@@ -28,8 +28,8 @@ test('browser preview starts with empty inventories and no active project', asyn
 test('every desktop operation rejects in the browser instead of reporting simulated success', async () => {
   const previewHelpers = new Set([
     'isDesktopApp', 'listProjects', 'getActiveProjectContext', 'listArtifactSources', 'listRegistrySources',
-    'listConnectionInventory', 'openArtifactRunUrl', 'onImageLibraryProgress',
-    'onImageManagerProgress', 'onRegistryProgress', 'onRemoteUpdateProgress'
+    'listConnectionInventory', 'openArtifactRunUrl', 'reportClientEvent', 'onImageLibraryProgress',
+    'onImageManagerProgress', 'onRegistryProgress', 'onRemoteUpdateProgress', 'setCommandTrace'
   ]);
   for (const [name, operation] of Object.entries(api)) {
     if (previewHelpers.has(name)) continue;
@@ -127,14 +127,22 @@ test('failed reads are not cached and explicit retry executes again', async () =
   globalThis.isTauri = true;
   let reject;
   let calls = 0;
-  mockIPC(() => { calls += 1; return new Promise((_, fail) => { reject = fail; }); });
+  mockIPC((command) => {
+    if (command === 'log_client_event') return null;
+    calls += 1;
+    return new Promise((_, fail) => { reject = fail; });
+  });
   const first = api.checkRemoteEnv('host.example.com', 22, 'deploy');
   const second = api.checkRemoteEnv('host.example.com', 22, 'deploy');
   const checked = Promise.allSettled([first, second]);
   reject(new Error('连接超时'));
   assert.ok((await checked).every((item) => item.status === 'rejected'));
   assert.equal(calls, 1);
-  mockIPC(() => { calls += 1; return { docker_running: true }; });
+  mockIPC((command) => {
+    if (command === 'log_client_event') return null;
+    calls += 1;
+    return { docker_running: true };
+  });
   assert.equal((await api.checkRemoteEnv('host.example.com', 22, 'deploy')).docker_running, true);
   assert.equal(calls, 2);
 });

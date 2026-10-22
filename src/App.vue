@@ -19,6 +19,7 @@
           v-if="currentTab === 'projects'"
           @go-hosts="navigateTab('hosts')"
           @deploy="handleDeployProject"
+          @inspect="handleInspectProject"
         />
 
         <Credentials
@@ -54,6 +55,7 @@
           :connection="connection"
           @view-log="handleViewLog"
           @go-hosts="navigateTab('hosts')"
+          @go-projects="navigateTab('projects')"
         />
 
         <ArtifactCenter
@@ -83,6 +85,7 @@
           v-else-if="currentTab === 'logs'"
           :connection="connection"
           :initial-container="activeLogContainer"
+          @go-projects="navigateTab('projects')"
         />
       </main>
     </div>
@@ -156,6 +159,18 @@ async function handleDeployProject(id) {
     if (projectState.project?.id !== id) await switchActiveProject(id);
     activeLogContainer.value = '';
     navigateTab('wizard');
+  } catch (error) {
+    ElMessage.error(String(error));
+  }
+}
+
+/** 运维页面跟随项目：先切换到目标项目，再进入监控或日志。 */
+async function handleInspectProject({ id, tab } = {}) {
+  if (!id || !tab || wizardBusy.value) return;
+  try {
+    if (projectState.project?.id !== id) await switchActiveProject(id);
+    activeLogContainer.value = '';
+    navigateTab(tab);
   } catch (error) {
     ElMessage.error(String(error));
   }

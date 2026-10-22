@@ -24,7 +24,14 @@ pub async fn update_remote_deployment(
     backup: bool,
     dry_run: bool,
 ) -> Result<RemoteUpdateResult, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    let target = format!("{user}@{host}:{port}");
+    let scope = if dry_run { "预检" } else { "更新" };
+    log::info!(
+        target: "deploy",
+        "开始目标机{scope}：{target} 目录={install_dir} 组件 {} 个 备份={backup}",
+        components.len()
+    );
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
         update_remote_deployment_blocking(
             &window,
             host,
@@ -39,7 +46,22 @@ pub async fn update_remote_deployment(
         )
     })
     .await
-    .map_err(|e| format!("更新任务执行失败: {e}"))?
+    .map_err(|e| format!("更新任务执行失败: {e}"))
+    .and_then(|inner| inner);
+    match &outcome {
+        Ok(update) if update.success => log::info!(
+            target: "deploy",
+            "目标机{scope}完成：{target} 耗时 {}s",
+            update.duration_secs
+        ),
+        Ok(update) => log::warn!(
+            target: "deploy",
+            "目标机{scope}未完成：{target} {}",
+            update.output.replace('\n', " ")
+        ),
+        Err(error) => log::error!(target: "deploy", "目标机{scope}失败：{target}：{error}"),
+    }
+    outcome
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -253,7 +275,7 @@ fn update_remote_deployment_blocking(
             shell_quote(&install_dir)
         );
         if let Err(error) = run_ssh_script(&host, port, &user, key.as_deref(), &script) {
-            log::warn!("写入目标机部署记录失败: {error}");
+            log::warn!(target: "deploy", "写入目标机部署记录失败: {error}");
         }
     }
 

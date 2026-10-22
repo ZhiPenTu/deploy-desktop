@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod logging;
 
 use tauri::Manager;
 
@@ -13,6 +14,7 @@ use commands::{
     image_library::*,
     image_manager::*,
     local_update::*,
+    logs::*,
     projects::*,
     registry::*,
     registry_sources::*,
@@ -27,13 +29,10 @@ pub fn run() {
         .setup(|app| {
             commands::projects::init_projects(app.handle());
             app.manage(commands::updater::PendingUpdate::default());
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
+            if let Err(error) = logging::init(app.handle()) {
+                eprintln!("运行日志初始化失败：{error}");
             }
+            log::info!(target: "app", "应用启动，版本 {}", app.package_info().version);
             clear_stale_webview_cache(app);
             Ok(())
         })
@@ -118,6 +117,13 @@ pub fn run() {
             open_artifact_bundle_version,
             delete_local_bundle,
             open_external_url,
+            read_runtime_logs,
+            set_runtime_log_level,
+            get_runtime_log_settings,
+            set_runtime_log_dir,
+            clear_runtime_logs,
+            open_runtime_log_dir,
+            log_client_event,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

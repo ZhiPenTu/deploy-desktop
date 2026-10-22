@@ -6,7 +6,14 @@ where
 {
     tauri::async_runtime::spawn_blocking(task)
         .await
-        .map_err(|_| "后台任务未能完成，请重试。".to_string())?
+        .map_err(|error| {
+            log::error!(target: "task", "后台任务异常退出：{error}");
+            "后台任务未能完成，请重试。".to_string()
+        })?
+        .map_err(|error| {
+            log::error!(target: "task", "{error}");
+            error
+        })
 }
 
 #[cfg(test)]

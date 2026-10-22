@@ -14,7 +14,6 @@
         </p>
       </div>
       <div class="header-actions">
-        <el-tag type="info" effect="plain">当前部署包：{{ currentBundleText }}</el-tag>
         <el-button v-if="activeSource" :loading="refreshingActive" @click="refreshActive">
           <el-icon><Refresh /></el-icon>
           <span>刷新版本</span>
@@ -62,9 +61,6 @@
                 <el-tag size="small" effect="plain">
                   {{ row.type === 'url' ? '直接下载' : '云效流水线' }}
                 </el-tag>
-                <el-tag v-if="isInUse(row)" size="small" type="success" effect="plain">
-                  使用中
-                </el-tag>
               </div>
             </template>
           </el-table-column>
@@ -84,12 +80,7 @@
           </el-table-column>
           <el-table-column label="本地版本" min-width="140">
             <template #default="{ row }">
-              <div class="stacked-cell">
-                <span :class="{ muted: !row.lastVersion }">{{ row.lastVersion || '尚未下载' }}</span>
-                <span v-if="row.lastBundleDir" class="subtle">
-                  {{ isInUse(row) ? '当前部署使用' : '已下载到本机' }}
-                </span>
-              </div>
+              <span :class="{ muted: !row.lastVersion }">{{ row.lastVersion || '尚未下载' }}</span>
             </template>
           </el-table-column>
           <el-table-column label="操作" width="105">
@@ -100,27 +91,6 @@
         </el-table>
       </div>
 
-      <div v-if="bundleDirText && (planLoading || plan)" class="plan-section">
-        <div v-if="planLoading" v-loading="true" class="plan-loading card-surface">
-          <span>正在读取交付包内容</span>
-        </div>
-
-        <BundlePlanPanel
-          v-else-if="plan"
-          :plan="plan"
-          :target="remoteTarget"
-        >
-          <template #actions>
-            <el-button size="small" :loading="planLoading" @click="loadPlan">
-              <el-icon><Refresh /></el-icon>
-              <span>重新读取</span>
-            </el-button>
-            <el-button size="small" type="primary" @click="$emit('go-wizard')">
-              进入部署向导
-            </el-button>
-          </template>
-        </BundlePlanPanel>
-      </div>
     </template>
 
     <template v-else>
@@ -178,7 +148,7 @@
         <div class="card-title-bar">
           <div>
             <h3>制品列表</h3>
-            <p class="card-subtitle">按构建时间倒序排列，最新版本置顶</p>
+            <p class="card-subtitle">按构建时间倒序排列，最新版本置顶；打开详情可查看该版本的交付包链路</p>
           </div>
           <el-button v-if="releases.length" link :loading="releasesLoading" @click="loadReleases({ reset: true })">
             <el-icon><Refresh /></el-icon>
@@ -248,8 +218,9 @@
           <el-table-column label="构建时间" width="145">
             <template #default="{ row }">{{ formatTime(row.builtAt) }}</template>
           </el-table-column>
-          <el-table-column label="操作" width="185">
+          <el-table-column label="操作" width="240">
             <template #default="{ row }">
+              <el-button link @click="showReleaseDetail(row)">详情</el-button>
               <el-button
                 v-if="row.localDir"
                 link
@@ -315,9 +286,24 @@
         <el-progress
           v-if="downloading || progress.percent > 0"
           :percentage="progress.percent"
+          :striped="progress.phase === 'extract'"
+          :striped-flow="progress.phase === 'extract'"
           :status="progress.percent >= 100 ? 'success' : undefined"
         />
         <p v-if="progress.stage" class="field-hint">{{ progress.stage }}</p>
+
+        <el-alert
+          v-if="downloadError"
+          :title="downloadError"
+          type="error"
+          :closable="false"
+          show-icon
+        >
+          <div class="alert-actions">
+            <span>下载与校验的详细过程已记录到运行日志。</span>
+            <el-button size="small" @click="openRuntimeLogs">查看运行日志</el-button>
+          </div>
+        </el-alert>
 
         <el-alert
           v-if="bundle"
@@ -336,7 +322,73 @@
         <el-button @click="releaseVisible = false">关闭</el-button>
         <el-button v-if="bundle" type="primary" @click="applyBundle">设为当前部署包</el-button>
         <el-button v-else type="primary" :loading="downloading" @click="download">
-          {{ release && release.localDir ? '重新下载并解包' : '下载并解包' }}
+          {{ downloadButtonText }}
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="detailVisible"
+      :title="detailTitle"
+      width="880px"
+      @closed="resetDetail"
+    >
+      <div v-if="detailRelease" class="release-body detail-body">
+        <div class="release-grid">
+          <span class="label">版本</span>
+          <span class="value">{{ versionText(detailRelease) }}</span>
+          <template v-if="detailRelease.runId">
+            <span class="label">运行编号</span>
+            <span class="value">#{{ detailRelease.runId }}</span>
+            <span class="label">提交</span>
+            <span class="value">{{ detailRelease.commitShort || '-' }} {{ detailRelease.commitTitle }}</span>
+            <span class="label">分支</span>
+            <span class="value">{{ detailRelease.branch || '-' }}</span>
+          </template>
+          <span class="label">构建时间</span>
+          <span class="value">{{ formatTime(detailRelease.builtAt) }}</span>
+          <span class="label">本地版本</span>
+          <span class="value">
+            {{ localStatusText(detailRelease) }}
+            <span v-if="detailRelease.localDir" class="detail-path">{{ shortPath(detailRelease.localDir) }}</span>
+          </span>
+        </div>
+
+        <p v-if="!detailRelease.localDir" class="detail-hint">
+          该版本尚未下载到本机。下载并解包后即可查看交付包链路与部署内容。
+        </p>
+        <div v-else-if="detailLoading" v-loading="true" class="plan-loading card-surface">
+          <span>正在读取交付包内容</span>
+        </div>
+        <el-alert
+          v-else-if="detailError"
+          :title="detailError"
+          type="warning"
+          :closable="false"
+          show-icon
+        />
+        <BundlePlanPanel v-else-if="detailPlan" :plan="detailPlan" :target="remoteTarget" />
+      </div>
+
+      <template #footer>
+        <el-button v-if="detailRelease && detailRelease.runUrl" link type="primary" @click="openRunUrl(detailRelease)">
+          打开运行详情
+        </el-button>
+        <el-button @click="detailVisible = false">关闭</el-button>
+        <el-button
+          v-if="detailRelease && detailRelease.localDir && !isCurrentBundle(detailRelease)"
+          type="primary"
+          :loading="loadingVersionKey === releaseKey(detailRelease)"
+          @click="useExisting(detailRelease)"
+        >
+          设为当前部署包
+        </el-button>
+        <el-button
+          v-else-if="detailRelease && !detailRelease.localDir && detailRelease.downloadUrl"
+          type="primary"
+          @click="downloadFromDetail"
+        >
+          下载并解包
         </el-button>
       </template>
     </el-dialog>
@@ -344,7 +396,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from 'vue';
+import { computed, onMounted, reactive, ref } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { ArrowLeft, Box, Refresh } from '@element-plus/icons-vue';
 import BundlePlanPanel from '../components/BundlePlanPanel.vue';
@@ -385,16 +437,20 @@ const releaseVisible = ref(false);
 const release = ref(null);
 const releaseSource = ref(null);
 const downloading = ref(false);
+const downloadError = ref('');
 const bundle = ref(null);
-const progress = reactive({ percent: 0, stage: '' });
-const plan = ref(null);
-const planLoading = ref(false);
+const progress = reactive({ percent: 0, stage: '', phase: '' });
+const detailVisible = ref(false);
+const detailRelease = ref(null);
+const detailPlan = ref(null);
+const detailLoading = ref(false);
+const detailError = ref('');
 let releaseRequestId = 0;
+let detailRequestId = 0;
 
 const activeSource = computed(
   () => sources.value.find((item) => item.id === activeSourceId.value) || null
 );
-const bundleDirText = computed(() => String(props.connection.bundleDir || '').trim());
 const latestRelease = computed(() => releases.value[0] || null);
 const latestVersionText = computed(() => {
   if (releasesLoading.value && !latestRelease.value) return '读取中';
@@ -411,6 +467,13 @@ const loadedVersionText = computed(() => {
 const releaseDialogTitle = computed(() =>
   release.value ? `下载版本 ${versionText(release.value)}` : '下载制品版本'
 );
+const detailTitle = computed(() =>
+  detailRelease.value ? `版本详情 ${versionText(detailRelease.value)}` : '版本详情'
+);
+const downloadButtonText = computed(() => {
+  if (downloading.value) return '正在下载并解包';
+  return release.value && release.value.localDir ? '重新下载并解包' : '下载并解包';
+});
 
 const remoteTarget = computed(() => {
   const connection = props.connection || {};
@@ -421,13 +484,6 @@ const remoteTarget = computed(() => {
     user: connection.remoteUser,
     keyPath: connection.remoteKey || null
   };
-});
-
-const currentBundleText = computed(() => {
-  const dir = String(props.connection.bundleDir || '').trim();
-  if (!dir) return '未设置';
-  const parts = dir.split('/').filter(Boolean);
-  return parts.slice(-2).join('/') || dir;
 });
 
 function versionText(item) {
@@ -492,23 +548,52 @@ function formatTime(ms) {
   return new Date(Number(ms)).toLocaleString();
 }
 
-async function loadPlan() {
-  const dir = bundleDirText.value;
+async function showReleaseDetail(row) {
+  detailRequestId += 1;
+  detailRelease.value = row;
+  detailVisible.value = true;
+  await loadDetailPlan();
+}
+
+async function loadDetailPlan() {
+  const row = detailRelease.value;
+  const dir = String(row?.localDir || '').trim();
+  const requestId = ++detailRequestId;
+  detailPlan.value = null;
+  detailError.value = '';
   if (!dir) {
-    plan.value = null;
+    detailLoading.value = false;
     return;
   }
-  planLoading.value = true;
+  detailLoading.value = true;
   try {
-    plan.value = await inspectBundlePlan(dir, remoteTarget.value);
+    const result = await inspectBundlePlan(dir, remoteTarget.value);
+    if (requestId !== detailRequestId) return;
+    detailPlan.value = result;
   } catch (error) {
-    plan.value = null;
+    if (requestId !== detailRequestId) return;
+    detailError.value = String(error);
   } finally {
-    planLoading.value = false;
+    if (requestId === detailRequestId) {
+      detailLoading.value = false;
+    }
   }
 }
 
-watch(bundleDirText, loadPlan, { immediate: true });
+function resetDetail() {
+  detailRequestId += 1;
+  detailRelease.value = null;
+  detailPlan.value = null;
+  detailError.value = '';
+  detailLoading.value = false;
+}
+
+function downloadFromDetail() {
+  const row = detailRelease.value;
+  if (!row) return;
+  detailVisible.value = false;
+  openRelease(row);
+}
 
 async function loadSources() {
   loading.value = true;
@@ -664,8 +749,10 @@ function openRelease(row) {
   releaseSource.value = activeSource.value;
   release.value = row;
   bundle.value = null;
+  downloadError.value = '';
   progress.percent = 0;
   progress.stage = '';
+  progress.phase = '';
   releaseVisible.value = true;
 }
 
@@ -674,9 +761,12 @@ async function download() {
   downloading.value = true;
   progress.percent = 0;
   progress.stage = '准备下载';
+  progress.phase = 'prepare';
   bundle.value = null;
+  downloadError.value = '';
   try {
     const result = await downloadArtifact(releaseSource.value.id, release.value, (event) => {
+      progress.phase = event.stage;
       if (event.stage === 'download') {
         const total = Number(event.total || 0);
         const done = Number(event.downloaded || 0);
@@ -699,7 +789,11 @@ async function download() {
       await loadReleases({ reset: true });
     }
   } catch (error) {
+    downloadError.value = String(error);
     ElMessage.error(String(error));
+    progress.percent = 0;
+    progress.stage = '';
+    progress.phase = '';
   } finally {
     downloading.value = false;
   }
@@ -726,6 +820,10 @@ async function useExisting(row) {
 
 function goSourceSettings() {
   emit('go-settings', 'artifacts');
+}
+
+function openRuntimeLogs() {
+  emit('go-settings', 'logs');
 }
 
 async function applyBundle() {
@@ -1059,12 +1157,6 @@ onMounted(loadSources);
   color: var(--text-faint);
 }
 
-.plan-section {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
 .plan-loading {
   display: flex;
   align-items: center;
@@ -1072,6 +1164,28 @@ onMounted(loadSources);
   min-height: 140px;
   font-size: 13px;
   color: var(--text-muted);
+}
+
+.detail-body {
+  max-height: 64vh;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.detail-hint {
+  margin: 0;
+  padding: 14px 16px;
+  border-radius: var(--radius-md);
+  background: var(--panel-subtle);
+  color: var(--text-muted);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.detail-path {
+  margin-left: 8px;
+  color: var(--text-muted);
+  font-size: 12px;
 }
 
 @media (max-width: 980px) {

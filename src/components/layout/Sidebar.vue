@@ -42,8 +42,6 @@
 <script setup>
 import {
   Promotion,
-  DataBoard,
-  Document,
   Files,
   Box,
   Connection,
@@ -83,13 +81,6 @@ const navGroups = [
     label: '部署',
     items: [
       { key: 'wizard', icon: Promotion, title: '部署向导' }
-    ]
-  },
-  {
-    label: '运行',
-    items: [
-      { key: 'dashboard', icon: DataBoard, title: '集群监控' },
-      { key: 'logs', icon: Document, title: '日志诊断' }
     ]
   },
   {

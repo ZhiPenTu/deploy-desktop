@@ -940,7 +940,7 @@ fn export_images_blocking(
 
     if !exports.is_empty() {
         if let Err(error) = update_manifest_for_exports(&dir, &exports) {
-            log::warn!("更新离线镜像清单失败：{error}");
+            log::warn!(target: "image", "更新离线镜像清单失败：{error}");
         }
     }
     emit_progress(
@@ -1145,7 +1145,7 @@ fn remove_manifest_entries(dir: &Path, names: &HashSet<String>) {
         .collect();
     object.insert("files".to_string(), Value::Array(filtered));
     if let Err(error) = write_manifest(dir, &root) {
-        log::warn!("更新离线镜像清单失败：{error}");
+        log::warn!(target: "image", "更新离线镜像清单失败：{error}");
     }
 }
 

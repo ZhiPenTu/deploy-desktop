@@ -7,6 +7,7 @@ import { registerImagesTools } from './tools/images.mjs';
 import { registerBundlesTools } from './tools/bundles.mjs';
 import { registerOperationsTools } from './tools/operations.mjs';
 import { registerUpdatesTools } from './tools/updates.mjs';
+import { registerLogsTools } from './tools/logs.mjs';
 
 export function registerTools(server) {
   const register = (name, definition, handler) => server.registerTool(name, definition, wrapTool(handler));
@@ -18,4 +19,5 @@ export function registerTools(server) {
   registerBundlesTools(register);
   registerOperationsTools(register);
   registerUpdatesTools(register);
+  registerLogsTools(register);
 }

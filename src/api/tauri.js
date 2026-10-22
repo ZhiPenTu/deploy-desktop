@@ -1,5 +1,5 @@
 // Stable public facade: feature code imports desktop operations only from this file.
-export { isDesktopApp, selectLocalPath } from './desktop.js';
+export { isDesktopApp, selectLocalPath, reportClientEvent, setCommandTrace } from './desktop.js';
 
 export {
   listArtifactSources,
@@ -96,3 +96,13 @@ export {
   getActiveProjectContext,
   activateProjectBundle
 } from './commands/projects.js';
+
+export {
+  readRuntimeLogs,
+  clearRuntimeLogs,
+  openRuntimeLogDir,
+  setRuntimeLogLevel,
+  getRuntimeLogSettings,
+  setRuntimeLogDir,
+  reportClientEvent as reportRuntimeEvent
+} from './commands/logs.js';

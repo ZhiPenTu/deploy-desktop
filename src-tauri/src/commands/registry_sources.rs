@@ -364,7 +364,13 @@ pub fn save_registry_source(
     let _guard = STORE_LOCK
         .lock()
         .map_err(|_| "镜像源配置暂不可用".to_string())?;
-    save_source_at(&config_dir(&app)?, source)
+    let label = source.name.clone();
+    let result = save_source_at(&config_dir(&app)?, source);
+    match &result {
+        Ok(saved) => log::info!(target: "registry", "保存镜像源：{} {}", saved.name, saved.address),
+        Err(error) => log::error!(target: "registry", "保存镜像源失败：{label}：{error}"),
+    }
+    result
 }
 
 #[tauri::command]
@@ -372,7 +378,12 @@ pub fn delete_registry_source(app: AppHandle, id: String) -> Result<(), String> 
     let _guard = STORE_LOCK
         .lock()
         .map_err(|_| "镜像源配置暂不可用".to_string())?;
-    delete_source_at(&config_dir(&app)?, &id)
+    let result = delete_source_at(&config_dir(&app)?, &id);
+    match &result {
+        Ok(_) => log::info!(target: "registry", "删除镜像源：{id}"),
+        Err(error) => log::error!(target: "registry", "删除镜像源失败：{id}：{error}"),
+    }
+    result
 }
 
 #[tauri::command]

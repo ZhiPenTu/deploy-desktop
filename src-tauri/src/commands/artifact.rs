@@ -367,7 +367,7 @@ fn http_get_json(token: &str, url: &str) -> Result<Value, String> {
         .header("Accept", "application/json")
         .send()
         .map_err(|e| {
-            log::warn!("读取云效制品数据失败：{e}");
+            log::warn!(target: "artifact", "读取云效制品数据失败：{e}");
             if e.is_timeout() {
                 "读取云效响应超时，请检查网络后重试".to_string()
             } else if e.is_connect() {
@@ -1032,7 +1032,15 @@ pub async fn list_cached_artifact_releases(
 }
 
 #[tauri::command]
-pub fn fetch_artifact_release(
+pub async fn fetch_artifact_release(
+    app: AppHandle,
+    id: String,
+    run_id: Option<i64>,
+) -> Result<ArtifactRelease, String> {
+    crate::commands::blocking::run(move || fetch_artifact_release_blocking(app, id, run_id)).await
+}
+
+fn fetch_artifact_release_blocking(
     app: AppHandle,
     id: String,
     run_id: Option<i64>,
@@ -1099,17 +1107,6 @@ fn validate_download_url(url: &str, source: &ArtifactSource) -> Result<(), Strin
     Ok(())
 }
 
-fn md5_hex(data: &[u8]) -> String {
-    use md5::{Digest, Md5};
-    let mut hasher = Md5::new();
-    hasher.update(data);
-    hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
 fn download_to_file(
     url: &str,
     target: &Path,
@@ -1134,6 +1131,8 @@ fn download_to_file(
     let mut file = fs::File::create(target).map_err(|e| format!("创建临时文件失败：{e}"))?;
     let mut buffer = vec![0u8; 256 * 1024];
     let mut downloaded: u64 = 0;
+    use md5::{Digest, Md5};
+    let mut hasher = Md5::new();
     loop {
         let read = response
             .read(&mut buffer)
@@ -1143,6 +1142,7 @@ fn download_to_file(
         }
         file.write_all(&buffer[..read])
             .map_err(|e| format!("写入临时文件失败：{e}"))?;
+        hasher.update(&buffer[..read]);
         downloaded += read as u64;
         if downloaded > MAX_ARTIFACT_BYTES {
             drop(file);
@@ -1157,9 +1157,11 @@ fn download_to_file(
     }
     file.flush().map_err(|e| format!("写入临时文件失败：{e}"))?;
     drop(file);
-    let mut content = fs::read(target).map_err(|e| format!("读取临时文件失败：{e}"))?;
-    let digest = md5_hex(&content);
-    content.clear();
+    let digest = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
     Ok((downloaded, digest))
 }
 
@@ -1284,7 +1286,17 @@ fn install_artifact_archive(
 }
 
 #[tauri::command]
-pub fn download_artifact(
+pub async fn download_artifact(
+    app: AppHandle,
+    id: String,
+    release: ArtifactRelease,
+    on_event: Channel<DownloadProgress>,
+) -> Result<ArtifactBundle, String> {
+    crate::commands::blocking::run(move || download_artifact_blocking(app, id, release, on_event))
+        .await
+}
+
+fn download_artifact_blocking(
     app: AppHandle,
     id: String,
     release: ArtifactRelease,
@@ -1315,6 +1327,13 @@ pub fn download_artifact(
     let safe_version = safe_version_key(&version);
 
     let dest = dir.join("bundles").join(&id).join(&safe_version);
+    log::info!(
+        target: "artifact",
+        "开始下载交付包：来源={id} 版本={version} 运行=#{} 预计大小={} 字节 地址={}",
+        release.run_id,
+        release.size_bytes,
+        crate::logging::safe_url(&download_url)
+    );
 
     let temp = std::env::temp_dir().join(format!("deploy-bundle-{}-{}.tgz", id, safe_version));
     let _ = on_event.send(DownloadProgress {
@@ -1327,12 +1346,22 @@ pub fn download_artifact(
         Ok(result) => result,
         Err(error) => {
             let _ = fs::remove_file(&temp);
+            log::error!(target: "artifact", "下载交付包失败：来源={id} 版本={version}：{error}");
             return Err(error);
         }
     };
+    log::info!(
+        target: "artifact",
+        "下载完成：来源={id} 版本={version} 实际大小={size} 字节 MD5={digest}"
+    );
 
     if !release.md5.trim().is_empty() && !digest.eq_ignore_ascii_case(release.md5.trim()) {
         let _ = fs::remove_file(&temp);
+        log::error!(
+            target: "artifact",
+            "构建物 MD5 不一致：来源={id} 版本={version} 期望={} 实际={digest}",
+            release.md5
+        );
         return Err(format!(
             "构建物校验失败：期望 MD5 {}，实际 {}",
             release.md5, digest
@@ -1344,9 +1373,23 @@ pub fn download_artifact(
         downloaded: size,
         total: size,
     });
+    log::info!(target: "artifact", "开始校验并解包交付包：来源={id} 版本={version}");
     let installed = install_artifact_archive(&temp, &dest, &version);
     let _ = fs::remove_file(&temp);
-    let mut bundle = installed?;
+    let mut bundle = match installed {
+        Ok(bundle) => bundle,
+        Err(error) => {
+            log::error!(target: "artifact", "交付包校验或解包失败：来源={id} 版本={version}：{error}");
+            return Err(error);
+        }
+    };
+    log::info!(
+        target: "artifact",
+        "交付包已就绪：来源={id} 版本={} 目录={} 文件数={}",
+        bundle.version,
+        bundle.dir,
+        bundle.files
+    );
     sources[index].last_version = bundle.version.clone();
     sources[index].last_bundle_dir = dest.to_string_lossy().to_string();
     store_sources(&app, &sources)?;
@@ -1499,7 +1542,14 @@ fn dir_size_bytes(dir: &Path) -> u64 {
 /// 只允许删除应用配置目录下 bundles/<id> 的内容；删除后清空索引里的
 /// lastVersion / lastBundleDir，界面上该行不再显示"使用已下载"。
 #[tauri::command]
-pub fn delete_local_bundle(app: AppHandle, id: String) -> Result<LocalBundleRemoval, String> {
+pub async fn delete_local_bundle(
+    app: AppHandle,
+    id: String,
+) -> Result<LocalBundleRemoval, String> {
+    crate::commands::blocking::run(move || delete_local_bundle_blocking(app, id)).await
+}
+
+fn delete_local_bundle_blocking(app: AppHandle, id: String) -> Result<LocalBundleRemoval, String> {
     let id = id.trim().to_string();
     if id.is_empty() || id.contains('/') || id.contains('\\') || id.contains("..") {
         return Err("非法的制品源标识".to_string());
@@ -1600,6 +1650,11 @@ pub fn open_artifact_bundle_version(
 
     let (bundle_version, commit) = validate_layout(&dir)?;
     if bundle_version != version {
+        log::error!(
+            target: "artifact",
+            "本地交付包版本不一致：目录={} 期望={version} 实际={bundle_version}",
+            dir.display()
+        );
         return Err("本地交付包版本与所选版本不一致，请重新下载该版本".to_string());
     }
     sources[index].last_version = bundle_version.clone();
@@ -1790,7 +1845,12 @@ mod tests {
 
     #[test]
     fn md5_matches_known_vector() {
-        assert_eq!(md5_hex(b"abc"), "900150983cd24fb0d6963f7d28e17f72");
+        use md5::{Digest, Md5};
+        let digest: String = Md5::digest(b"abc")
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(digest, "900150983cd24fb0d6963f7d28e17f72");
     }
 
     #[test]

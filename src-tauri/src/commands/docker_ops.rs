@@ -330,6 +330,15 @@ pub fn docker_compose_action(
             "{deploy_dir} 及其 deploy/ 子目录下均未找到 docker-compose.lan.yml 或 docker-compose.yml"
         )
     })?;
+    log::info!(
+        target: "compose",
+        "执行 Compose 操作：动作={} 目录={} 清单={} 服务={}",
+        action,
+        root.display(),
+        compose_file.display(),
+        service.clone().unwrap_or_else(|| "全部".to_string())
+    );
+
     let mut args = vec!["compose".to_string()];
     for env_file in resolve_env_files_for_dir(root) {
         args.push("--env-file".to_string());
@@ -418,6 +427,13 @@ pub fn docker_compose_action(
                     error: None,
                 })
             } else {
+                log::warn!(
+                    target: "compose",
+                    "Compose 操作未成功：动作={} 目录={} 输出={}",
+                    action,
+                    deploy_dir,
+                    combined.replace('\n', " ")
+                );
                 Ok(ComposeActionResult {
                     success: false,
                     output: combined,
@@ -425,7 +441,10 @@ pub fn docker_compose_action(
                 })
             }
         }
-        Err(e) => Err(format!("执行 docker compose 失败: {}", e)),
+        Err(e) => {
+            log::error!(target: "compose", "执行 Compose 操作失败：动作={} 目录={}：{}", action, deploy_dir, e);
+            Err(format!("执行 docker compose 失败: {}", e))
+        }
     }
 }
 

@@ -107,6 +107,26 @@ pub(crate) fn check_local_env_blocking(target_dir: Option<String>) -> Result<Loc
     }
 
     let is_ready = docker_installed && docker_running && compose_installed;
+    if is_ready {
+        log::info!(
+            target: "env",
+            "本机环境检查通过：{} / Docker {} / Compose {}，端口 {} 个，待处理 {} 项",
+            os_release,
+            docker_version.as_deref().unwrap_or("未安装"),
+            compose_version.as_deref().unwrap_or("未安装"),
+            ports.len(),
+            issues.len()
+        );
+    } else {
+        log::warn!(
+            target: "env",
+            "本机环境未就绪：Docker {} / Compose {}，待处理 {} 项：{}",
+            if docker_installed { "已安装" } else { "未安装" },
+            if compose_installed { "已安装" } else { "未安装" },
+            issues.len(),
+            issues.join("；")
+        );
+    }
 
     Ok(LocalEnvInfo {
         os,

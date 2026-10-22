@@ -257,7 +257,8 @@ pub fn set_active_project(id: String) -> Result<ProjectStore, String> {
         .find(|project| project.id == id)
         .ok_or_else(|| "所选项目不存在，请刷新后重试".to_string())?
         .clone();
-    current.active_project_id = target.id;
+    current.active_project_id = target.id.clone();
+    log::info!(target: "project", "切换当前项目：{} ({})", target.name, target.id);
     persist(&current)?;
     *store().lock().map_err(|_| "项目配置不可用".to_string())? = current.clone();
     invalidate_bundle_cache();
@@ -280,6 +281,14 @@ pub fn create_project(input: ProjectInput) -> Result<ProjectStore, String> {
         last_version: String::new(),
         last_bundle_dir: String::new(),
     };
+    log::info!(
+        target: "project",
+        "新建项目：{} 目录={} 主机={} 制品源={}",
+        project.name,
+        project.install_dir,
+        project.host_id,
+        project.source_id
+    );
     current.projects.push(project.clone());
     if current.active_project_id.trim().is_empty() {
         current.active_project_id = project.id;
@@ -310,6 +319,13 @@ pub fn update_project(input: ProjectInput) -> Result<ProjectStore, String> {
     project.host_id = input.host_id.trim().to_string();
     project.install_dir = install_dir;
     project.source_id = input.source_id.trim().to_string();
+    log::info!(
+        target: "project",
+        "更新项目：{} 目录={} 主机={}",
+        project.name,
+        project.install_dir,
+        project.host_id
+    );
     persist(&current)?;
     *store().lock().map_err(|_| "项目配置不可用".to_string())? = current.clone();
     invalidate_bundle_cache();
@@ -331,6 +347,7 @@ pub fn delete_project(id: String) -> Result<ProjectStore, String> {
             .map(|project| project.id.clone())
             .unwrap_or_default();
     }
+    log::info!(target: "project", "删除项目：{id}");
     persist(&current)?;
     *store().lock().map_err(|_| "项目配置不可用".to_string())? = current.clone();
     invalidate_bundle_cache();

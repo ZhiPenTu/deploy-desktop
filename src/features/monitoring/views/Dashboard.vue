@@ -7,6 +7,10 @@
       </div>
 
       <div class="header-actions">
+        <el-button @click="$emit('go-projects')">
+          <el-icon><ArrowLeft /></el-icon>
+          <span>返回项目</span>
+        </el-button>
         <div class="host-switch">
           <span class="host-switch-label">监控目标</span>
           <span class="host-name">{{ targetLabel }}</span>
@@ -130,6 +134,7 @@
 import { ref, computed, onMounted, onScopeDispose } from 'vue';
 import { createRequestScope } from '../../../shared/async/requestScope.js';
 import {
+  ArrowLeft,
   CircleCheck,
   Connection,
   Platform,
@@ -156,7 +161,7 @@ const props = defineProps({
   }
 });
 
-const emit = defineEmits(['view-log']);
+const emit = defineEmits(['view-log', 'go-projects']);
 
 const isRemote = computed(() => props.connection.mode === 'remote');
 const targetIp = computed(() => (isRemote.value ? props.connection.remoteHost : '127.0.0.1'));

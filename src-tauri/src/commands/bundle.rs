@@ -243,7 +243,7 @@ impl Bundle {
         let descriptor = match serde_json::from_str::<BundleDescriptor>(&text) {
             Ok(descriptor) => descriptor,
             Err(error) => {
-                log::warn!("bundle.json 解析失败: {error}");
+                log::warn!(target: "bundle", "bundle.json 解析失败: {error}");
                 return Err(
                     "交付包信息格式不正确，请使用新版流水线重新构建并上传制品".to_string(),
                 );

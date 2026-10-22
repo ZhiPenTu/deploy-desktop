@@ -5,6 +5,12 @@
         <h2 class="page-title">容器日志诊断</h2>
         <p class="page-subtitle">查看核心服务实时输出，按关键字过滤并复制日志内容</p>
       </div>
+      <div class="header-actions">
+        <el-button @click="$emit('go-projects')">
+          <el-icon><ArrowLeft /></el-icon>
+          <span>返回项目</span>
+        </el-button>
+      </div>
     </div>
 
     <div class="log-toolbar card-surface">
@@ -65,7 +71,7 @@
 <script setup>
 import { ref, computed, onMounted, onScopeDispose, nextTick, watch } from 'vue';
 import { ElMessage } from 'element-plus';
-import { CopyDocument, Refresh, Search } from '@element-plus/icons-vue';
+import { ArrowLeft, CopyDocument, Refresh, Search } from '@element-plus/icons-vue';
 import { getServiceLogs, getRemoteServiceLogs } from '../../../api/tauri.js';
 import { serviceOptions } from '../../../config/cluster.js';
 import { createRequestScope } from '../../../shared/async/requestScope.js';
@@ -80,6 +86,8 @@ const props = defineProps({
     default: ''
   }
 });
+
+defineEmits(['go-projects']);
 
 const isRemote = computed(() => props.connection.mode === 'remote');
 

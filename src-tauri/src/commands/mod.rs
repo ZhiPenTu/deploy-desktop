@@ -11,6 +11,7 @@ pub mod env;
 pub mod image_library;
 pub mod image_manager;
 pub mod local_update;
+pub mod logs;
 pub mod profile;
 pub mod registry;
 pub mod registry_sources;

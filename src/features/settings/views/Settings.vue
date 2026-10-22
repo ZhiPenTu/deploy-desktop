@@ -144,6 +144,10 @@
           </p>
         </div>
       </el-tab-pane>
+
+      <el-tab-pane label="运行日志" name="logs" lazy>
+        <RuntimeLogs />
+      </el-tab-pane>
     </el-tabs>
 
     <ArtifactSourceEditor
@@ -162,6 +166,7 @@ import { selectLocalPath as open } from '../../../api/tauri.js';
 import ArtifactSourceEditor from '../../artifacts/components/ArtifactSourceEditor.vue';
 import ManifestPullPanel from '../../registry/components/ManifestPullPanel.vue';
 import UpdateChecker from '../components/UpdateChecker.vue';
+import RuntimeLogs from '../components/RuntimeLogs.vue';
 import { projectState } from '../../../config/project.js';
 import { deleteArtifactSource, listArtifactSources, getImageLibrarySettings, saveImageLibrarySettings } from '../../../api/tauri.js';
 

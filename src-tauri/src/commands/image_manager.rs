@@ -113,7 +113,8 @@ pub async fn upload_remote_image_bundle(
     files: Vec<String>,
     overwrite: bool,
 ) -> Result<Vec<String>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    let target = format!("{user}@{host}:{port}");
+    let uploaded = tauri::async_runtime::spawn_blocking(move || {
         upload_images_blocking(
             &window,
             &host,
@@ -127,7 +128,13 @@ pub async fn upload_remote_image_bundle(
         )
     })
     .await
-    .map_err(|e| format!("上传镜像包任务失败: {e}"))?
+    .map_err(|e| format!("上传镜像包任务失败: {e}"))
+    .and_then(|inner| inner);
+    match &uploaded {
+        Ok(files) => log::info!(target: "image", "上传离线镜像包到 {target}：{} 个文件", files.len()),
+        Err(error) => log::error!(target: "image", "上传离线镜像包到 {target} 失败：{error}"),
+    }
+    uploaded
 }
 
 #[tauri::command]
@@ -140,7 +147,8 @@ pub async fn import_remote_image_bundle(
     remote_bundle_dir: String,
     files: Vec<String>,
 ) -> Result<Vec<String>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    let target = format!("{user}@{host}:{port}");
+    let imported = tauri::async_runtime::spawn_blocking(move || {
         import_images_blocking(
             &window,
             &host,
@@ -152,7 +160,13 @@ pub async fn import_remote_image_bundle(
         )
     })
     .await
-    .map_err(|e| format!("导入镜像任务失败: {e}"))?
+    .map_err(|e| format!("导入镜像任务失败: {e}"))
+    .and_then(|inner| inner);
+    match &imported {
+        Ok(files) => log::info!(target: "image", "目标机 {target} 导入离线镜像：{} 个文件", files.len()),
+        Err(error) => log::error!(target: "image", "目标机 {target} 导入离线镜像失败：{error}"),
+    }
+    imported
 }
 
 #[tauri::command]

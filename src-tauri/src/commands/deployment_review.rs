@@ -75,7 +75,7 @@ pub async fn inspect_deployment_review(
     user: Option<String>,
     key_path: Option<String>,
 ) -> Result<DeploymentReview, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    let review = tauri::async_runtime::spawn_blocking(move || {
         review_blocking(
             bundle_dir,
             install_dir,
@@ -87,7 +87,20 @@ pub async fn inspect_deployment_review(
         )
     })
     .await
-    .map_err(|_| "核对任务未能完成，请重试".to_string())?
+    .map_err(|_| "核对任务未能完成，请重试".to_string())
+    .and_then(|inner| inner);
+    match &review {
+        Ok(value) => log::info!(
+            target: "review",
+            "部署核对完成：就绪={} 可首次部署={} 可增量更新={} 待处理 {} 项",
+            value.ready,
+            value.can_first_deploy,
+            value.can_incremental_update,
+            value.issues.len()
+        ),
+        Err(error) => log::error!(target: "review", "部署核对失败：{error}"),
+    }
+    review
 }
 
 fn review_blocking(

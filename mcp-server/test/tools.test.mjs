@@ -35,7 +35,7 @@ function parseResult(result) {
 const tools = captureTools();
 
 test('注册完整工具集且名称唯一', () => {
-  assert.equal(tools.size, 38);
+  assert.equal(tools.size, 40);
   for (const name of [
     'deploy_registry_save',
     'deploy_registry_probe',

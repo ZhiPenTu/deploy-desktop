@@ -157,7 +157,7 @@ fn install_bundle_blocking(
         .unwrap_or_default();
     let record = bundle.deployed_record(&project_id);
     if let Err(error) = write_deployed_record(&install_root, &record) {
-        log::warn!("写入部署记录失败: {error}");
+        log::warn!(target: "deploy", "写入部署记录失败: {error}");
     }
 
     emit_progress(window, "分发完成", 100, "success", "交付包已分发到部署目录");

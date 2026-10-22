@@ -202,6 +202,15 @@ pub async fn check_app_update(
         install_blocker: update_install_blocker(),
     });
 
+    match &metadata {
+        Some(meta) => log::info!(
+            target: "update",
+            "检查应用更新：发现新版本 {}（当前 {}）",
+            meta.version,
+            meta.current_version
+        ),
+        None => log::info!(target: "update", "检查应用更新：已是最新版本"),
+    }
     *pending_update.0.lock().unwrap() = update;
     Ok(metadata)
 }
@@ -237,6 +246,7 @@ pub async fn install_app_update(
         .await
         .map_err(|e| friendly_install_error(e.to_string()))?;
 
+    log::info!(target: "update", "应用更新已安装，重启应用完成安装");
     app.restart();
 }
 

@@ -45,15 +45,6 @@
               </div>
               <span v-if="row.notes" class="host-notes">{{ row.notes }}</span>
             </div>
-            <el-button
-              v-if="row.id !== projectHostId"
-              size="small"
-              type="primary"
-              plain
-              :loading="busyKey === `activate:${row.id}`"
-              :disabled="!projectState.project"
-              @click="activate(row)"
-            >用于当前项目</el-button>
           </div>
 
           <div class="host-body">
@@ -173,8 +164,7 @@ import { projectState } from '../../../config/project.js';
 import {
   deleteManagedHost,
   setupManagedHostAccess,
-  testManagedHostConnection,
-  updateProject
+  testManagedHostConnection
 } from '../../../api/tauri.js';
 
 defineEmits(['go-credentials', 'view-status']);
@@ -223,30 +213,6 @@ function openCreate() {
 function openEdit(row) {
   editing.value = row;
   editorVisible.value = true;
-}
-
-async function activate(row) {
-  const project = projectState.project;
-  if (!project) {
-    ElMessage.warning('请先在「项目管理」中新建项目');
-    return;
-  }
-  busyKey.value = `activate:${row.id}`;
-  try {
-    await updateProject({
-      id: project.id,
-      name: project.name,
-      hostId: row.id,
-      installDir: project.installDir,
-      sourceId: project.sourceId || ''
-    });
-    await reloadProjectState();
-    ElMessage.success(`「${project.name}」的目标主机已设为「${row.name}」`);
-  } catch (error) {
-    ElMessage.error(String(error));
-  } finally {
-    busyKey.value = '';
-  }
 }
 
 function showResult(title, message, success) {

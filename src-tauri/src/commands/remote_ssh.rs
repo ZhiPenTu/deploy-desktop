@@ -63,8 +63,18 @@ pub async fn test_ssh_connection(
     user: String,
     key_path: Option<String>,
 ) -> Result<SshTestResult, String> {
-    crate::commands::blocking::run(move || test_ssh_connection_blocking(host, port, user, key_path))
-        .await
+    let target = format!("{user}@{host}:{port}");
+    let result =
+        crate::commands::blocking::run(move || test_ssh_connection_blocking(host, port, user, key_path))
+            .await;
+    match &result {
+        Ok(info) if info.success => {
+            log::info!(target: "ssh", "SSH 连接成功：{target} 往返={:?}ms", info.latency_ms)
+        }
+        Ok(info) => log::warn!(target: "ssh", "SSH 连接未通过：{target}：{}", info.message),
+        Err(error) => log::error!(target: "ssh", "SSH 连接失败：{target}：{error}"),
+    }
+    result
 }
 
 pub(crate) fn test_ssh_connection_blocking(
@@ -233,8 +243,25 @@ pub async fn check_remote_env(
     user: String,
     key_path: Option<String>,
 ) -> Result<RemoteEnvResult, String> {
-    crate::commands::blocking::run(move || check_remote_env_blocking(host, port, user, key_path))
-        .await
+    let target = format!("{user}@{host}:{port}");
+    let result =
+        crate::commands::blocking::run(move || check_remote_env_blocking(host, port, user, key_path))
+            .await;
+    match &result {
+        Ok(info) if info.is_ready => log::info!(
+            target: "env",
+            "目标机环境检查通过：{target}，待处理 {} 项",
+            info.issues.len()
+        ),
+        Ok(info) => log::warn!(
+            target: "env",
+            "目标机环境未就绪：{target}，待处理 {} 项：{}",
+            info.issues.len(),
+            info.issues.join("；")
+        ),
+        Err(error) => log::error!(target: "env", "目标机环境检查失败：{target}：{error}"),
+    }
+    result
 }
 
 pub(crate) fn check_remote_env_blocking(

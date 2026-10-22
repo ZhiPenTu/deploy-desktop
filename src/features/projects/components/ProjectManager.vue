@@ -5,42 +5,54 @@
       <span class="hint">每个项目对应一台主机、一个部署目录和一个制品源</span>
     </div>
 
-    <el-table v-if="projects.length" :data="projects" size="small" class="project-table">
-      <el-table-column label="项目" min-width="130">
-        <template #default="{ row }">
-          <div class="name-cell">
-            <span>{{ row.name }}</span>
-            <el-tag v-if="row.id === activeId" size="small" type="success" effect="plain">当前</el-tag>
-            <el-tag v-if="row.product" size="small" effect="plain">{{ row.product }}</el-tag>
+    <div v-if="projects.length" class="project-grid">
+      <article v-for="row in projects" :key="row.id" class="project-card">
+        <header class="project-head">
+          <div class="project-ident">
+            <h4 class="project-name">{{ row.name }}</h4>
+            <div class="project-tags">
+              <el-tag v-if="row.product" size="small" effect="plain">{{ row.product }}</el-tag>
+            </div>
           </div>
-        </template>
-      </el-table-column>
-      <el-table-column label="目标主机" min-width="110">
-        <template #default="{ row }">{{ hostText(row.hostId) }}</template>
-      </el-table-column>
-      <el-table-column label="部署目录" min-width="160" show-overflow-tooltip>
-        <template #default="{ row }">
-          <span class="mono-text">{{ row.installDir }}</span>
-        </template>
-      </el-table-column>
-      <el-table-column label="制品源" min-width="120" show-overflow-tooltip>
-        <template #default="{ row }">
-          <span :class="sourceText(row.sourceId) ? '' : 'muted-text'">{{ sourceText(row.sourceId) || '未指定' }}</span>
-        </template>
-      </el-table-column>
-      <el-table-column label="交付包" min-width="105">
-        <template #default="{ row }">
-          <span :class="row.lastVersion ? 'mono-text' : 'muted-text'">{{ row.lastVersion || '未绑定' }}</span>
-        </template>
-      </el-table-column>
-      <el-table-column label="操作" width="150">
-        <template #default="{ row }">
-          <el-button link type="primary" :aria-label="`部署 ${row.name}`" @click="deploy(row)">部署</el-button>
+          <span v-if="row.lastVersion" class="bundle-version" :title="`交付包版本 ${row.lastVersion}`">
+            {{ row.lastVersion }}
+          </span>
+          <span v-else class="bundle-version muted-text">未绑定交付包</span>
+        </header>
+
+        <dl class="project-meta">
+          <div class="meta-row">
+            <dt>目标主机</dt>
+            <dd>{{ hostText(row.hostId) }}</dd>
+          </div>
+          <div class="meta-row">
+            <dt>部署目录</dt>
+            <dd class="mono-text" :title="row.installDir">{{ row.installDir }}</dd>
+          </div>
+          <div class="meta-row">
+            <dt>制品源</dt>
+            <dd :class="sourceText(row.sourceId) ? '' : 'muted-text'">{{ sourceText(row.sourceId) || '未指定' }}</dd>
+          </div>
+        </dl>
+
+        <footer class="project-foot">
+          <el-button type="primary" size="small" :aria-label="`部署 ${row.name}`" @click="deploy(row)">
+            部署
+          </el-button>
+          <el-button size="small" :aria-label="`监控 ${row.name}`" @click="inspect(row, 'dashboard')">
+            <el-icon><Monitor /></el-icon>
+            <span>监控</span>
+          </el-button>
+          <el-button size="small" :aria-label="`日志 ${row.name}`" @click="inspect(row, 'logs')">
+            <el-icon><Document /></el-icon>
+            <span>日志</span>
+          </el-button>
+          <span class="foot-spacer"></span>
           <el-button link type="primary" :aria-label="`编辑 ${row.name}`" @click="openEdit(row)">编辑</el-button>
           <el-button link type="danger" :aria-label="`删除 ${row.name}`" @click="remove(row)">删除</el-button>
-        </template>
-      </el-table-column>
-    </el-table>
+        </footer>
+      </article>
+    </div>
 
     <div v-else class="empty-state">
       <span class="empty-title">还没有项目</span>
@@ -103,7 +115,7 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { Plus, Refresh } from '@element-plus/icons-vue';
+import { Document, Monitor, Plus, Refresh } from '@element-plus/icons-vue';
 import {
   createProject,
   deleteProject,
@@ -117,9 +129,8 @@ import {
   reloadProjectState
 } from '../../connections/state.js';
 
-const emit = defineEmits(['deploy']);
+const emit = defineEmits(['deploy', 'inspect']);
 const projects = computed(() => projectState.projects);
-const activeId = computed(() => projectState.project?.id || '');
 const hosts = computed(() => connectionInventory.hosts);
 const sources = ref([]);
 const loading = ref(false);
@@ -217,6 +228,10 @@ function deploy(row) {
   emit('deploy', row.id);
 }
 
+function inspect(row, tab) {
+  emit('inspect', { id: row.id, tab });
+}
+
 async function remove(row) {
   try {
     await ElMessageBox.confirm(
@@ -264,20 +279,116 @@ onMounted(load);
   color: var(--text-muted);
 }
 
-.name-cell {
+.project-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 14px;
+}
+
+.project-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md, 12px);
+  background: var(--surface-subtle, #fff);
+  transition: border-color 0.16s ease, box-shadow 0.16s ease;
+}
+
+.project-card:hover {
+  border-color: var(--brand-border, rgba(51, 92, 255, 0.4));
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.06);
+}
+
+.project-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.project-ident {
+  min-width: 0;
+}
+
+.project-name {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-main);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-tags {
   display: flex;
   align-items: center;
   gap: 6px;
   flex-wrap: wrap;
+  margin-top: 6px;
 }
 
-.project-table {
-  width: 100%;
-  background: transparent;
+.bundle-version {
+  flex: none;
+  max-width: 46%;
+  font-size: 11px;
+  font-family: "SFMono-Regular", Menlo, Consolas, monospace;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.project-table :deep(.el-button + .el-button) {
-  margin-left: 10px;
+.project-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-muted, rgba(15, 23, 42, 0.03));
+}
+
+.meta-row {
+  display: grid;
+  grid-template-columns: 68px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 10px;
+  font-size: 12px;
+}
+
+.meta-row dt {
+  color: var(--text-muted);
+}
+
+.meta-row dd {
+  min-width: 0;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.meta-row dd.mono-text {
+  font-size: 11px;
+}
+
+.project-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: auto;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-color);
+}
+
+.project-foot :deep(.el-button + .el-button) {
+  margin-left: 0;
+}
+
+.foot-spacer {
+  flex: 1;
 }
 
 .mono-text {
