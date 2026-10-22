@@ -208,7 +208,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue';
 import { selectLocalPath as open } from '../../../api/tauri.js';
 import { Box, DocumentChecked, FolderOpened, Refresh } from '@element-plus/icons-vue';
 import { downloadArtifact, fetchArtifactRelease, isDesktopApp, listArtifactReleases, listArtifactSources, openArtifactBundle, openArtifactBundleVersion, prepareLocalArtifactBundle } from '../../../api/tauri.js';
@@ -217,7 +217,8 @@ import { applyProjectBundle } from '../../connections/state.js';
 const props = defineProps({
   connection: { type: Object, required: true },
   stage: { type: String, default: 'select' },
-  disabled: { type: Boolean, default: false }
+  disabled: { type: Boolean, default: false },
+  preset: { type: Object, default: null }
 });
 
 const emit = defineEmits(['chosen', 'selected', 'busy-change', 'go-artifacts']);
@@ -234,6 +235,7 @@ const preparedBundle = ref(null);
 const operation = ref('');
 const errorMessage = ref('');
 const progress = reactive({ percent: 0, total: 0, stage: '' });
+const initialPreset = props.preset;
 const busy = computed(() => Boolean(operation.value));
 const preparing = computed(() => operation.value === 'prepare');
 const controlsDisabled = computed(() => props.disabled || busy.value);
@@ -276,6 +278,17 @@ function choose(next) {
     label: next.label,
     version: next.version || '',
     path: next.path || ''
+  });
+}
+
+function applyPreset(preset) {
+  const path = String(preset?.dir || '').trim();
+  if (!path) return;
+  choose({
+    kind: 'directory',
+    label: preset.label || displayVersion(preset.version),
+    version: preset.version || '',
+    path
   });
 }
 
@@ -544,7 +557,11 @@ async function prepare() {
 }
 
 defineExpose({ clearSelection, refreshSources });
-onMounted(refreshSources);
+onMounted(async () => {
+  await refreshSources();
+  await nextTick();
+  applyPreset(initialPreset);
+});
 </script>
 
 <style scoped>
