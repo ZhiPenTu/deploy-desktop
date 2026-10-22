@@ -247,56 +247,23 @@
       <pre class="output-log">{{ resultLog }}</pre>
     </div>
 
-    <el-dialog v-model="pullDialogVisible" title="拉取镜像" width="600px" style="max-width: calc(100vw - 32px)" :close-on-click-modal="!pulling" :close-on-press-escape="!pulling" :show-close="!pulling" @closed="pullForm.password = ''">
-      <el-form label-width="100px" :disabled="pulling" @submit.prevent>
-        <el-form-item label="镜像源">
-          <el-select v-model="pullForm.registrySourceId" :loading="loadingSources" placeholder="直接填写完整镜像地址" clearable style="width: 100%" @change="resetPullCredentials">
-            <el-option label="直接填写完整镜像地址" value="" />
-            <el-option v-for="source in registrySources" :key="source.id" :label="`${source.name}（${source.address}）`" :value="source.id" />
-          </el-select>
-          <el-button link type="primary" @click="goSourceSettings">管理镜像源</el-button>
-        </el-form-item>
-        <el-form-item label="镜像地址" required>
-          <el-input
-            v-model="pullForm.reference"
-            :placeholder="selectedRegistrySource ? '仓库内路径，例如 app@sha256:…' : '例如 registry.example.com/demo/app@sha256:…'"
-            clearable
-            @keyup.enter="handlePull"
-          />
-        </el-form-item>
-        <el-form-item v-if="!selectedRegistrySource" label="仓库用户名">
-          <el-input v-model="pullForm.username" placeholder="公开镜像可留空" autocomplete="off" clearable />
-        </el-form-item>
-        <el-form-item v-if="!selectedRegistrySource || (selectedRegistrySource.username && !selectedRegistrySource.hasPassword)" label="密码或令牌">
-          <el-input
-            v-model="pullForm.password"
-            type="password"
-            show-password
-            placeholder="仅用于本次拉取，不会保存"
-            autocomplete="new-password"
-          />
-        </el-form-item>
-        <el-form-item v-if="selectedRegistrySource" label="访问方式">
-          <span>{{ selectedRegistrySource.username ? `${selectedRegistrySource.username}（${selectedRegistrySource.hasPassword ? '使用已保存的密码' : '请填写本次密码'}）` : '无需登录' }}</span>
-        </el-form-item>
-      </el-form>
-      <div class="dialog-hint">
-        使用 sha256 摘要固定镜像版本。镜像拉取到本机 Docker 后，可导出为离线包。
-        <div v-if="pullForm.reference.trim()">拉取地址：{{ resolvedPullReference }}</div>
-      </div>
-      <template #footer>
-        <el-button :disabled="pulling" @click="closePullDialog">取消</el-button>
-        <el-button type="primary" :loading="pulling" :disabled="loadingSources" @click="handlePull">开始拉取</el-button>
-      </template>
-    </el-dialog>
+    <PullImageDialog
+      v-model:visible="pullDialogVisible"
+      :sources="registrySources"
+      :loading-sources="loadingSources"
+      :pulling="pulling"
+      @submit="runPull"
+      @go-settings="goSourceSettings"
+    />
   </div>
 </template>
 
 <script setup>
 import { useDesktopProgress } from '../../../shared/composables/useDesktopProgress.js';
-import { computed, onMounted, reactive, ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { Box, Download, Files, Refresh } from '@element-plus/icons-vue';
+import PullImageDialog from '../components/PullImageDialog.vue';
 import RemoteImageDistribution from '../components/RemoteImageDistribution.vue';
 import {
   exportLocalDockerImages,
@@ -347,36 +314,8 @@ const imageTable = ref(null);
 const packageTable = ref(null);
 const registrySources = ref([]);
 const loadingSources = ref(false);
-const pullForm = reactive({
-  reference: '',
-  registrySourceId: '',
-  username: '',
-  password: ''
-});
-
-const selectedRegistrySource = computed(() => registrySources.value.find((source) => source.id === pullForm.registrySourceId));
-const resolvedPullReference = computed(() => {
-  const reference = pullForm.reference.trim();
-  const source = selectedRegistrySource.value;
-  if (!source) return reference;
-  const first = reference.split('/')[0];
-  if (reference.includes('/') && (first.includes('.') || first.includes(':') || first === 'localhost')) return reference;
-  return [source.address, source.namespace, reference].filter(Boolean).join('/');
-});
-
-function resetPullCredentials() {
-  pullForm.username = '';
-  pullForm.password = '';
-}
-
-function updateRegistrySources(sources) {
-  registrySources.value = sources;
-  if (!sources.some((source) => source.id === pullForm.registrySourceId)) pullForm.registrySourceId = '';
-}
-
 function goSourceSettings() {
-  if (pulling.value) return;
-  closePullDialog();
+  pullDialogVisible.value = false;
   emit('go-settings', 'images');
 }
 
@@ -499,14 +438,10 @@ const handlePackageSelection = (rows) => {
 };
 
 const openPullDialog = async () => {
-  pullForm.reference = '';
-  pullForm.username = '';
-  pullForm.password = '';
-  pullForm.registrySourceId = '';
   pullDialogVisible.value = true;
   loadingSources.value = true;
   try {
-    updateRegistrySources(await listRegistrySources());
+    registrySources.value = await listRegistrySources();
   } catch (error) {
     ElMessage.error(errorText(error));
   } finally {
@@ -514,58 +449,27 @@ const openPullDialog = async () => {
   }
 };
 
-const closePullDialog = () => {
-  if (pulling.value) {
-    return;
-  }
-  pullDialogVisible.value = false;
-  pullForm.password = '';
-};
-
-const handlePull = async () => {
-  if (pulling.value || loadingSources.value) {
-    return;
-  }
-  const reference = pullForm.reference.trim();
-  if (!reference) {
-    ElMessage.warning('请填写要拉取的镜像地址');
-    return;
-  }
-  if (!/@sha256:[a-f0-9]{64}$/.test(reference)) {
-    ElMessage.warning('请填写包含 64 位小写 sha256 摘要的镜像地址');
-    return;
-  }
-  const source = selectedRegistrySource.value;
-  if ((source?.username && !source.hasPassword && !pullForm.password) || (!source && pullForm.username.trim() && !pullForm.password)) {
-    ElMessage.warning('请填写仓库密码或访问令牌');
-    return;
-  }
-  if (!source && pullForm.password && !pullForm.username.trim()) {
-    ElMessage.warning('已填写仓库密码，请同时填写仓库用户名');
-    return;
-  }
+const runPull = async (payload) => {
   pulling.value = true;
   progress.value = [];
   resultLog.value = '';
   try {
     const output = await pullLocalDockerImage(
-      reference,
-      source ? null : pullForm.username.trim() || null,
-      pullForm.password || null,
-      pullForm.registrySourceId || null
+      payload.reference,
+      payload.username,
+      payload.password,
+      payload.registrySourceId
     );
     resultLog.value = output;
-    resultTitle.value = `已拉取 ${resolvedPullReference.value}`;
+    resultTitle.value = `已拉取 ${payload.resolved}`;
     ElMessage.success('镜像拉取完成');
     pullDialogVisible.value = false;
-    pullForm.password = '';
     await loadImages();
   } catch (error) {
     resultLog.value = errorText(error);
     resultTitle.value = '镜像拉取失败';
     ElMessage.error('镜像拉取失败');
   } finally {
-    pullForm.password = '';
     pulling.value = false;
   }
 };
@@ -944,16 +848,6 @@ onMounted(async () => {
 
 .progress-text {
   overflow-wrap: anywhere;
-}
-
-.dialog-hint {
-  padding: 10px 14px;
-  border-radius: var(--radius-sm);
-  background: var(--panel-subtle);
-  border: 1px solid var(--border-color);
-  color: var(--text-muted);
-  font-size: 12px;
-  line-height: 1.6;
 }
 
 .output-log {
