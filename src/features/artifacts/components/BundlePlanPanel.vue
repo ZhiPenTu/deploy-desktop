@@ -12,6 +12,7 @@
         </div>
       </div>
       <div class="plan-actions">
+        <el-button v-if="plan.compose" size="small" @click="configVisible = true">查看部署配置</el-button>
         <slot name="actions" />
       </div>
     </div>

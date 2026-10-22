@@ -20,7 +20,11 @@ export async function useDesktopBackend(
     dialogPath = '',
     preparedBundle = null,
     bundlePlan = null,
-    deploymentReview = null
+    bundleConfig = null,
+    deploymentReview = null,
+    containers = [],
+    bundle = null,
+    remoteImageBundle = null
   } = {}
 ) {
   await page.addInitScript(({
@@ -39,7 +43,11 @@ export async function useDesktopBackend(
     initialDialogPath,
     initialPreparedBundle,
     initialBundlePlan,
-    initialDeploymentReview
+    initialBundleConfig,
+    initialDeploymentReview,
+    initialContainers,
+    initialBundle,
+    initialRemoteImageBundle
   }) => {
     const state = {
       hosts: structuredClone(initialHosts),
@@ -57,7 +65,11 @@ export async function useDesktopBackend(
       dialogPath: initialDialogPath,
       preparedBundle: structuredClone(initialPreparedBundle),
       bundlePlan: structuredClone(initialBundlePlan),
+      bundleConfig: structuredClone(initialBundleConfig),
       deploymentReview: structuredClone(initialDeploymentReview),
+      containers: structuredClone(initialContainers),
+      boundBundle: structuredClone(initialBundle),
+      remoteImageBundle: structuredClone(initialRemoteImageBundle),
       activeHostId: ''
     };
     const callbacks = new Map();
@@ -129,6 +141,13 @@ export async function useDesktopBackend(
           }
           case 'plugin:dialog|open':
             return state.dialogPath || null;
+          case 'get_containers_status':
+            return state.containers.map((item) => ({ ...item }));
+          case 'get_remote_containers_status':
+            return state.containers.map((item) => ({ ...item }));
+          case 'inspect_remote_image_bundle':
+            if (!state.remoteImageBundle) throw '当前操作暂不可用，请在桌面应用中重试。';
+            return structuredClone(state.remoteImageBundle);
           case 'prepare_local_artifact_bundle':
             if (!state.preparedBundle) throw '当前操作暂不可用，请在桌面应用中重试。';
             return { ...state.preparedBundle };
@@ -149,6 +168,9 @@ export async function useDesktopBackend(
           case 'inspect_bundle_plan':
             if (!state.bundlePlan) throw '当前操作暂不可用，请在桌面应用中重试。';
             return structuredClone(state.bundlePlan);
+          case 'inspect_bundle_config':
+            if (!state.bundleConfig) throw '当前操作暂不可用，请在桌面应用中重试。';
+            return structuredClone(state.bundleConfig);
           case 'check_local_env':
             if (!state.localEnv) throw '当前操作暂不可用，请在桌面应用中重试。';
             return structuredClone(state.localEnv);
@@ -236,7 +258,11 @@ export async function useDesktopBackend(
     initialDialogPath: dialogPath,
     initialPreparedBundle: preparedBundle,
     initialBundlePlan: bundlePlan,
-    initialDeploymentReview: deploymentReview
+    initialBundleConfig: bundleConfig,
+    initialDeploymentReview: deploymentReview,
+    initialContainers: containers,
+    initialBundle: bundle,
+    initialRemoteImageBundle: remoteImageBundle
   });
 }
 

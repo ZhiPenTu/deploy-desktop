@@ -8,6 +8,7 @@
     v-model="visible"
     title="检查更新"
     width="540px"
+    append-to-body
     :close-on-click-modal="!installing"
     :close-on-press-escape="!installing"
     :show-close="!installing"

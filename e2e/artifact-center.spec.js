@@ -105,3 +105,100 @@ test('制品源列表进入版本页后展示概览与版本明细', async ({ pa
 
   expect(problems).toEqual([]);
 });
+
+const detailPlan = {
+  bundleDir: '/opt/app',
+  version: 'v1.2.0',
+  commitShort: 'abc1234',
+  branch: 'main',
+  runtime: 'compose',
+  compose: 'deploy/docker-compose.yml',
+  fileCount: 12,
+  totalBytes: 2048,
+  components: [{ key: 'web', label: 'Web 控制台', services: ['web'], artifacts: [] }],
+  services: [],
+  database: null,
+  images: [],
+  steps: [],
+  imageCheck: 'local'
+};
+
+const detailConfig = {
+  kind: 'compose',
+  file: 'deploy/docker-compose.yml',
+  sizeBytes: 512,
+  imageDir: '/opt/app/bundle',
+  imageDirExists: true,
+  imageCheck: 'local',
+  content: 'services:\n  web:\n    image: demo/web:1.2.0\n',
+  services: [
+    {
+      name: 'web',
+      image: 'demo/web:1.2.0',
+      containerName: 'demo-web-1',
+      ports: ['8080:80'],
+      dependsOn: [],
+      restart: 'unless-stopped'
+    }
+  ],
+  images: [
+    {
+      imageRef: 'demo/web:1.2.0',
+      status: 'ready',
+      services: ['web'],
+      localFile: 'web.tar',
+      localBytes: 1024,
+      matchSource: 'images.json',
+      dockerPresent: true
+    },
+    {
+      imageRef: 'demo/api:1.2.0',
+      status: 'missing',
+      services: ['web'],
+      localFile: '',
+      localBytes: 0,
+      matchSource: '',
+      dockerPresent: false
+    }
+  ],
+  issues: []
+};
+
+test('版本详情的部署配置对话框展示镜像、服务与配置内容', async ({ page }) => {
+  await useDesktopBackend(page, {
+    artifactSources: [flowSource],
+    artifactReleases: releases,
+    bundlePlan: detailPlan,
+    bundleConfig: detailConfig
+  });
+  const problems = [];
+  page.on('pageerror', (error) => problems.push(`未捕获异常：${error.message}`));
+
+  await page.goto('/');
+  await page.locator('.nav-menu .nav-item', { hasText: '制品中心' }).click();
+  await page.locator('.source-card').getByRole('button', { name: '查看制品' }).click();
+
+  const versions = page.locator('.versions-card');
+  await versions.locator('.el-table__row').first().getByRole('button', { name: '详情', exact: true }).click();
+  await page.getByRole('button', { name: '查看部署配置' }).click();
+
+  const dialog = page.locator('.compose-dialog');
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator('.meta-row')).toContainText('deploy/docker-compose.yml');
+  await expect(dialog.locator('.summary-card', { hasText: '就绪' })).toContainText('1');
+  await expect(dialog.locator('.summary-card', { hasText: '缺失' })).toContainText('1');
+
+  const imageRows = dialog.locator('.el-tab-pane').first().locator('.el-table__row');
+  await expect(imageRows).toHaveCount(2);
+  await expect(imageRows.first()).toContainText('demo/web:1.2.0');
+  await expect(imageRows.first()).toContainText('已加载');
+  await expect(imageRows.nth(1)).toContainText('缺失');
+
+  await dialog.getByRole('tab', { name: '服务清单' }).click();
+  await expect(dialog.locator('.el-tab-pane').nth(1).locator('.el-table__row')).toContainText('demo-web-1');
+
+  await dialog.getByRole('tab', { name: '配置内容' }).click();
+  await expect(dialog.locator('.code-view').first()).toContainText('image: demo/web:1.2.0');
+
+  expect(problems).toEqual([]);
+});

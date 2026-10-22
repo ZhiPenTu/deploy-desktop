@@ -19,3 +19,23 @@ test('运行日志面板展示本机说明、分类筛选与空状态', async ({
 
   expect(problems).toEqual([]);
 });
+
+test('页头的检查更新弹窗覆盖整页，不被页头裁切', async ({ page }) => {
+  const problems = [];
+  page.on('pageerror', (error) => problems.push(`未捕获异常：${error.message}`));
+
+  await page.goto('/');
+  await page.locator('.header-actions button').first().click();
+
+  const dialog = page.locator('.el-dialog', { hasText: '当前版本' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText('GitHub Releases');
+
+  const box = await dialog.boundingBox();
+  const viewport = page.viewportSize();
+  expect(box.y).toBeGreaterThan(56);
+  expect(box.y + box.height).toBeLessThanOrEqual(viewport.height);
+  expect(await page.locator('.app-header .el-dialog').count()).toBe(0);
+
+  expect(problems).toEqual([]);
+});
