@@ -196,19 +196,6 @@ export function useDeploymentWizard(config, emit) {
     emit('busy-change', false);
   });
 
-  const changeLabel = (value) =>
-    ({ added: '新增', changed: '有变化', unchanged: '一致', removed: '制品中移除' }[value] || '未确认');
-
-  const stateLabel = (value) =>
-    ({
-      running: '运行中',
-      exited: '已停止',
-      created: '已创建',
-      restarting: '重启中',
-      not_created: '未创建',
-      missing: '未创建'
-    }[value] || '未运行');
-
   const target = () =>
     isRemote.value
       ? {
@@ -638,5 +625,5 @@ export function useDeploymentWizard(config, emit) {
       allowedComponents: deploymentComponents(bundlePlan.value) });
   }
 
-  return { steps, activeStep, selectedHost, isRemote, targetLabel, hostReady, testingSsh, settingKey, sshMessage, sshOk, envData, envError, checkingEnv, installingDocker, artifactPicker, candidate, preparedBundle, artifactBusy, review, reviewError, checkingReview, reviewTab, imageMediaDir, importingImages, deploymentAction, selectedComponents, backup, executing, preflighting, preflightPassed, phase, operationError, diagnostics, result, busy, environmentReady, componentOptions, canExecute, changeLabel, stateLabel, artifactChosen, artifactPrepared, testConnection, setupAccess, checkEnvironment, installDocker, nextStep, previousStep, loadReview, pickImageDirectory, prepareImages, runPreflight, executeDeployment, progressStep, progressPercent, progressMessage, elapsedText };
+  return { steps, activeStep, selectedHost, isRemote, targetLabel, hostReady, testingSsh, settingKey, sshMessage, sshOk, envData, envError, checkingEnv, installingDocker, artifactPicker, candidate, preparedBundle, artifactBusy, review, reviewError, checkingReview, reviewTab, imageMediaDir, importingImages, deploymentAction, selectedComponents, backup, executing, preflighting, preflightPassed, phase, operationError, diagnostics, result, busy, environmentReady, componentOptions, canExecute, artifactChosen, artifactPrepared, testConnection, setupAccess, checkEnvironment, installDocker, nextStep, previousStep, loadReview, pickImageDirectory, prepareImages, runPreflight, executeDeployment, progressStep, progressPercent, progressMessage, elapsedText };
 }

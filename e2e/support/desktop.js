@@ -16,7 +16,11 @@ export async function useDesktopBackend(
     projects = [],
     activeProjectId = '',
     localEnv = null,
-    remoteEnv = null
+    remoteEnv = null,
+    dialogPath = '',
+    preparedBundle = null,
+    bundlePlan = null,
+    deploymentReview = null
   } = {}
 ) {
   await page.addInitScript(({
@@ -31,7 +35,11 @@ export async function useDesktopBackend(
     initialProjects,
     initialActiveProjectId,
     initialLocalEnv,
-    initialRemoteEnv
+    initialRemoteEnv,
+    initialDialogPath,
+    initialPreparedBundle,
+    initialBundlePlan,
+    initialDeploymentReview
   }) => {
     const state = {
       hosts: structuredClone(initialHosts),
@@ -46,6 +54,10 @@ export async function useDesktopBackend(
       activeProjectId: initialActiveProjectId || initialProjects[0]?.id || '',
       localEnv: structuredClone(initialLocalEnv),
       remoteEnv: structuredClone(initialRemoteEnv),
+      dialogPath: initialDialogPath,
+      preparedBundle: structuredClone(initialPreparedBundle),
+      bundlePlan: structuredClone(initialBundlePlan),
+      deploymentReview: structuredClone(initialDeploymentReview),
       activeHostId: ''
     };
     const callbacks = new Map();
@@ -111,10 +123,32 @@ export async function useDesktopBackend(
             const project = state.projects.find((item) => item.id === state.activeProjectId) || null;
             return {
               project: project ? { ...project } : null,
-              bundle: null,
+              bundle: state.boundBundle ? { ...state.boundBundle } : null,
               deployDir: project?.installDir || ''
             };
           }
+          case 'plugin:dialog|open':
+            return state.dialogPath || null;
+          case 'prepare_local_artifact_bundle':
+            if (!state.preparedBundle) throw '当前操作暂不可用，请在桌面应用中重试。';
+            return { ...state.preparedBundle };
+          case 'activate_project_bundle': {
+            const index = state.projects.findIndex((item) => item.id === args.projectId);
+            if (index < 0) throw '请先在「项目管理」中新建项目并选择目标主机';
+            state.projects[index] = {
+              ...state.projects[index],
+              lastBundleDir: args.bundleDir,
+              lastVersion: args.version
+            };
+            state.boundBundle = { dir: args.bundleDir, version: args.version };
+            return projectStore();
+          }
+          case 'inspect_deployment_review':
+            if (!state.deploymentReview) throw '当前操作暂不可用，请在桌面应用中重试。';
+            return structuredClone(state.deploymentReview);
+          case 'inspect_bundle_plan':
+            if (!state.bundlePlan) throw '当前操作暂不可用，请在桌面应用中重试。';
+            return structuredClone(state.bundlePlan);
           case 'check_local_env':
             if (!state.localEnv) throw '当前操作暂不可用，请在桌面应用中重试。';
             return structuredClone(state.localEnv);
@@ -198,7 +232,11 @@ export async function useDesktopBackend(
     initialProjects: projects,
     initialActiveProjectId: activeProjectId,
     initialLocalEnv: localEnv,
-    initialRemoteEnv: remoteEnv
+    initialRemoteEnv: remoteEnv,
+    initialDialogPath: dialogPath,
+    initialPreparedBundle: preparedBundle,
+    initialBundlePlan: bundlePlan,
+    initialDeploymentReview: deploymentReview
   });
 }
 
