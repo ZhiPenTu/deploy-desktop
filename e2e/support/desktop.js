@@ -12,7 +12,11 @@ export async function useDesktopBackend(
     artifactReleases = [],
     dockerImages = [],
     offlineDir = '',
-    offlinePackages = []
+    offlinePackages = [],
+    projects = [],
+    activeProjectId = '',
+    localEnv = null,
+    remoteEnv = null
   } = {}
 ) {
   await page.addInitScript(({
@@ -23,7 +27,11 @@ export async function useDesktopBackend(
     initialReleases,
     initialImages,
     initialOfflineDir,
-    initialPackages
+    initialPackages,
+    initialProjects,
+    initialActiveProjectId,
+    initialLocalEnv,
+    initialRemoteEnv
   }) => {
     const state = {
       hosts: structuredClone(initialHosts),
@@ -34,6 +42,10 @@ export async function useDesktopBackend(
       images: structuredClone(initialImages),
       offlineDir: initialOfflineDir,
       packages: structuredClone(initialPackages),
+      projects: structuredClone(initialProjects),
+      activeProjectId: initialActiveProjectId || initialProjects[0]?.id || '',
+      localEnv: structuredClone(initialLocalEnv),
+      remoteEnv: structuredClone(initialRemoteEnv),
       activeHostId: ''
     };
     const callbacks = new Map();
@@ -46,6 +58,12 @@ export async function useDesktopBackend(
       credentials: state.credentials.map((item) => ({ ...item })),
       hosts: state.hosts.map((item) => ({ ...item })),
       activeHostId: state.activeHostId
+    });
+
+    const projectStore = () => ({
+      schemaVersion: 1,
+      activeProjectId: state.activeProjectId,
+      projects: state.projects.map((item) => ({ ...item }))
     });
 
     window.isTauri = true;
@@ -85,9 +103,24 @@ export async function useDesktopBackend(
             state.hosts = state.hosts.filter((item) => item.id !== args.id);
             return inventory();
           case 'list_projects':
-            return { schemaVersion: 1, activeProjectId: '', projects: [] };
-          case 'get_active_project_context':
-            return { project: null, bundle: null, deployDir: '' };
+            return projectStore();
+          case 'set_active_project':
+            state.activeProjectId = args.id;
+            return projectStore();
+          case 'get_active_project_context': {
+            const project = state.projects.find((item) => item.id === state.activeProjectId) || null;
+            return {
+              project: project ? { ...project } : null,
+              bundle: null,
+              deployDir: project?.installDir || ''
+            };
+          }
+          case 'check_local_env':
+            if (!state.localEnv) throw '当前操作暂不可用，请在桌面应用中重试。';
+            return structuredClone(state.localEnv);
+          case 'check_remote_env':
+            if (!state.remoteEnv) throw '当前操作暂不可用，请在桌面应用中重试。';
+            return structuredClone(state.remoteEnv);
           case 'list_artifact_sources':
             return state.sources.map((item) => ({ ...item }));
           case 'save_artifact_source': {
@@ -161,7 +194,11 @@ export async function useDesktopBackend(
     initialReleases: artifactReleases,
     initialImages: dockerImages,
     initialOfflineDir: offlineDir,
-    initialPackages: offlinePackages
+    initialPackages: offlinePackages,
+    initialProjects: projects,
+    initialActiveProjectId: activeProjectId,
+    initialLocalEnv: localEnv,
+    initialRemoteEnv: remoteEnv
   });
 }
 

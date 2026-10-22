@@ -8,149 +8,47 @@
     </div>
     <DeploymentStepper :steps="steps" :active-step="activeStep" />
 
-    <div v-if="activeStep === 0" class="step-card">
-      <h3>确认部署目标</h3>
-      <p class="desc">选择要部署的项目，项目决定目标主机与部署目录。</p>
-      <el-alert
-        v-if="connectionInventory.error"
-        title="无法读取主机列表，请在主机管理中检查后重试。"
-        type="error"
-        :closable="false"
-        show-icon
-      />
-      <div v-if="!hasProject" class="project-empty">
-        <span class="icon-tile neutral"><el-icon><FolderOpened /></el-icon></span>
-        <span class="empty-title">当前没有可用项目</span>
-        <span class="empty-hint">
-          一个项目对应一台主机、一个部署目录和一个制品源。新建项目后即可选择制品并部署。
-        </span>
-        <el-button type="primary" @click="emit('go-projects')">前往项目管理</el-button>
-      </div>
-      <el-form v-else label-width="110px" class="host-form" @submit.prevent>
-        <el-form-item label="项目">
-          <el-select
-            :model-value="selectedProjectId"
-            class="project-select"
-            placeholder="请选择项目"
-            :disabled="busy || switchingProject"
-            @change="selectProject"
-          >
-            <el-option
-              v-for="item in projects"
-              :key="item.id"
-              :value="item.id"
-              :label="item.name"
-            />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="目标主机">
-          <div class="input-row">
-            <span>{{ targetLabel }}</span>
-            <el-button :disabled="busy" @click="emit('go-projects')">项目管理</el-button>
-          </div>
-        </el-form-item>
-        <el-form-item label="部署目录">
-          <span class="path-text">{{ config.installDir || '未设置' }}</span>
-        </el-form-item>
-        <el-form-item v-if="config.deployDir && config.deployDir !== config.installDir" label="Compose 目录">
-          <span class="path-text">{{ config.deployDir }}</span>
-        </el-form-item>
-        <el-form-item v-if="isRemote" label="连接检查">
-          <div class="input-row wrap">
-            <el-button :loading="testingSsh" :disabled="busy" @click="testConnection"> 测试连接 </el-button>
-            <el-button :loading="settingKey" :disabled="busy" @click="setupAccess">配置免密登录</el-button>
-            <span v-if="sshMessage" :class="sshOk ? 'text-success' : 'text-danger'">{{ sshMessage }}</span>
-          </div>
-        </el-form-item>
-      </el-form>
-      <div class="step-footer">
-        <span class="field-hint">{{ hasProject ? `部署目标：${targetLabel}` : '请先创建项目' }}</span>
-        <el-button type="primary" :disabled="!hostReady || busy" @click="nextStep">
-          下一步：检测环境
-          <el-icon class="el-icon--right"><ArrowRight /></el-icon>
-        </el-button>
-      </div>
-    </div>
+    <DeployTargetStep
+      v-if="activeStep === 0"
+      :has-project="hasProject"
+      :projects="projects"
+      :selected-project-id="selectedProjectId"
+      :switching-project="switchingProject"
+      :busy="busy"
+      :target-label="targetLabel"
+      :install-dir="config.installDir"
+      :deploy-dir="config.deployDir"
+      :is-remote="isRemote"
+      :inventory-error="connectionInventory.error"
+      :testing-ssh="testingSsh"
+      :setting-key="settingKey"
+      :ssh-message="sshMessage"
+      :ssh-ok="sshOk"
+      :host-ready="hostReady"
+      @go-projects="emit('go-projects')"
+      @select-project="selectProject"
+      @test-connection="testConnection"
+      @setup-access="setupAccess"
+      @next="nextStep"
+    />
 
-    <div v-if="activeStep === 1" class="step-card" v-loading="checkingEnv">
-      <div class="section-heading">
-        <div>
-          <h3>检测目标环境</h3>
-          <p class="desc">检查 {{ targetLabel }} 的系统资源、Docker、Compose 与端口占用。</p>
-        </div>
-        <el-button :loading="checkingEnv" :disabled="busy" @click="checkEnvironment"> 重新检测 </el-button>
-      </div>
-      <el-alert v-if="envError" :title="envError" type="error" :closable="false" show-icon />
-      <template v-if="envData">
-        <div class="env-metrics">
-          <div class="metric-card">
-            <span>操作系统 / 架构</span>
-            <strong>{{ envData.os_release }} / {{ envData.arch }}</strong>
-          </div>
-          <div class="metric-card">
-            <span>CPU 核心</span>
-            <strong>{{ envData.cpu_cores }} 核</strong>
-          </div>
-          <div class="metric-card">
-            <span>物理内存</span>
-            <strong>{{ envData.total_memory_mb }} MB</strong>
-          </div>
-          <div class="metric-card">
-            <span>可用磁盘</span>
-            <strong>{{ envData.disk_available_gb }} GB</strong>
-          </div>
-        </div>
-        <div class="status-row">
-          <el-tag :type="envData.docker_running ? 'success' : 'danger'">
-            {{ envData.docker_running ? 'Docker 正常运行' : 'Docker 未就绪' }}
-          </el-tag>
-          <el-tag :type="envData.compose_installed ? 'success' : 'danger'">
-            {{ envData.compose_installed ? 'Compose 已安装' : 'Compose 未安装' }}
-          </el-tag>
-        </div>
-        <ul v-if="envData.issues?.length" class="issue-list">
-          <li v-for="issue in envData.issues" :key="issue">
-            {{ safeText(issue) }}
-          </li>
-        </ul>
-        <el-collapse v-if="!envData.docker_running" class="optional-panel">
-          <el-collapse-item title="安装离线 Docker 引擎" name="docker">
-            <p class="field-hint">
-              请填写{{ isRemote ? '目标主机' : '本机' }}上的离线介质目录，目录中需包含 Docker 安装包。
-            </p>
-            <div class="input-row">
-              <el-input v-model="config.mediaDir" placeholder="离线介质目录" :disabled="busy" />
-              <el-button
-                :loading="installingDocker"
-                :disabled="!config.mediaDir || busy"
-                @click="installDocker"
-              >
-                安装并重新检测
-              </el-button>
-            </div>
-          </el-collapse-item>
-        </el-collapse>
-        <el-table :data="envData.ports || []" size="small" empty-text="暂无需检查的端口">
-          <el-table-column prop="port" label="端口" width="90" />
-          <el-table-column prop="protocol" label="协议" width="80" />
-          <el-table-column prop="service" label="服务" min-width="170" />
-          <el-table-column label="状态" width="110">
-            <template #default="{ row }">
-              <el-tag :type="row.available ? 'success' : 'warning'" size="small">
-                {{ row.available ? '空闲' : '占用中' }}
-              </el-tag>
-            </template>
-          </el-table-column>
-        </el-table>
-      </template>
-      <div class="step-footer">
-        <el-button :disabled="busy" @click="previousStep"> 上一步 </el-button>
-        <el-button type="primary" :disabled="!environmentReady || busy" @click="nextStep">
-          下一步：选择制品
-          <el-icon class="el-icon--right"><ArrowRight /></el-icon>
-        </el-button>
-      </div>
-    </div>
+    <EnvironmentStep
+      v-if="activeStep === 1"
+      :target-label="targetLabel"
+      :checking-env="checkingEnv"
+      :busy="busy"
+      :env-error="envError"
+      :env-data="envData"
+      :is-remote="isRemote"
+      :media-dir="config.mediaDir"
+      :installing-docker="installingDocker"
+      :environment-ready="environmentReady"
+      @recheck="checkEnvironment"
+      @install-docker="installDocker"
+      @update:media-dir="config.mediaDir = $event"
+      @previous="previousStep"
+      @next="nextStep"
+    />
 
     <div v-show="activeStep === 2 || activeStep === 3" class="step-card">
       <h3>{{ activeStep === 2 ? '选择部署制品' : '解压并校验制品' }}</h3>
@@ -424,8 +322,10 @@
 <script setup>
 import { computed, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
-import { ArrowRight, FolderOpened, Loading } from '@element-plus/icons-vue';
+import { ArrowRight, Loading } from '@element-plus/icons-vue';
 import DeploymentStepper from '../components/DeploymentStepper.vue';
+import DeployTargetStep from '../components/DeployTargetStep.vue';
+import EnvironmentStep from '../components/EnvironmentStep.vue';
 import ConfigDiffDialog from '../components/ConfigDiffDialog.vue';
 import WizardArtifactPicker from '../../artifacts/components/WizardArtifactPicker.vue';
 import { useDeploymentWizard } from '../composables/useDeploymentWizard.js';
@@ -553,52 +453,6 @@ h3 {
   line-height: 1.6;
   margin-bottom: 22px;
 }
-.project-empty {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
-  padding: 32px 20px;
-  border: 1px dashed var(--border-color);
-  border-radius: var(--radius-md);
-  text-align: center;
-  color: var(--text-muted);
-  background: var(--panel-subtle);
-}
-
-.project-empty .empty-title {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text-main);
-}
-
-.project-empty .empty-hint {
-  max-width: 520px;
-  font-size: 12px;
-  line-height: 1.6;
-}
-
-.path-text {
-  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
-  font-size: 12px;
-  color: var(--text-main);
-  background: var(--surface-muted);
-  padding: 2px 8px;
-  border-radius: var(--radius-xs);
-  border: 1px solid var(--border-subtle);
-  overflow-wrap: anywhere;
-}
-
-.host-form {
-  margin-top: 24px;
-  max-width: 850px;
-}
-
-.project-select {
-  width: 100%;
-  max-width: 360px;
-}
-
 .input-row,
 .status-row,
 .section-heading {
@@ -642,38 +496,6 @@ h3 {
   line-height: 1.65;
   margin-top: 6px;
   overflow-wrap: anywhere;
-}
-.env-metrics {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 14px;
-  margin: 20px 0 24px;
-}
-.metric-card {
-  padding: 16px 18px;
-  background: var(--panel-subtle);
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-sm);
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  transition: border-color 0.18s ease, box-shadow 0.18s ease;
-}
-.metric-card:hover {
-  border-color: var(--brand-border);
-  box-shadow: var(--shadow-card);
-}
-.metric-card span {
-  color: var(--text-muted);
-  font-size: 11.5px;
-  font-weight: 500;
-}
-.metric-card strong {
-  font-size: 15px;
-  font-weight: 650;
-  color: var(--text-main);
-  letter-spacing: -0.01em;
-  word-break: break-word;
 }
 .status-row {
   flex-wrap: wrap;
@@ -796,11 +618,6 @@ code {
   font-size: 11.5px;
   line-height: 1.65;
   box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.4);
-}
-@media (max-width: 1100px) {
-  .env-metrics {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
 }
 @media (max-width: 760px) {
   .step-card {
