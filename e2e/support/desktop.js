@@ -9,6 +9,7 @@ export async function useDesktopBackend(
     credentials = [],
     artifactSources = [],
     artifactTokens = [],
+    artifactReleases = [],
     dockerImages = [],
     offlineDir = '',
     offlinePackages = []
@@ -19,6 +20,7 @@ export async function useDesktopBackend(
     initialCredentials,
     initialSources,
     initialTokens,
+    initialReleases,
     initialImages,
     initialOfflineDir,
     initialPackages
@@ -28,6 +30,7 @@ export async function useDesktopBackend(
       credentials: structuredClone(initialCredentials),
       sources: structuredClone(initialSources),
       tokens: structuredClone(initialTokens),
+      releases: structuredClone(initialReleases),
       images: structuredClone(initialImages),
       offlineDir: initialOfflineDir,
       packages: structuredClone(initialPackages),
@@ -124,6 +127,14 @@ export async function useDesktopBackend(
             return null;
           case 'list_registry_sources':
             return [];
+          case 'list_cached_artifact_releases':
+            return { page: 1, hasMore: false, items: [] };
+          case 'list_artifact_releases':
+            return {
+              page: args.page || 1,
+              hasMore: false,
+              items: state.releases.map((item) => ({ ...item }))
+            };
           case 'get_image_library_settings':
             return { offlineDir: state.offlineDir };
           case 'list_local_docker_images':
@@ -147,6 +158,7 @@ export async function useDesktopBackend(
     initialCredentials: credentials,
     initialSources: artifactSources,
     initialTokens: artifactTokens,
+    initialReleases: artifactReleases,
     initialImages: dockerImages,
     initialOfflineDir: offlineDir,
     initialPackages: offlinePackages

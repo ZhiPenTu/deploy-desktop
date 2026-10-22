@@ -28,222 +28,42 @@
       </div>
     </div>
 
-    <template v-if="!activeSource">
-      <div v-if="!loading && !sources.length" class="empty-panel card-surface">
-        <span class="empty-icon"><el-icon><Box /></el-icon></span>
-        <h3>还没有可用的制品源</h3>
-        <p>在设置的“制品设置”中添加云效流水线或直链下载来源后，即可在这里查看版本并下载交付包。</p>
-        <div class="empty-actions">
-          <el-button type="primary" @click="goSourceSettings">前往设置</el-button>
-          <el-button :loading="loading" @click="loadSources">
-            <el-icon><Refresh /></el-icon>
-            <span>刷新</span>
-          </el-button>
-        </div>
-        <span class="empty-hint">令牌仅保存在本机，供当前用户读取</span>
-      </div>
-
-      <div v-else class="card-surface source-card">
-        <div class="card-title-bar">
-          <div>
-            <h3>制品源</h3>
-            <p class="card-subtitle">共 {{ sources.length }} 个来源，点击名称或“查看制品”进入版本列表</p>
-          </div>
-          <span class="hint">令牌仅保存在本机，供当前用户读取</span>
-        </div>
-        <el-table :data="sources" size="small" class="source-table">
-          <el-table-column label="名称" min-width="160">
-            <template #default="{ row }">
-              <div class="name-cell">
-                <el-button link class="source-name" @click="openSource(row)">
-                  {{ row.name }}
-                </el-button>
-                <el-tag size="small" effect="plain">
-                  {{ row.type === 'url' ? '直接下载' : '云效流水线' }}
-                </el-tag>
-              </div>
-            </template>
-          </el-table-column>
-          <el-table-column label="连接" min-width="130">
-            <template #default="{ row }">
-              <div v-if="row.type !== 'url'" class="stacked-cell">
-                <span>流水线 #{{ row.pipelineId }}</span>
-                <span class="subtle">组织 {{ row.orgId }}</span>
-              </div>
-              <span v-else class="subtle">直接下载地址</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="制品名" min-width="100">
-            <template #default="{ row }">
-              <code>{{ row.artifactName }}</code>
-            </template>
-          </el-table-column>
-          <el-table-column label="本地版本" min-width="140">
-            <template #default="{ row }">
-              <span :class="{ muted: !row.lastVersion }">{{ row.lastVersion || '尚未下载' }}</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="操作" width="105">
-            <template #default="{ row }">
-              <el-button link type="primary" @click="openSource(row)">查看制品</el-button>
-            </template>
-          </el-table-column>
-        </el-table>
-      </div>
-
-    </template>
+    <ArtifactSourceList
+      v-if="!activeSource"
+      :sources="sources"
+      :loading="loading"
+      @open-source="openSource"
+      @refresh="loadSources"
+      @go-settings="goSourceSettings"
+    />
 
     <template v-else>
-      <div class="source-overview card-surface">
-        <div class="overview-main">
-          <div class="overview-title-line">
-            <h3>{{ activeSource.name }}</h3>
-            <el-tag size="small" effect="plain">
-              {{ activeSource.type === 'url' ? '直接下载' : '云效流水线' }}
-            </el-tag>
-          </div>
-          <div class="overview-meta">
-            <span v-if="activeSource.type === 'url'">来源：直接下载地址</span>
-            <span v-else>来源：云效流水线 #{{ activeSource.pipelineId }}</span>
-            <span>制品名：<code>{{ activeSource.artifactName }}</code></span>
-            <span v-if="activeSource.lastVersion">本地版本：{{ activeSource.lastVersion }}</span>
-          </div>
-        </div>
-        <div class="overview-actions">
-          <el-select
-            :model-value="activeSourceId"
-            aria-label="选择制品源"
-            class="source-switcher"
-            @change="switchSource"
-          >
-            <el-option v-for="source in sources" :key="source.id" :label="source.name" :value="source.id" />
-          </el-select>
-          <el-button
-            v-if="activeSource.lastBundleDir"
-            type="warning"
-            plain
-            :loading="removingId === activeSource.id"
-            @click="removeLocal(activeSource)"
-          >
-            清理本地缓存
-          </el-button>
-        </div>
-        <div class="overview-stats">
-          <div class="overview-stat">
-            <span class="stat-label">最新版本</span>
-            <strong>{{ latestVersionText }}</strong>
-          </div>
-          <div class="overview-stat">
-            <span class="stat-label">最近构建</span>
-            <strong>{{ latestBuiltText }}</strong>
-          </div>
-          <div class="overview-stat">
-            <span class="stat-label">已加载制品</span>
-            <strong>{{ loadedVersionText }}</strong>
-          </div>
-        </div>
-      </div>
+      <ArtifactSourceOverview
+        :source="activeSource"
+        :sources="sources"
+        :active-source-id="activeSourceId"
+        :removing="removingId === activeSource.id"
+        :releases="releases"
+        :releases-loading="releasesLoading"
+        :has-more="hasMore"
+        @switch-source="switchSource"
+        @remove-local="removeLocal"
+      />
 
-      <div class="card-surface versions-card">
-        <div class="card-title-bar">
-          <div>
-            <h3>制品列表</h3>
-            <p class="card-subtitle">按构建时间倒序排列，最新版本置顶；打开详情可查看该版本的交付包链路</p>
-          </div>
-          <el-button v-if="releases.length" link :loading="releasesLoading" @click="loadReleases({ reset: true })">
-            <el-icon><Refresh /></el-icon>
-            <span>刷新列表</span>
-          </el-button>
-        </div>
-
-        <el-alert
-          v-if="releasesError"
-          type="warning"
-          :closable="false"
-          show-icon
-          class="versions-alert"
-        >
-          <template #title>{{ releasesError }}</template>
-          <div class="alert-actions">
-            <span v-if="releases.length">已显示本机缓存的版本，连接恢复后刷新即可获取最新构建。</span>
-            <span v-else>请检查网络或制品源配置后重试。</span>
-            <el-button size="small" @click="loadReleases({ reset: true })">重试</el-button>
-            <el-button size="small" @click="goSourceSettings">前往设置</el-button>
-          </div>
-        </el-alert>
-
-        <el-table
-          v-if="releases.length"
-          v-loading="releasesLoading && !releases.length"
-          :data="releases"
-          :row-key="releaseKey"
-          size="small"
-          class="versions-table"
-        >
-          <el-table-column label="版本" min-width="150">
-            <template #default="{ row }">
-              <div class="version-cell">
-                <div class="version-title">
-                  <span class="version-number">{{ versionText(row) }}</span>
-                  <el-tag v-if="isLatest(row)" size="small" type="primary" effect="plain">最新</el-tag>
-                </div>
-              </div>
-            </template>
-          </el-table-column>
-          <el-table-column label="构建信息" min-width="180">
-            <template #default="{ row }">
-              <div v-if="row.runId" class="stacked-cell">
-                <div class="commit-line">
-                  <code>{{ row.commitShort || '-' }}</code>
-                  <span class="commit-title">{{ row.commitTitle || '无提交说明' }}</span>
-                </div>
-                <span class="subtle">
-                  运行 #{{ row.runId }}<template v-if="row.branch"> · 分支 {{ row.branch }}</template> ·
-                  {{ artifactSizeText(row.sizeBytes) }}
-                </span>
-              </div>
-              <div v-else-if="row.commitShort || row.commit" class="stacked-cell">
-                <div class="commit-line">
-                  <code>{{ row.commitShort || row.commit }}</code>
-                </div>
-                <span class="subtle">
-                  本机缓存版本<template v-if="row.branch"> · 分支 {{ row.branch }}</template> ·
-                  {{ artifactSizeText(row.sizeBytes) }}
-                </span>
-              </div>
-              <span v-else class="subtle">{{ activeSource && activeSource.type === 'url' ? '直接下载源，无构建信息' : '本机缓存版本' }}</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="构建时间" width="145">
-            <template #default="{ row }">{{ artifactTimeText(row.builtAt) }}</template>
-          </el-table-column>
-          <el-table-column label="操作" width="200">
-            <template #default="{ row }">
-              <el-button link @click="showReleaseDetail(row)">详情</el-button>
-              <el-button v-if="!row.localDir && row.downloadUrl" link type="primary" @click="openRelease(row)">下载</el-button>
-              <el-button v-if="row.localDir && row.downloadUrl" link @click="openRelease(row)">重新下载</el-button>
-              <el-button v-if="row.runUrl" link @click="openRunUrl(row)">运行详情</el-button>
-            </template>
-          </el-table-column>
-        </el-table>
-
-        <div v-else-if="releasesLoading" class="versions-empty">
-          <span class="empty-icon compact"><el-icon><Box /></el-icon></span>
-          <h4>正在读取版本</h4>
-          <p>正在获取该制品源的最新构建与历史记录。</p>
-        </div>
-
-        <div v-else-if="!releasesError" class="versions-empty">
-          <span class="empty-icon compact"><el-icon><Box /></el-icon></span>
-          <h4>当前未找到可用制品</h4>
-          <p>{{ hasMore ? '可以继续加载更早的构建记录。' : '请确认流水线已成功构建，并上传了对应制品。' }}</p>
-        </div>
-
-        <div v-if="(releases.length || hasMore) && !releasesError" class="list-footer">
-          <el-button v-if="hasMore" :loading="loadingMore" @click="loadMore">加载更早版本</el-button>
-          <span v-else class="subtle">已显示全部可加载版本</span>
-        </div>
-      </div>
+      <ReleaseListPanel
+        :releases="releases"
+        :loading="releasesLoading"
+        :error="releasesError"
+        :has-more="hasMore"
+        :loading-more="loadingMore"
+        :source-type="activeSource.type"
+        @refresh="loadReleases({ reset: true })"
+        @go-settings="goSourceSettings"
+        @load-more="loadMore"
+        @show-detail="showReleaseDetail"
+        @download="openRelease"
+        @open-run="openRunUrl"
+      />
     </template>
 
     <ReleaseDownloadDialog
@@ -278,7 +98,10 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { ArrowLeft, Box, Refresh } from '@element-plus/icons-vue';
+import { ArrowLeft, Refresh } from '@element-plus/icons-vue';
+import ArtifactSourceList from '../components/ArtifactSourceList.vue';
+import ArtifactSourceOverview from '../components/ArtifactSourceOverview.vue';
+import ReleaseListPanel from '../components/ReleaseListPanel.vue';
 import ReleaseDetailDialog from '../components/ReleaseDetailDialog.vue';
 import ReleaseDownloadDialog from '../components/ReleaseDownloadDialog.vue';
 import {
@@ -295,11 +118,8 @@ import { reloadProjectState } from '../../connections/state.js';
 import { errorText } from '../../../shared/errors.js';
 import {
   artifactSizeText,
-  artifactTimeText,
   isBundleDirInUse,
-  localStatusText,
   releaseKey,
-  shortPath,
   versionText
 } from '../domain/releases.js';
 
@@ -342,20 +162,6 @@ let detailRequestId = 0;
 const activeSource = computed(
   () => sources.value.find((item) => item.id === activeSourceId.value) || null
 );
-const latestRelease = computed(() => releases.value[0] || null);
-const latestVersionText = computed(() => {
-  if (releasesLoading.value && !latestRelease.value) return '读取中';
-  return latestRelease.value ? versionText(latestRelease.value) : '-';
-});
-const latestBuiltText = computed(() => {
-  if (releasesLoading.value && !latestRelease.value) return '读取中';
-  return latestRelease.value ? artifactTimeText(latestRelease.value.builtAt) : '-';
-});
-const loadedVersionText = computed(() => {
-  if (releasesLoading.value && !releases.value.length) return '读取中';
-  return `${releases.value.length}${hasMore.value ? '+' : ''}`;
-});
-
 const remoteTarget = computed(() => {
   const connection = props.connection || {};
   if (connection.mode !== 'remote' || !connection.remoteHost) return null;
@@ -366,10 +172,6 @@ const remoteTarget = computed(() => {
     keyPath: connection.remoteKey || null
   };
 });
-
-function isLatest(item) {
-  return Boolean(item) && latestRelease.value === item;
-}
 
 function isInUse(row) {
   return isBundleDirInUse(props.connection.bundleDir, row.lastBundleDir);
@@ -691,298 +493,5 @@ onMounted(loadSources);
   margin-bottom: 8px;
   padding: 0;
   color: var(--text-secondary);
-}
-
-.source-card,
-.versions-card {
-  padding: 22px 24px;
-}
-
-.source-table,
-.versions-table {
-  margin-top: 4px;
-}
-
-.source-table :deep(.el-button + .el-button),
-.versions-table :deep(.el-button + .el-button) {
-  margin-left: 8px;
-}
-
-.source-table :deep(.cell),
-.versions-table :deep(.cell) {
-  white-space: nowrap;
-}
-
-.name-cell,
-.version-title,
-.commit-line {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-.version-title {
-  flex-wrap: wrap;
-}
-
-.source-name {
-  min-width: 0;
-  max-width: 230px;
-  justify-content: flex-start;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-weight: 600;
-}
-
-.commit-title {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
-}
-
-.stacked-cell,
-.version-cell {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-width: 0;
-}
-
-.subtle {
-  color: var(--text-muted);
-  font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.commit-title {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text-secondary);
-}
-
-.version-number {
-  color: var(--text-main);
-  font-size: 14px;
-  font-weight: 650;
-}
-
-.source-overview {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 18px 24px;
-  padding: 20px;
-}
-
-.overview-title-line,
-.overview-meta,
-.overview-actions,
-.overview-stats,
-.alert-actions,
-.list-footer {
-  display: flex;
-  align-items: center;
-}
-
-.overview-title-line {
-  gap: 10px;
-}
-
-.overview-title-line h3 {
-  font-size: 17px;
-  font-weight: 650;
-}
-
-.overview-meta {
-  flex-wrap: wrap;
-  gap: 6px 18px;
-  margin-top: 9px;
-  color: var(--text-muted);
-  font-size: 12px;
-}
-
-.overview-actions {
-  gap: 8px;
-  align-self: start;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-}
-
-.source-switcher {
-  width: 200px;
-}
-
-.overview-stats {
-  grid-column: 1 / -1;
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 14px;
-  padding-top: 18px;
-  border-top: 1px solid var(--border-subtle);
-}
-
-.overview-stat {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 12px 16px;
-  background: var(--panel-subtle);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  min-width: 0;
-}
-
-.stat-label {
-  color: var(--text-muted);
-  font-size: 11px;
-}
-
-.overview-stat strong {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text-main);
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.card-title-bar {
-  align-items: flex-start;
-}
-
-.card-subtitle {
-  margin-top: 5px;
-  color: var(--text-muted);
-  font-size: 12px;
-}
-
-.versions-alert {
-  margin-bottom: 14px;
-}
-
-.alert-actions {
-  gap: 8px;
-  flex-wrap: wrap;
-  margin-top: 6px;
-}
-
-.versions-empty {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  padding: 36px 24px;
-  text-align: center;
-}
-
-.versions-empty h4 {
-  margin-top: 12px;
-  color: var(--text-main);
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.versions-empty p {
-  max-width: 420px;
-  margin: 7px 0 14px;
-  color: var(--text-muted);
-  font-size: 12px;
-  line-height: 1.6;
-}
-
-.list-footer {
-  justify-content: center;
-  min-height: 46px;
-  margin-top: 10px;
-  padding-top: 12px;
-  border-top: 1px solid var(--border-color);
-  color: var(--text-muted);
-  font-size: 12px;
-}
-
-.muted {
-  color: var(--text-muted);
-  word-break: break-all;
-}
-
-.empty-panel {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  text-align: center;
-  padding: 56px 32px 48px;
-  background:
-    radial-gradient(420px 180px at 50% 0%, rgba(51, 92, 255, 0.06), transparent 70%),
-    var(--panel-bg);
-}
-
-.empty-icon {
-  width: 52px;
-  height: 52px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 14px;
-  background: var(--primary-soft);
-  color: var(--primary-color);
-  font-size: 24px;
-  margin-bottom: 18px;
-}
-
-.empty-icon.compact {
-  width: 42px;
-  height: 42px;
-  margin-bottom: 0;
-  border-radius: 12px;
-  font-size: 20px;
-}
-
-.empty-panel h3 {
-  font-size: 16px;
-  font-weight: 600;
-  color: var(--text-main);
-}
-
-.empty-panel p {
-  max-width: 440px;
-  margin-top: 8px;
-  font-size: 12.5px;
-  line-height: 1.65;
-  color: var(--text-muted);
-}
-
-.empty-actions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-top: 22px;
-}
-
-.empty-hint {
-  margin-top: 16px;
-  font-size: 11px;
-  color: var(--text-faint);
-}
-
-@media (max-width: 980px) {
-  .source-overview {
-    grid-template-columns: 1fr;
-  }
-
-  .overview-actions {
-    align-self: stretch;
-  }
-
-  .overview-stats {
-    flex-wrap: wrap;
-  }
-
-  .overview-stat {
-    flex-basis: 180px;
-  }
 }
 </style>
