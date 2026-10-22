@@ -11,6 +11,60 @@
       <el-tab-pane label="制品设置" name="artifacts">
         <div class="card-surface settings-card">
           <div class="card-title-bar">
+            <h3>访问令牌</h3>
+            <span class="hint">令牌保存在本机应用数据目录，仅当前用户可读</span>
+          </div>
+
+          <el-table v-if="tokens.length" :data="tokens" size="small" class="source-table">
+            <el-table-column label="名称" min-width="180">
+              <template #default="{ row }">
+                <div class="name-cell">
+                  <span>{{ row.name }}</span>
+                  <el-tag v-if="!row.hasToken" size="small" type="warning" effect="plain">
+                    内容缺失
+                  </el-tag>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="关联制品源" width="120">
+              <template #default="{ row }">
+                <span :class="row.inUse ? '' : 'muted-text'">
+                  {{ row.inUse ? `${row.inUse} 个` : '未关联' }}
+                </span>
+              </template>
+            </el-table-column>
+            <el-table-column label="更新于" width="150">
+              <template #default="{ row }">{{ formatTime(row.updatedAt) }}</template>
+            </el-table-column>
+            <el-table-column label="操作" width="140">
+              <template #default="{ row }">
+                <el-button link type="primary" @click="openTokenEdit(row)">编辑</el-button>
+                <el-button link type="danger" :disabled="row.inUse > 0" @click="removeToken(row)">
+                  删除
+                </el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+
+          <div v-else class="empty-state">
+            <span class="empty-title">还没有保存的访问令牌</span>
+            <span class="empty-hint">保存云效个人访问令牌后，多个制品源可以直接选用，不必重复填写。</span>
+          </div>
+
+          <div class="card-actions">
+            <el-button type="primary" @click="openTokenCreate">
+              <el-icon><Plus /></el-icon>
+              <span>新建令牌</span>
+            </el-button>
+            <el-button :loading="tokenLoading" @click="loadTokens">
+              <el-icon><Refresh /></el-icon>
+              <span>刷新</span>
+            </el-button>
+          </div>
+        </div>
+
+        <div class="card-surface settings-card">
+          <div class="card-title-bar">
             <h3>云效制品源</h3>
             <span class="hint">令牌保存在本机应用数据目录，仅当前用户可读</span>
           </div>
@@ -34,9 +88,13 @@
               </template>
             </el-table-column>
             <el-table-column prop="artifactName" label="制品名" min-width="130" />
-            <el-table-column label="访问令牌" width="110">
+            <el-table-column label="访问令牌" width="140">
               <template #default="{ row }">
-                <el-tag :type="row.hasToken ? 'success' : 'warning'" size="small" effect="plain">
+                <span v-if="row.type === 'url'" class="muted-text">不适用</span>
+                <span v-else-if="tokenName(row.tokenId)" class="muted-text">
+                  {{ tokenName(row.tokenId) }}
+                </span>
+                <el-tag v-else :type="row.hasToken ? 'success' : 'warning'" size="small" effect="plain">
                   {{ row.hasToken ? '已保存' : '未配置' }}
                 </el-tag>
               </template>
@@ -51,7 +109,7 @@
 
           <div v-else class="empty-state">
             <span class="empty-title">还没有配置云效制品源</span>
-            <span class="empty-hint">填写云效组织 ID、流水线 ID 与个人访问令牌后，即可在制品中心拉取离线交付包。</span>
+            <span class="empty-hint">填写云效组织 ID、流水线 ID 并选择访问令牌后，即可在制品中心拉取离线交付包。</span>
           </div>
 
           <div class="card-actions">
@@ -153,7 +211,13 @@
     <ArtifactSourceEditor
       v-model="editorVisible"
       :source="editing"
-      @saved="loadSources"
+      @saved="reloadSources"
+    />
+
+    <ArtifactTokenEditor
+      v-model="tokenEditorVisible"
+      :token="editingToken"
+      @saved="loadTokens"
     />
   </div>
 </template>
@@ -164,11 +228,19 @@ import { ElMessage, ElMessageBox } from 'element-plus';
 import { FolderOpened, Plus, Refresh } from '@element-plus/icons-vue';
 import { selectLocalPath as open } from '../../../api/tauri.js';
 import ArtifactSourceEditor from '../../artifacts/components/ArtifactSourceEditor.vue';
+import ArtifactTokenEditor from '../../artifacts/components/ArtifactTokenEditor.vue';
 import ManifestPullPanel from '../../registry/components/ManifestPullPanel.vue';
 import UpdateChecker from '../components/UpdateChecker.vue';
 import RuntimeLogs from '../components/RuntimeLogs.vue';
 import { projectState } from '../../../config/project.js';
-import { deleteArtifactSource, listArtifactSources, getImageLibrarySettings, saveImageLibrarySettings } from '../../../api/tauri.js';
+import {
+  deleteArtifactSource,
+  deleteArtifactToken,
+  listArtifactSources,
+  listArtifactTokens,
+  getImageLibrarySettings,
+  saveImageLibrarySettings
+} from '../../../api/tauri.js';
 import { errorText } from '../../../shared/errors.js';
 
 const props = defineProps({
@@ -190,6 +262,10 @@ const sources = ref([]);
 const loading = ref(false);
 const editorVisible = ref(false);
 const editing = ref(null);
+const tokens = ref([]);
+const tokenLoading = ref(false);
+const tokenEditorVisible = ref(false);
+const editingToken = ref(null);
 const offlineDir = ref('');
 const defaultOfflineDir = ref('');
 const savingOfflineDir = ref(false);
@@ -212,6 +288,67 @@ async function loadSources() {
     ElMessage.error(errorText(error));
   } finally {
     loading.value = false;
+  }
+}
+
+async function loadTokens() {
+  tokenLoading.value = true;
+  try {
+    tokens.value = await listArtifactTokens();
+  } catch (error) {
+    ElMessage.error(errorText(error));
+  } finally {
+    tokenLoading.value = false;
+  }
+}
+
+function reloadSources() {
+  loadSources();
+  loadTokens();
+}
+
+function tokenName(tokenId) {
+  if (!tokenId) return '';
+  const match = tokens.value.find((item) => item.id === tokenId);
+  return match ? match.name : '';
+}
+
+function formatTime(value) {
+  if (!value) return '未记录';
+  return new Intl.DateTimeFormat('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit'
+  }).format(new Date(value));
+}
+
+function openTokenCreate() {
+  editingToken.value = null;
+  tokenEditorVisible.value = true;
+}
+
+function openTokenEdit(row) {
+  editingToken.value = row;
+  tokenEditorVisible.value = true;
+}
+
+async function removeToken(row) {
+  try {
+    await ElMessageBox.confirm(
+      `确认删除访问令牌「${row.name}」？\n\n此操作无法撤销。`,
+      '删除访问令牌',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
+    );
+  } catch {
+    return;
+  }
+  try {
+    await deleteArtifactToken(row.id);
+    ElMessage.success('访问令牌已删除');
+    await reloadSources();
+  } catch (error) {
+    ElMessage.error(errorText(error));
   }
 }
 
@@ -280,7 +417,7 @@ async function saveOfflineDir() {
 async function remove(row) {
   try {
     await ElMessageBox.confirm(
-      `确认删除制品源「${row.name}」？\n\n将同时删除本机保存的访问令牌，已下载的本地交付包不会被删除。`,
+      `确认删除制品源「${row.name}」？\n\n已下载的本地交付包不会被删除，访问令牌仍保留在令牌列表中。`,
       '删除制品源',
       { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
     );
@@ -298,6 +435,7 @@ async function remove(row) {
 
 onMounted(() => {
   loadSources();
+  loadTokens();
   loadImageSettings();
 });
 </script>

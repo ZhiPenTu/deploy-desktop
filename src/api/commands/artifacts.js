@@ -13,6 +13,19 @@ export async function deleteArtifactSource(id) {
   return await invokeDesktop('delete_artifact_source', { id });
 }
 
+export async function listArtifactTokens() {
+  if (!isDesktopApp()) return [];
+  return await invokeDesktop('list_artifact_tokens');
+}
+
+export async function saveArtifactToken(token) {
+  return await invokeDesktop('save_artifact_token', { token });
+}
+
+export async function deleteArtifactToken(id) {
+  return await invokeDesktop('delete_artifact_token', { id });
+}
+
 export async function fetchArtifactRelease(id, runId = null) {
   return await invokeDesktop('fetch_artifact_release', { id, runId });
 }

@@ -26,6 +26,7 @@ pub struct ArtifactSource {
     pub artifact_name: String,
     pub version: String,
     pub download_url: String,
+    pub token_id: String,
     pub has_token: bool,
     pub last_version: String,
     pub last_bundle_dir: String,
@@ -43,8 +44,42 @@ pub struct ArtifactSourceInput {
     pub artifact_name: String,
     pub version: String,
     pub download_url: String,
+    pub token_id: String,
+}
+
+/// 可复用的云效个人访问令牌，只保存名称与时间，令牌内容单独存放。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ArtifactToken {
+    pub id: String,
+    pub name: String,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ArtifactTokenInput {
+    pub id: String,
+    pub name: String,
     pub token: Option<String>,
-    pub clear_token: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactTokenView {
+    pub id: String,
+    pub name: String,
+    pub created_at: u64,
+    pub updated_at: u64,
+    pub has_token: bool,
+    pub in_use: usize,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct TokenLibraryFile {
+    tokens: Vec<ArtifactToken>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -153,6 +188,36 @@ fn secrets_file(dir: &Path) -> PathBuf {
     dir.join("artifact-tokens.json")
 }
 
+fn token_library_path(dir: &Path) -> PathBuf {
+    dir.join("artifact-token-library.json")
+}
+
+fn read_token_library(dir: &Path) -> Result<Vec<ArtifactToken>, String> {
+    let path = token_library_path(dir);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let content =
+        fs::read_to_string(&path).map_err(|e| format!("读取访问令牌列表失败：{e}"))?;
+    let file: TokenLibraryFile =
+        serde_json::from_str(&content).map_err(|e| format!("解析访问令牌列表失败：{e}"))?;
+    Ok(file.tokens)
+}
+
+fn write_token_library(dir: &Path, tokens: &[ArtifactToken]) -> Result<(), String> {
+    let path = token_library_path(dir);
+    let content = serde_json::to_string_pretty(&TokenLibraryFile {
+        tokens: tokens.to_vec(),
+    })
+    .map_err(|e| format!("序列化访问令牌列表失败：{e}"))?;
+    fs::write(&path, content).map_err(|e| format!("保存访问令牌列表失败：{e}"))
+}
+
+/// 令牌内容在凭据文件中使用独立前缀，与按制品源保存的历史记录区分开。
+fn token_secret_key(id: &str) -> String {
+    format!("token:{id}")
+}
+
 fn read_secrets(dir: &Path) -> std::collections::BTreeMap<String, String> {
     let path = secrets_file(dir);
     fs::read_to_string(path)
@@ -255,9 +320,251 @@ fn secret_delete(dir: &Path, id: &str) -> Result<(), String> {
     write_secrets(dir, &secrets)
 }
 
+fn stored_token(dir: &Path, token_id: &str) -> Result<Option<String>, String> {
+    Ok(secret_get(dir, &token_secret_key(token_id))?
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty()))
+}
+
+/// 制品源绑定令牌库时只读取该令牌；未绑定时沿用按制品源保存的历史令牌。
+fn source_token(dir: &Path, source: &ArtifactSource) -> Result<Option<String>, String> {
+    let token_id = source.token_id.trim();
+    if !token_id.is_empty() {
+        return stored_token(dir, token_id);
+    }
+    Ok(secret_get(dir, &source.id)?
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty()))
+}
+
+fn new_token_id(tokens: &[ArtifactToken]) -> String {
+    let mut stamp = now_millis();
+    loop {
+        let id = format!("tok-{stamp:x}");
+        if !tokens.iter().any(|token| token.id == id) {
+            return id;
+        }
+        stamp += 1;
+    }
+}
+
+fn unique_token_name(tokens: &[ArtifactToken], base: &str) -> String {
+    if !tokens.iter().any(|token| token.name == base) {
+        return base.to_string();
+    }
+    let mut index = 2;
+    loop {
+        let candidate = format!("{base} {index}");
+        if !tokens.iter().any(|token| token.name == candidate) {
+            return candidate;
+        }
+        index += 1;
+    }
+}
+
+/// 旧版本按制品源保存令牌。首次打开令牌列表时统一收进令牌库，
+/// 相同内容的令牌只保留一条，制品源改绑到该令牌。
+/// 设置页会同时读取令牌与制品源，迁移需要串行执行，避免重复写入。
+static LEGACY_TOKEN_MIGRATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn migrate_legacy_tokens(app: &AppHandle) -> Result<(), String> {
+    let _guard = LEGACY_TOKEN_MIGRATION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let dir = config_dir(app)?;
+    let mut sources = load_sources(app)?;
+    if sources.iter().all(|source| !source.token_id.trim().is_empty()) {
+        return Ok(());
+    }
+    let mut tokens = read_token_library(&dir)?;
+    let mut changed = false;
+
+    for source in sources.iter_mut() {
+        if !source.token_id.trim().is_empty() {
+            continue;
+        }
+        let value = match secret_get(&dir, &source.id)? {
+            Some(value) => value.trim().to_string(),
+            None => continue,
+        };
+        if value.is_empty() {
+            continue;
+        }
+
+        let mut matched = None;
+        for token in tokens.iter() {
+            if stored_token(&dir, &token.id)?.as_deref() == Some(value.as_str()) {
+                matched = Some(token.id.clone());
+                break;
+            }
+        }
+
+        let token_id = match matched {
+            Some(id) => id,
+            None => {
+                let base = if source.name.trim().is_empty() {
+                    "云效访问令牌".to_string()
+                } else {
+                    format!("{}的令牌", source.name.trim())
+                };
+                let now = now_millis() as u64;
+                let id = new_token_id(&tokens);
+                secret_set(&dir, &token_secret_key(&id), &value)?;
+                tokens.push(ArtifactToken {
+                    id: id.clone(),
+                    name: unique_token_name(&tokens, &base),
+                    created_at: now,
+                    updated_at: now,
+                });
+                id
+            }
+        };
+
+        source.token_id = token_id;
+        source.has_token = true;
+        secret_delete(&dir, &source.id)?;
+        changed = true;
+    }
+
+    if changed {
+        write_token_library(&dir, &tokens)?;
+        store_sources(app, &sources)?;
+    }
+    Ok(())
+}
+
+fn token_view(
+    dir: &Path,
+    token: &ArtifactToken,
+    sources: &[ArtifactSource],
+) -> Result<ArtifactTokenView, String> {
+    Ok(ArtifactTokenView {
+        id: token.id.clone(),
+        name: token.name.clone(),
+        created_at: token.created_at,
+        updated_at: token.updated_at,
+        has_token: stored_token(dir, &token.id)?.is_some(),
+        in_use: sources
+            .iter()
+            .filter(|source| source.token_id.trim() == token.id)
+            .count(),
+    })
+}
+
 #[tauri::command]
 pub fn list_artifact_sources(app: AppHandle) -> Result<Vec<ArtifactSource>, String> {
-    load_sources(&app)
+    let _ = migrate_legacy_tokens(&app);
+    let dir = config_dir(&app)?;
+    let mut sources = load_sources(&app)?;
+    for source in sources.iter_mut() {
+        source.has_token = source_token(&dir, source)?.is_some();
+    }
+    Ok(sources)
+}
+
+#[tauri::command]
+pub fn list_artifact_tokens(app: AppHandle) -> Result<Vec<ArtifactTokenView>, String> {
+    let _ = migrate_legacy_tokens(&app);
+    let dir = config_dir(&app)?;
+    let tokens = read_token_library(&dir)?;
+    let sources = load_sources(&app)?;
+    tokens
+        .iter()
+        .map(|token| token_view(&dir, token, &sources))
+        .collect()
+}
+
+#[tauri::command]
+pub fn save_artifact_token(
+    app: AppHandle,
+    token: ArtifactTokenInput,
+) -> Result<ArtifactTokenView, String> {
+    let dir = config_dir(&app)?;
+    let name = token.name.trim().to_string();
+    if name.is_empty() {
+        return Err("请填写令牌名称".to_string());
+    }
+
+    let mut tokens = read_token_library(&dir)?;
+    let requested = token.id.trim().to_string();
+    let existing = if requested.is_empty() {
+        None
+    } else {
+        match tokens.iter().position(|item| item.id == requested) {
+            Some(index) => Some(index),
+            None => return Err("该令牌已不存在，请重新选择".to_string()),
+        }
+    };
+    if tokens
+        .iter()
+        .enumerate()
+        .any(|(index, item)| Some(index) != existing && item.name == name)
+    {
+        return Err("已有同名令牌，请换一个名称".to_string());
+    }
+
+    let value = token
+        .token
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if existing.is_none() && value.is_none() {
+        return Err("请填写云效个人访问令牌".to_string());
+    }
+
+    let id = match existing {
+        Some(index) => tokens[index].id.clone(),
+        None => new_token_id(&tokens),
+    };
+    if let Some(value) = value {
+        secret_set(&dir, &token_secret_key(&id), value)?;
+    }
+
+    let now = now_millis() as u64;
+    let record = ArtifactToken {
+        created_at: existing.map(|index| tokens[index].created_at).unwrap_or(now),
+        id,
+        name,
+        updated_at: now,
+    };
+    match existing {
+        Some(index) => tokens[index] = record.clone(),
+        None => tokens.push(record.clone()),
+    }
+    write_token_library(&dir, &tokens)?;
+
+    let sources = load_sources(&app)?;
+    token_view(&dir, &record, &sources)
+}
+
+#[tauri::command]
+pub fn delete_artifact_token(app: AppHandle, id: String) -> Result<(), String> {
+    let dir = config_dir(&app)?;
+    let id = id.trim().to_string();
+    if id.is_empty() {
+        return Err("请选择要删除的令牌".to_string());
+    }
+
+    let sources = load_sources(&app)?;
+    let in_use = sources
+        .iter()
+        .filter(|source| source.token_id.trim() == id)
+        .count();
+    if in_use > 0 {
+        return Err(format!(
+            "该令牌仍被 {in_use} 个制品源使用，请先为这些制品源更换令牌"
+        ));
+    }
+
+    let mut tokens = read_token_library(&dir)?;
+    let before = tokens.len();
+    tokens.retain(|item| item.id != id);
+    if tokens.len() == before {
+        return Err("该令牌已不存在".to_string());
+    }
+    write_token_library(&dir, &tokens)?;
+    secret_delete(&dir, &token_secret_key(&id))?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -301,17 +608,23 @@ pub fn save_artifact_source(
         .map(|idx| sources[idx].last_bundle_dir.clone())
         .unwrap_or_default();
 
-    if source.clear_token {
+    let token_id = if kind == "yunxiaoFlow" {
+        source.token_id.trim().to_string()
+    } else {
+        String::new()
+    };
+    if !token_id.is_empty() {
+        let known = read_token_library(&dir)?
+            .iter()
+            .any(|token| token.id == token_id);
+        if !known {
+            return Err("所选访问令牌已不存在，请重新选择".to_string());
+        }
+        // 绑定令牌库后不再保留按制品源保存的旧令牌。
         secret_delete(&dir, &id)?;
-    } else if let Some(token) = source.token.as_ref().map(|v| v.trim()).filter(|v| !v.is_empty()) {
-        secret_set(&dir, &id, token)?;
     }
 
-    let has_token = secret_get(&dir, &id)?
-        .map(|value| !value.is_empty())
-        .unwrap_or(false);
-
-    let record = ArtifactSource {
+    let mut record = ArtifactSource {
         id: id.clone(),
         name,
         version: if kind == "url" { source.version.trim().to_string() } else { String::new() },
@@ -324,10 +637,12 @@ pub fn save_artifact_source(
             source.artifact_name.trim().to_string()
         },
         download_url: source.download_url.trim().to_string(),
-        has_token,
+        token_id,
+        has_token: false,
         last_version,
         last_bundle_dir,
     };
+    record.has_token = source_token(&dir, &record)?.is_some();
 
     match existing {
         Some(idx) => sources[idx] = record.clone(),
@@ -975,9 +1290,8 @@ fn load_artifact_release_page(
         });
     }
 
-    let token = secret_get(config_root, &source.id)?
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| "尚未配置云效个人访问令牌，请编辑制品源填写令牌".to_string())?;
+    let token = source_token(config_root, source)?
+        .ok_or_else(|| "尚未配置云效个人访问令牌，请在设置中选择令牌".to_string())?;
     load_flow_release_page(config_root, source, &token, page.max(1))
 }
 
@@ -1058,9 +1372,8 @@ fn fetch_artifact_release_blocking(
         return Ok(release);
     }
 
-    let token = secret_get(&config_root, &source.id)?
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| "尚未配置云效个人访问令牌，请编辑制品源填写令牌".to_string())?;
+    let token = source_token(&config_root, source)?
+        .ok_or_else(|| "尚未配置云效个人访问令牌，请在设置中选择令牌".to_string())?;
 
     if let Some(run_id) = run_id.filter(|value| *value > 0) {
         let detail_url = format!(
@@ -2018,6 +2331,48 @@ mod tests {
         assert_eq!(secret_get(&dir, &id).unwrap(), None);
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn token_library_round_trips_and_resolves_sources() {
+        let root = cache_root("token-library");
+        let token = ArtifactToken {
+            id: "tok-1".to_string(),
+            name: "云效个人令牌".to_string(),
+            created_at: 1,
+            updated_at: 2,
+        };
+        secret_set(&root, &token_secret_key(&token.id), "secret-1").unwrap();
+        write_token_library(&root, &[token.clone()]).unwrap();
+
+        let loaded = read_token_library(&root).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name, "云效个人令牌");
+        assert_eq!(loaded[0].updated_at, 2);
+
+        let mut source = cache_source();
+        assert_eq!(source_token(&root, &source).unwrap(), None);
+        source.token_id = "tok-1".to_string();
+        assert_eq!(
+            source_token(&root, &source).unwrap().as_deref(),
+            Some("secret-1")
+        );
+
+        secret_delete(&root, &token_secret_key("tok-1")).unwrap();
+        assert_eq!(source_token(&root, &source).unwrap(), None);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn duplicate_token_names_get_suffix() {
+        let tokens = vec![ArtifactToken {
+            id: "tok-1".to_string(),
+            name: "云效".to_string(),
+            ..Default::default()
+        }];
+        assert_eq!(unique_token_name(&tokens, "生产"), "生产");
+        assert_eq!(unique_token_name(&tokens, "云效"), "云效 2");
     }
 
     #[cfg(unix)]
