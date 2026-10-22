@@ -52,6 +52,7 @@ pub(crate) fn resolve_key_target(custom: Option<String>, host: &str) -> String {
 
 #[cfg(unix)]
 pub(crate) fn ensure_key_permissions(path: &str) -> Result<(), String> {
+    use std::fs;
     use std::os::unix::fs::PermissionsExt;
 
     if let Ok(meta) = fs::metadata(path) {

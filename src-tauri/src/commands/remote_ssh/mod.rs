@@ -4,7 +4,6 @@
 //! `env` 负责环境检查与部署执行，`docker` 与 `database` 分别封装远程 Docker 和
 //! OceanBase 操作。命令名、参数与返回结构保持不变。
 
-use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::process::Command;

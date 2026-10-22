@@ -10,6 +10,17 @@ export default defineConfig({
     __APP_VERSION__: JSON.stringify(pkg.version),
   },
   clearScreen: false,
+  build: {
+    chunkSizeWarningLimit: 1000,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          vue: ["vue"],
+          "element-plus": ["element-plus"],
+        },
+      },
+    },
+  },
   server: {
     port: 5173,
     strictPort: true,

@@ -9,6 +9,7 @@ use tauri::AppHandle;
 
 use super::*;
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub(super) const SECRET_SERVICE: &str = "deploy-desktop-artifact";
 pub(super) fn config_dir(app: &AppHandle) -> Result<PathBuf, String> {
     crate::core::config::app_config_dir(app)
