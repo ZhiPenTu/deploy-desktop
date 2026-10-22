@@ -78,7 +78,6 @@
                   <el-tag size="small" effect="plain">
                     {{ row.type === 'url' ? '直接下载' : '云效流水线' }}
                   </el-tag>
-                  <el-tag v-if="isInUse(row)" size="small" type="success" effect="plain">使用中</el-tag>
                 </div>
               </template>
             </el-table-column>
@@ -274,13 +273,6 @@ const savingOfflineDir = ref(false);
 
 const isRemote = computed(() => props.connection.mode === 'remote');
 const project = computed(() => projectState.project);
-
-function isInUse(row) {
-  const current = String(props.connection.bundleDir || '').trim();
-  const dir = String(row.lastBundleDir || '').trim();
-  if (!current || !dir) return false;
-  return current === dir || current.startsWith(`${dir}/`);
-}
 
 async function loadSources() {
   loading.value = true;
