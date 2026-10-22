@@ -33,6 +33,7 @@
         <InstallWizard
           v-else-if="currentTab === 'wizard'"
           :connection="connection"
+          :preset-bundle="wizardPreset"
           @busy-change="wizardBusy = $event"
           @go-dashboard="navigateTab('dashboard')"
           @go-images="navigateTab('images')"
@@ -58,7 +59,7 @@
         <ArtifactCenter
           v-else-if="currentTab === 'artifacts'"
           :connection="connection"
-          @go-wizard="currentTab = 'wizard'"
+          @go-wizard="openWizardWithBundle"
           @go-settings="openSettings"
         />
 
@@ -137,11 +138,17 @@ function openSettings(section) {
 }
 const isMacDesktop = isDesktopApp() && /mac os x/i.test(navigator.userAgent);
 const wizardBusy = ref(false);
+const wizardPreset = ref(null);
 const selectedStatusHostId = ref('');
 const selectedStatusHost = computed(() => hostById(selectedStatusHostId.value));
 function navigateTab(tab) {
   if (wizardBusy.value) { ElMessage.warning('当前操作正在进行，请等待完成后切换页面。'); return; }
+  if (tab !== 'wizard') wizardPreset.value = null;
   currentTab.value = tab;
+}
+function openWizardWithBundle(preset) {
+  wizardPreset.value = preset?.dir ? preset : null;
+  navigateTab('wizard');
 }
 const activeLogContainer = ref('');
 const currentPage = computed(() => pages[currentTab.value] || pages.wizard);
@@ -156,6 +163,7 @@ async function handleDeployProject(id) {
   try {
     if (projectState.project?.id !== id) await switchActiveProject(id);
     activeLogContainer.value = '';
+    wizardPreset.value = null;
     navigateTab('wizard');
   } catch (error) {
     ElMessage.error(errorText(error));

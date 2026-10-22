@@ -309,7 +309,7 @@
           打开运行详情
         </el-button>
         <el-button @click="releaseVisible = false">关闭</el-button>
-        <el-button v-if="bundle" type="primary" @click="applyBundle">设为当前部署包</el-button>
+        <el-button v-if="bundle" type="primary" @click="deployBundle">部署</el-button>
         <el-button v-else type="primary" :loading="downloading" @click="download">
           {{ downloadButtonText }}
         </el-button>
@@ -365,12 +365,12 @@
         </el-button>
         <el-button @click="detailVisible = false">关闭</el-button>
         <el-button
-          v-if="detailRelease && detailRelease.localDir && !isCurrentBundle(detailRelease)"
+          v-if="detailRelease && detailRelease.localDir"
           type="primary"
           :loading="loadingVersionKey === releaseKey(detailRelease)"
-          @click="useExisting(detailRelease)"
+          @click="deployLocalVersion(detailRelease)"
         >
-          设为当前部署包
+          部署
         </el-button>
         <el-button
           v-else-if="detailRelease && !detailRelease.localDir && detailRelease.downloadUrl"
@@ -399,7 +399,7 @@ import {
   inspectBundlePlan,
   openArtifactRunUrl
 } from '../../../api/tauri.js';
-import { applyProjectBundle, reloadProjectState } from '../../connections/state.js';
+import { reloadProjectState } from '../../connections/state.js';
 import { errorText } from '../../../shared/errors.js';
 
 const props = defineProps({
@@ -497,21 +497,8 @@ function isInUse(row) {
   return current === dir || current.startsWith(`${dir}/`);
 }
 
-function isCurrentBundle(row) {
-  const current = String(props.connection.bundleDir || '').trim();
-  const dir = String(row.localDir || '').trim();
-  if (!current || !dir) return false;
-  return current === dir || current.startsWith(`${dir}/`);
-}
-
 function localStatusText(row) {
-  if (isCurrentBundle(row)) return '当前使用';
   return row.localDir ? '已下载' : '未下载';
-}
-
-function localStatusType(row) {
-  if (isCurrentBundle(row)) return 'success';
-  return row.localDir ? 'primary' : 'info';
 }
 
 function shortPath(dir) {
@@ -789,18 +776,26 @@ async function download() {
   }
 }
 
-async function useExisting(row) {
+/** 把交付包带入部署向导，由向导完成环境检测、清单比对与部署确认。 */
+function openDeployment(dir, version, sourceName) {
+  const bundleDir = String(dir || '').trim();
+  if (!bundleDir) return;
+  const versionLabel = versionText({ version });
+  emit('go-wizard', {
+    dir: bundleDir,
+    version: String(version || '').trim(),
+    label: sourceName ? `${sourceName}（${versionLabel}）` : versionLabel
+  });
+  ElMessage.success('已选择该版本，请在部署向导中确认目标后执行部署');
+}
+
+async function deployLocalVersion(row) {
   const source = activeSource.value;
-  if (!source) return;
+  if (!source || !row?.localDir) return;
   loadingVersionKey.value = releaseKey(row);
   try {
     const result = await openArtifactBundleVersion(source.id, row.version || 'manual');
-    await applyProjectBundle(result.dir, result.version || row.version || '');
-    ElMessage.success(`已使用本地交付包 ${versionText(result)}`.trim());
-    await loadSources();
-    if (activeSource.value) {
-      await loadReleases({ reset: true });
-    }
+    openDeployment(result.dir, result.version || row.version || '', source.name);
   } catch (error) {
     ElMessage.error(errorText(error));
   } finally {
@@ -816,16 +811,10 @@ function openRuntimeLogs() {
   emit('go-settings', 'logs');
 }
 
-async function applyBundle() {
+function deployBundle() {
   if (!bundle.value) return;
-  try {
-    await applyProjectBundle(bundle.value.dir, bundle.value.version);
-  } catch (error) {
-    ElMessage.error(errorText(error));
-    return;
-  }
-  ElMessage.success('已设为当前部署包');
   releaseVisible.value = false;
+  openDeployment(bundle.value.dir, bundle.value.version, releaseSource.value?.name || activeSource.value?.name);
 }
 
 async function openRunUrl(item) {

@@ -181,6 +181,7 @@
         :connection="config"
         :stage="activeStep === 2 ? 'select' : 'prepare'"
         :disabled="executing"
+        :preset="presetBundle"
         @chosen="artifactChosen"
         @selected="artifactPrepared"
         @busy-change="artifactBusy = $event"
@@ -447,7 +448,10 @@ import { projectState } from '../../../config/project.js';
 import { safeText } from '../domain/errors.js';
 import { errorText } from '../../../shared/errors.js';
 
-const props = defineProps({ connection: { type: Object, required: true } });
+const props = defineProps({
+  connection: { type: Object, required: true },
+  presetBundle: { type: Object, default: null }
+});
 const emit = defineEmits(['go-dashboard', 'go-images', 'go-artifacts', 'go-projects', 'busy-change']);
 const hasProject = computed(() => Boolean(projectState.project?.id));
 const projects = computed(() => projectState.projects);
