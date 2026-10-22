@@ -663,19 +663,30 @@ fn compare(
     if target.docker_running && !target.containers_checked {
         issues.push("容器状态未确认，请检查目标主机后重新核对".to_string());
     }
+    // 部署目录由安装根目录与包内清单所在目录拼接而成；比对、预检与执行必须使用同一位置。
+    let mut expected_compose_dir = Path::new(install)
+        .join(
+            Path::new(compose_file)
+                .parent()
+                .unwrap_or_else(|| Path::new("")),
+        )
+        .to_string_lossy()
+        .to_string();
+    while expected_compose_dir.len() > 1 && expected_compose_dir.ends_with('/') {
+        expected_compose_dir.pop();
+    }
     let supported_update_layout = !has_deployment
         || Path::new(&target.compose_file)
             .parent()
-            .map(|parent| {
-                same_directory(&parent.to_string_lossy(), install)
-                    || same_directory(&parent.to_string_lossy(), &format!("{install}/deploy"))
-            })
+            .map(|parent| same_directory(&parent.to_string_lossy(), &expected_compose_dir))
             .unwrap_or(false);
     if !supported_update_layout {
-        issues.push(
-            "现有清单不在所选部署目录中，请重新选择部署目录后核对"
-                .to_string(),
-        );
+        issues.push(compose_layout_issue(
+            &target.compose_file,
+            install,
+            &expected_compose_dir,
+            compose_file,
+        ));
     }
     let compose_working_dir = if !target.compose_working_dir.is_empty() {
         target.compose_working_dir.clone()
@@ -849,6 +860,43 @@ fn compare(
     })
 }
 
+/// 清单位置与项目部署目录不一致时，给出实际位置与可填写的安装根目录。
+fn compose_layout_issue(
+    actual_compose: &str,
+    install: &str,
+    expected_compose_dir: &str,
+    compose_file: &str,
+) -> String {
+    let actual_dir = Path::new(actual_compose)
+        .parent()
+        .map(|parent| parent.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let relative = Path::new(compose_file)
+        .parent()
+        .map(|parent| parent.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let hint = install_root_hint(&actual_dir, &relative)
+        .map(|hint| format!("请将「项目管理」中的部署目录改为 {hint} 后重新核对。"))
+        .unwrap_or_else(|| {
+            format!("请检查「项目管理」中的部署目录，部署清单应位于 {expected_compose_dir}。")
+        });
+    format!(
+        "目标机上的 Compose 清单位于 {actual_dir}，而项目部署目录 {install} 对应的清单位置是 {expected_compose_dir}。{hint}"
+    )
+}
+
+/// 当前填写的目录正是清单所在目录时，反推出上级安装根目录。
+fn install_root_hint(actual_dir: &str, relative: &str) -> Option<String> {
+    let dir = actual_dir.trim_end_matches('/');
+    let relative = relative.trim().trim_matches('/');
+    if relative.is_empty() {
+        return None;
+    }
+    dir.strip_suffix(&format!("/{relative}"))
+        .filter(|hint| !hint.is_empty())
+        .map(str::to_string)
+}
+
 fn same_directory(left: &str, right: &str) -> bool {
     left.replace('\\', "/").trim_end_matches('/') == right.replace('\\', "/").trim_end_matches('/')
 }
@@ -993,16 +1041,16 @@ mod tests {
     }
 
     #[test]
-    fn compose_preference_and_container_matching_follow_actual_root_location() {
+    fn compose_preference_and_container_matching_follow_declared_layout() {
         let root = std::env::temp_dir().join(format!(
             "deploy-review-root-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));
+        let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("deploy")).unwrap();
         let desired = "services:\n  web:\n    image: nginx:1.27\n";
-        fs::write(root.join("docker-compose.yml"), desired).unwrap();
-        fs::write(root.join("deploy/docker-compose.lan.yml"), "services: {}\n").unwrap();
+        fs::write(root.join("deploy/docker-compose.yml"), desired).unwrap();
         let mut target = local_compose_snapshot(&root).unwrap();
         assert_eq!(
             Path::new(&target.compose_file),
@@ -1040,25 +1088,52 @@ mod tests {
     }
 
     #[test]
-    fn configuration_only_differences_allow_incremental_updates_in_both_layouts() {
+    fn configuration_only_differences_allow_incremental_updates() {
         let current = "services:\n  kafka:\n    image: kafka:4.0\n    environment: { MODE: current }\n    ports: ['9092:9092']\n";
         let desired = "services:\n  kafka:\n    image: kafka:4.0\n    environment: { MODE: updated }\n    ports: ['9093:9092']\n";
         let services = parse_services(desired).unwrap();
-        for path in ["/srv/demo/docker-compose.yml", "/srv/demo/deploy/docker-compose.yml"] {
-            let mut target = snapshot(current, &[(0, "ready")]);
-            target.compose_file = path.to_string();
-            let review = compare(
-                "deploy/docker-compose.yml", "/srv/demo", desired,
-                &services, &unique_images(&services), target,
-            ).unwrap();
-            assert!(review.compose_changed);
-            assert_eq!(review.services[0].change, "changed");
-            assert_eq!(review.services[0].image, review.services[0].current_image);
-            assert!(review.ready);
-            assert!(review.can_incremental_update);
-            assert!(!review.can_first_deploy);
-            assert!(review.issues.is_empty());
-        }
+        let mut target = snapshot(current, &[(0, "ready")]);
+        target.compose_file = "/srv/demo/deploy/docker-compose.yml".to_string();
+        let review = compare(
+            "deploy/docker-compose.yml",
+            "/srv/demo",
+            desired,
+            &services,
+            &unique_images(&services),
+            target,
+        )
+        .unwrap();
+        assert!(review.compose_changed);
+        assert_eq!(review.services[0].change, "changed");
+        assert_eq!(review.services[0].image, review.services[0].current_image);
+        assert!(review.ready);
+        assert!(review.can_incremental_update);
+        assert!(!review.can_first_deploy);
+        assert!(review.issues.is_empty());
+    }
+
+    #[test]
+    fn install_directory_pointing_at_compose_directory_is_blocked_with_hint() {
+        let desired = "services:\n  web:\n    image: nginx:1.27\n";
+        let services = parse_services(desired).unwrap();
+        let mut target = snapshot(desired, &[(0, "ready")]);
+        target.compose_file = "/srv/demo/deploy/docker-compose.yml".to_string();
+        target.compose_working_dir = "/srv/demo/deploy".to_string();
+        let review = compare(
+            "deploy/docker-compose.yml",
+            "/srv/demo/deploy",
+            desired,
+            &services,
+            &unique_images(&services),
+            target,
+        )
+        .unwrap();
+        assert!(!review.ready);
+        assert!(!review.can_incremental_update);
+        assert!(review
+            .issues
+            .iter()
+            .any(|issue| issue.contains("部署目录改为 /srv/demo")));
     }
 
     #[test]

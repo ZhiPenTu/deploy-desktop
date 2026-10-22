@@ -6,7 +6,8 @@ use super::transfer::{create_remote_backup, upload_dir_replace, upload_file_repl
 use crate::commands::bundle::{ArtifactKind, ArtifactRoot, Bundle};
 use crate::commands::projects;
 use crate::commands::remote_ssh::{
-    explain_ssh_failure, resolve_existing_key, run_ssh_script, shell_quote,
+    explain_ssh_failure, missing_deploy_dir_message, resolve_existing_key, run_ssh_script,
+    shell_quote,
 };
 use std::path::Path;
 use std::time::Instant;
@@ -96,9 +97,12 @@ fn update_remote_deployment_blocking(
         inspect_remote_deployment_inner(&host, port, &user, key.as_deref(), &install_dir)?;
     let deploy_dir = status.deploy_dir.clone();
     if !status.deployed {
-        return Err(format!(
-            "目标机未检测到已部署服务（{}）。请先使用部署向导完成首次安装。",
-            status.deploy_dir
+        return Err(missing_deploy_dir_message(
+            &host,
+            port,
+            &user,
+            key.as_deref(),
+            &status.deploy_dir,
         ));
     }
     if !status.docker_available {

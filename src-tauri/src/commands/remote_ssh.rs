@@ -935,35 +935,96 @@ fn detect_remote_compose_dir(
     Some(first)
 }
 
-fn missing_deploy_dir_message(
+/// 部署目录由安装根目录与包内清单所在目录拼接而成；能反推时返回安装根目录。
+fn install_root_of(dir: &str, relative: &str) -> Option<String> {
+    let dir = dir.trim_end_matches('/');
+    let relative = relative.trim().trim_matches('/');
+    if relative.is_empty() {
+        return Some(dir.to_string());
+    }
+    dir.strip_suffix(&format!("/{relative}"))
+        .filter(|hint| !hint.is_empty())
+        .map(str::to_string)
+}
+
+/// 部署目录不含 Compose 清单时，定位实际部署位置并给出应填写的安装根目录。
+pub(crate) fn missing_deploy_dir_message(
     host: &str,
     port: u16,
     user: &str,
     key: Option<&str>,
     deploy_dir: &str,
 ) -> String {
-    let prefix = super::profile::deployment_profile().container_prefix;
-    let detected = detect_remote_compose_dir(host, port, user, key, &prefix);
-    let Some(detected) = detected.filter(|dir| dir != deploy_dir) else {
-        return format!(
-            "目标机不存在部署目录 {deploy_dir}，请确认项目中的部署目录是否为实际安装目录。"
-        );
-    };
-    // 部署目录由安装目录与包内清单位置拼接而成，能反推时直接给出应填写的安装目录。
-    let relative = crate::commands::projects::active_bundle()
+    let bundle = crate::commands::projects::active_bundle();
+    let relative = bundle
+        .as_deref()
         .map(|bundle| bundle.deploy_source_rel())
         .unwrap_or_default();
-    let install_hint = if relative.is_empty() {
-        detected.clone()
-    } else {
-        detected
-            .strip_suffix(&format!("/{relative}"))
-            .unwrap_or(&detected)
-            .to_string()
+    let compose_name = bundle
+        .as_deref()
+        .map(|bundle| bundle.effective_compose())
+        .and_then(|path| {
+            Path::new(&path)
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+        })
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "docker-compose.yml".to_string());
+    let prefix = super::profile::deployment_profile().container_prefix;
+    // 运行中的容器记录真实工作目录；容器未运行时先看所选目录本身，
+    // 再看上级安装根目录是否已有清单，避免把「清单所在目录」当作安装根目录。
+    let detected = detect_remote_compose_dir(host, port, user, key, &prefix)
+        .filter(|dir| !same_dir(dir, deploy_dir))
+        .or_else(|| {
+            if detect_compose_in_directory(host, port, user, key, deploy_dir, &compose_name)
+                .is_some()
+            {
+                return Some(deploy_dir.trim_end_matches('/').to_string());
+            }
+            let install = install_root_of(deploy_dir, &relative)?;
+            detect_compose_in_directory(host, port, user, key, &install, &compose_name)
+        });
+    let Some(detected) = detected else {
+        return format!(
+            "目标机未在 {deploy_dir} 找到 Compose 清单，请在「项目管理」中确认部署目录填写的是安装根目录。"
+        );
     };
-    format!(
-        "目标机不存在部署目录 {deploy_dir}。检测到运行中的服务位于 {detected}，请在「项目管理」中把部署目录改为 {install_hint} 后重试。"
-    )
+    match install_root_of(&detected, &relative) {
+        Some(install) => format!(
+            "目标机未在 {deploy_dir} 找到 Compose 清单。检测到 Compose 清单位于 {detected}，对应的安装根目录是 {install}，请在「项目管理」中确认部署目录填写该安装根目录后重试。"
+        ),
+        None => format!(
+            "目标机未在 {deploy_dir} 找到 Compose 清单。检测到 Compose 清单位于 {detected}，请在「项目管理」中确认部署目录填写的是安装根目录后重试。"
+        ),
+    }
+}
+
+fn same_dir(left: &str, right: &str) -> bool {
+    left.replace('\\', "/").trim_end_matches('/') == right.replace('\\', "/").trim_end_matches('/')
+}
+
+fn detect_compose_in_directory(
+    host: &str,
+    port: u16,
+    user: &str,
+    key: Option<&str>,
+    directory: &str,
+    compose_name: &str,
+) -> Option<String> {
+    let script = format!(
+        "DIR={dir}\nfor name in {first} 'docker-compose.yml'; do\n  if [ -f \"$DIR/$name\" ]; then printf 'DETECTED=%s\\n' \"$DIR\"; exit 0; fi\ndone\n",
+        dir = shell_quote(directory),
+        first = shell_quote(compose_name)
+    );
+    let output = run_ssh_script(host, port, user, key, &script).ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("DETECTED=").map(str::trim))
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 fn compose_action_error(
@@ -1656,6 +1717,23 @@ mod tests {
         );
         assert!(message.contains("认证被拒绝"));
         assert!(!message.contains("OpenSSH"));
+    }
+
+    #[test]
+    fn install_root_hint_strips_the_declared_compose_directory() {
+        assert_eq!(
+            install_root_of("/home/tt_net_manager/deploy", "deploy").as_deref(),
+            Some("/home/tt_net_manager")
+        );
+        assert_eq!(
+            install_root_of("/srv/demo/deploy/", "deploy").as_deref(),
+            Some("/srv/demo")
+        );
+        assert_eq!(
+            install_root_of("/srv/other", "deploy"),
+            None,
+            "unrelated directories must not produce a misleading suggestion"
+        );
     }
 
     #[test]
