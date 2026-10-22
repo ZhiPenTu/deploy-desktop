@@ -19,7 +19,7 @@
         <div class="meta-row">
           <code class="path">{{ view.file }}</code>
           <el-tag size="small" effect="plain">{{ kindLabel }}</el-tag>
-          <span class="meta-text">{{ formatSize(view.sizeBytes) }}</span>
+          <span class="meta-text">{{ composeSizeText(view.sizeBytes) }}</span>
           <span v-if="view.services.length" class="meta-text">{{ view.services.length }} 个服务</span>
           <span v-if="view.images.length" class="meta-text">{{ view.images.length }} 个镜像</span>
         </div>
@@ -53,134 +53,31 @@
 
         <el-tabs v-if="view.kind === 'compose'" v-model="tab" class="compose-tabs">
           <el-tab-pane label="镜像对比" name="images">
-            <el-table
-              :data="filteredImages"
-              size="small"
-              :row-class-name="rowClass"
-              :empty-text="filter ? '没有符合此状态的镜像' : '此配置没有需要检查的镜像'"
-            >
-              <el-table-column label="镜像" min-width="320">
-                <template #default="{ row }">
-                  <div class="image-cell">
-                    <code>{{ row.imageRef }}</code>
-                  </div>
-                </template>
-              </el-table-column>
-              <el-table-column label="服务" min-width="160">
-                <template #default="{ row }">
-                  <el-tag
-                    v-for="service in row.services"
-                    :key="service"
-                    size="small"
-                    effect="plain"
-                    class="service-tag"
-                  >
-                    {{ service }}
-                  </el-tag>
-                </template>
-              </el-table-column>
-              <el-table-column label="本地镜像包" min-width="240">
-                <template #default="{ row }">
-                  <div class="image-cell">
-                    <code v-if="row.localFile" class="file-name">{{ row.localFile }}</code>
-                    <span v-else :class="row.dockerPresent || view.imageCheck === 'unavailable' ? 'muted' : 'missing-text'">
-                      {{ row.dockerPresent ? '未保存离线包' : '未找到离线包' }}
-                    </span>
-                    <span v-if="row.localFile" class="image-sub">
-                      {{ formatSize(row.localBytes) }} · {{ sourceLabel(row.matchSource) }}
-                    </span>
-                  </div>
-                </template>
-              </el-table-column>
-              <el-table-column :label="dockerColumnLabel" width="130">
-                <template #default="{ row }">
-                  <el-tag size="small" :type="dockerTone(row)" effect="plain">
-                    {{ dockerLabel(row) }}
-                  </el-tag>
-                </template>
-              </el-table-column>
-              <el-table-column label="状态" width="110">
-                <template #default="{ row }">
-                  <el-tag size="small" :type="statusTone(row.status)" effect="light">
-                    {{ statusLabel(row.status) }}
-                  </el-tag>
-                </template>
-              </el-table-column>
-            </el-table>
-
-            <ul v-if="view.issues.length" class="issue-list">
-              <li v-for="issue in view.issues" :key="issue">{{ issue }}</li>
-            </ul>
+            <ComposeImageTable
+              :images="filteredImages"
+              :filter="filter"
+              :image-check="view.imageCheck"
+              :issues="view.issues"
+            />
           </el-tab-pane>
 
           <el-tab-pane label="服务清单" name="services">
-            <el-table :data="view.services" size="small" empty-text="未发现服务">
-              <el-table-column prop="name" label="服务" width="190" />
-              <el-table-column label="镜像" min-width="280">
-                <template #default="{ row }">
-                  <code>{{ row.image || '-' }}</code>
-                </template>
-              </el-table-column>
-              <el-table-column prop="containerName" label="容器名" min-width="200" />
-              <el-table-column label="端口" min-width="130">
-                <template #default="{ row }">
-                  <span v-if="!row.ports.length" class="muted">-</span>
-                  <el-tag v-for="port in row.ports" :key="port" size="small" effect="plain" class="service-tag">
-                    {{ port }}
-                  </el-tag>
-                </template>
-              </el-table-column>
-              <el-table-column label="依赖" min-width="150">
-                <template #default="{ row }">
-                  <span v-if="!row.dependsOn.length" class="muted">-</span>
-                  <el-tag
-                    v-for="dependency in row.dependsOn"
-                    :key="dependency"
-                    size="small"
-                    effect="plain"
-                    class="service-tag"
-                  >
-                    {{ dependency }}
-                  </el-tag>
-                </template>
-              </el-table-column>
-              <el-table-column label="重启策略" width="130">
-                <template #default="{ row }">
-                  <span class="muted">{{ row.restart || '-' }}</span>
-                </template>
-              </el-table-column>
-            </el-table>
+            <ComposeServiceTable :services="view.services" />
           </el-tab-pane>
 
           <el-tab-pane label="配置内容" name="content">
-            <div class="code-view">
-              <div
-                v-for="line in lines"
-                :key="line.no"
-                class="code-line"
-                :class="{ highlight: line.highlight }"
-              >
-                <span class="line-no">{{ line.no }}</span>
-                <span class="line-text">{{ line.text }}</span>
-              </div>
-            </div>
-            <p v-if="truncatedLines" class="truncate-hint">
-              内容较长，仅显示前 {{ MAX_LINES }} 行，完整文件请直接打开 {{ view.file }}
-            </p>
+            <ComposeContentView :content="view.content" :file="view.file" :max-lines="MAX_LINES" />
           </el-tab-pane>
         </el-tabs>
 
-        <div v-else class="code-view single">
-          <div
-            v-for="line in lines"
-            :key="line.no"
-            class="code-line"
-            :class="{ highlight: line.highlight }"
-          >
-            <span class="line-no">{{ line.no }}</span>
-            <span class="line-text">{{ line.text }}</span>
-          </div>
-        </div>
+        <ComposeContentView
+          v-else
+          :content="view.content"
+          :file="view.file"
+          :max-lines="MAX_LINES"
+          standalone
+          :show-truncate="false"
+        />
 
         <p class="body-hint">{{ footerHint }}</p>
       </template>
@@ -197,6 +94,16 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 import { inspectBundleConfig, selectLocalPath } from '../../../api/tauri.js';
 import { createRequestScope } from '../../../shared/async/requestScope.js';
+import {
+  composeFooterHint,
+  composeKindLabel,
+  composeSizeText,
+  imageAvailableLabel,
+  summaryCards as composeSummaryCards
+} from '../domain/compose.js';
+import ComposeContentView from './ComposeContentView.vue';
+import ComposeImageTable from './ComposeImageTable.vue';
+import ComposeServiceTable from './ComposeServiceTable.vue';
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -218,46 +125,17 @@ const filter = ref('');
 const selectedImageDir = ref('');
 const selectingDirectory = ref(false);
 const requests = createRequestScope();
-const availableLabel = computed(() => view.value?.imageCheck === 'remote' ? '目标机可用' : '本机可用');
 
 const dialogTitle = computed(() => {
   const name = String(props.file || '').split('/').filter(Boolean).pop() || '配置文件';
   return `部署配置 · ${name}`;
 });
 
-const kindLabel = computed(() => {
-  if (!view.value) return '';
-  if (view.value.kind === 'compose') return 'compose 清单';
-  if (view.value.kind === 'yaml') return 'YAML';
-  return '文本';
-});
+const kindLabel = computed(() => composeKindLabel(view.value?.kind));
 
-const lines = computed(() => {
-  const content = view.value?.content || '';
-  const raw = content.split('\n');
-  return raw.slice(0, MAX_LINES).map((text, index) => ({
-    no: index + 1,
-    text: text || ' ',
-    highlight: /^\s*(-\s*)?image:\s*\S/.test(text)
-  }));
-});
-
-const truncatedLines = computed(() => {
-  const content = view.value?.content || '';
-  return content.split('\n').length > MAX_LINES;
-});
-
-const summaryCards = computed(() => {
-  const images = view.value?.images || [];
-  const count = (status) => images.filter((image) => image.status === status).length;
-  return [
-    { key: 'ready', label: '就绪', count: count('ready'), tone: 'ok' },
-    { key: 'to_import', label: '待导入', count: count('to_import'), tone: 'warn' },
-    { key: 'missing', label: '缺失', count: count('missing'), tone: 'danger' },
-    { key: 'unconfirmed', label: '未确认', count: count('unconfirmed'), tone: 'unknown' },
-    { key: 'loaded', label: availableLabel.value, count: count('loaded'), tone: 'ok' }
-  ];
-});
+const summaryCards = computed(() =>
+  composeSummaryCards(view.value?.images || [], imageAvailableLabel(view.value?.imageCheck))
+);
 
 const filteredImages = computed(() => {
   const images = view.value?.images || [];
@@ -265,66 +143,7 @@ const filteredImages = computed(() => {
   return images.filter((image) => image.status === filter.value);
 });
 
-const dockerColumnLabel = computed(() => {
-  if (view.value?.imageCheck === 'remote') return '目标机 Docker';
-  if (view.value?.imageCheck === 'unavailable') return 'Docker 状态';
-  return '本机 Docker';
-});
-
-const footerHint = computed(() => {
-  if (!view.value) return '';
-  if (view.value.kind !== 'compose') return '查看部署配置内容。';
-  if (!view.value.images.length) return '此配置没有需要检查的镜像。';
-  if (view.value.imageCheck === 'unavailable') return '镜像状态未确认，请检查 Docker 或目标机连接后重新检查。离线包存在不代表镜像已导入。';
-  return `${view.value.imageCheck === 'remote' ? '目标机' : '本机'}已有镜像可直接使用。离线包用于导入缺失镜像或保留备份。`;
-});
-
-function formatSize(bytes) {
-  const size = Number(bytes || 0);
-  if (!size) return '0 B';
-  if (size < 1024) return `${size} B`;
-  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
-  if (size < 1024 * 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} MB`;
-  return `${(size / 1024 / 1024 / 1024).toFixed(2)} GB`;
-}
-
-function sourceLabel(source) {
-  if (source === 'images.json') return '镜像包清单';
-  if (source === 'profile') return '部署配置';
-  if (source === 'filename') return '文件名匹配';
-  return '来源未知';
-}
-
-function statusLabel(status) {
-  if (status === 'ready') return '就绪';
-  if (status === 'to_import') return '待导入';
-  if (status === 'loaded') return availableLabel.value;
-  if (status === 'missing') return '缺失';
-  if (status === 'unconfirmed') return '未确认';
-  return status;
-}
-
-function statusTone(status) {
-  if (status === 'ready' || status === 'loaded') return 'success';
-  if (status === 'to_import') return 'warning';
-  if (status === 'missing') return 'danger';
-  if (status === 'unconfirmed') return 'info';
-  return 'info';
-}
-
-function dockerTone(row) {
-  if (row.dockerPresent) return 'success';
-  return view.value?.imageCheck === 'unavailable' ? 'info' : 'warning';
-}
-
-function dockerLabel(row) {
-  if (row.dockerPresent) return '已加载';
-  return view.value?.imageCheck === 'unavailable' ? '未确认' : '未加载';
-}
-
-function rowClass({ row }) {
-  return `status-${row.status}`;
-}
+const footerHint = computed(() => composeFooterHint(view.value));
 
 function toggleFilter(key) {
   filter.value = filter.value === key ? '' : key;
@@ -346,9 +165,9 @@ async function load() {
     if (view.value.kind !== 'compose') {
       tab.value = 'content';
     }
-  } catch (caught) {
+  } catch {
     if (!requests.isCurrent(ticket)) return;
-    error.value = `读取配置失败：${caught}`;
+    error.value = '无法读取该部署配置，请确认交付包内容完整后重试。';
   } finally {
     if (requests.isCurrent(ticket)) loading.value = false;
   }
@@ -523,112 +342,10 @@ onBeforeUnmount(() => requests.dispose());
   margin-top: 4px;
 }
 
-.image-cell {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.image-cell code {
-  font-size: 12px;
-  color: var(--text-main);
-  word-break: break-all;
-}
-
-.image-sub {
-  font-size: 11px;
-  color: var(--text-faint);
-}
-
-.file-name {
-  color: var(--primary-color);
-}
-
-.missing-text {
-  font-size: 12px;
-  color: var(--danger-color);
-}
-
-.service-tag {
-  margin: 2px 4px 2px 0;
-}
-
-.muted {
-  color: var(--text-faint);
-  font-size: 12px;
-}
-
-.issue-list {
-  margin: 10px 0 0;
-  padding-left: 18px;
-  font-size: 11.5px;
-  color: var(--warning-color);
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.code-view {
-  max-height: 52vh;
-  overflow: auto;
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-md);
-  background: #0b1220;
-  padding: 10px 0;
-  font-family: 'SFMono-Regular', Menlo, Consolas, monospace;
-}
-
-.code-view.single {
-  max-height: 62vh;
-}
-
-.code-line {
-  display: flex;
-  gap: 12px;
-  padding: 0 12px;
-  font-size: 12px;
-  line-height: 1.6;
-  color: #d7dde8;
-  white-space: pre;
-}
-
-.code-line.highlight {
-  background: rgba(51, 92, 255, 0.16);
-  color: #ffffff;
-}
-
-.line-no {
-  flex: none;
-  width: 42px;
-  text-align: right;
-  color: #5b6b85;
-  user-select: none;
-}
-
-.line-text {
-  flex: 1;
-  min-width: 0;
-}
-
-.truncate-hint {
-  margin-top: 8px;
-  font-size: 11.5px;
-  color: var(--text-faint);
-}
-
 .body-hint {
   margin-top: 10px;
   font-size: 11.5px;
   line-height: 1.6;
   color: var(--text-faint);
-}
-
-:deep(.el-table .status-missing td) {
-  background: var(--danger-soft);
-}
-
-:deep(.el-table .status-to_import td) {
-  background: var(--warning-soft);
 }
 </style>
