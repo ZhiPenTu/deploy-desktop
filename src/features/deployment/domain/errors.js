@@ -12,12 +12,16 @@ export function safeText(value) {
 
 function actionableReason(text) {
   for (const line of text.split('\n').map((item) => item.trim()).filter(Boolean)) {
-    if (!/(未在等待时间内就绪|未就绪|缺少|不足|尚未|未安装|未运行|未找到)/.test(line))
+    if (
+      !/(未在等待时间内就绪|未就绪|未创建|不一致|未声明|未包含|缺少|不足|尚未|未安装|未运行|未找到)/.test(
+        line
+      )
+    )
       continue;
     const cleaned = line
       .replace(/^应用更新失败[：:]\s*/, '')
       .replace(/^更新未完成[：:]\s*/, '')
-      .split('。')[0]
+      .replace(/[。.]\s*$/, '')
       .trim();
     if (cleaned) return cleaned;
   }

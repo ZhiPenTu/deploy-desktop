@@ -1,7 +1,7 @@
 use super::bundle::{load_bundle, normalize_install_dir};
 use super::inspect::{inspect_remote_deployment_inner, remote_free_kb};
 use super::models::RemoteUpdateResult;
-use super::progress::emit_progress;
+use super::progress::{emit_progress, ProgressHeartbeat};
 use super::transfer::{create_remote_backup, upload_dir_replace, upload_file_replace};
 use crate::commands::bundle::{ArtifactKind, ArtifactRoot, Bundle};
 use crate::commands::projects;
@@ -9,6 +9,7 @@ use crate::commands::remote_ssh::{
     explain_ssh_failure, missing_deploy_dir_message, resolve_existing_key, run_ssh_script,
     shell_quote,
 };
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Instant;
 
@@ -82,6 +83,7 @@ fn update_remote_deployment_blocking(
     emit_progress(window, "校验更新包", 3, "running", "检查本地更新包内容...");
     let (bundle, components) = load_bundle(&bundle_dir, &components)?;
     bundle.verify_payload()?;
+    verify_service_declarations(&bundle)?;
 
     let key = resolve_existing_key(key_path, &host)?;
     let install_dir = normalize_install_dir(&install_dir);
@@ -249,13 +251,27 @@ fn update_remote_deployment_blocking(
         output_log.push_str(&format!("已导入 {} 个镜像包\n", loaded.len()));
     }
 
-    emit_progress(
-        window,
-        "应用更新",
-        88,
-        "running",
-        "应用部署配置并重启服务，随后检查就绪状态（最长约 3 分钟）",
-    );
+    let wait_services = services_to_wait(&bundle, &components);
+    let apply_message = if wait_services.is_empty() {
+        "应用部署配置并重启服务".to_string()
+    } else {
+        format!(
+            "应用部署配置，随后等待 {} 个服务就绪（最长约 3 分钟）",
+            wait_services.len()
+        )
+    };
+    emit_progress(window, "应用更新", 88, "running", &apply_message);
+    let heartbeat = if wait_services.is_empty() {
+        None
+    } else {
+        Some(ProgressHeartbeat::start(
+            window,
+            "等待服务就绪",
+            88,
+            96,
+            format!("正在等待 {} 个服务就绪", wait_services.len()),
+        ))
+    };
     let output = apply_remote_update(
         &host,
         port,
@@ -264,8 +280,18 @@ fn update_remote_deployment_blocking(
         &deploy_dir,
         &components,
         &bundle,
+        &wait_services,
     )?;
+    drop(heartbeat);
     output_log.push_str(&output);
+
+    emit_progress(
+        window,
+        "记录部署版本",
+        97,
+        "running",
+        "写入本次更新的版本记录...",
+    );
 
     let project_id = projects::active_project()
         .map(|project| project.id)
@@ -285,13 +311,20 @@ fn update_remote_deployment_blocking(
 
     emit_progress(
         window,
+        "核对容器状态",
+        99,
+        "running",
+        "重新检查目标机容器状态...",
+    );
+    let status =
+        inspect_remote_deployment_inner(&host, port, &user, key.as_deref(), &install_dir).ok();
+    emit_progress(
+        window,
         "更新完成",
         100,
         "success",
         "所选组件已更新并通过就绪检查",
     );
-    let status =
-        inspect_remote_deployment_inner(&host, port, &user, key.as_deref(), &install_dir).ok();
     Ok(RemoteUpdateResult {
         success: true,
         components,
@@ -318,6 +351,39 @@ fn selected_services(bundle: &Bundle, components: &[String]) -> Vec<String> {
     }
     services.sort();
     services
+}
+
+/// 交付包声明的服务必须都出现在目标机实际执行的 Compose 清单中。
+pub(super) fn verify_service_declarations(bundle: &Bundle) -> Result<(), String> {
+    let compose = bundle.effective_compose();
+    let content = std::fs::read_to_string(bundle.root.join(compose))
+        .map_err(|_| format!("无法读取交付包中的部署清单 {compose}，请重新制作制品"))?;
+    let available: BTreeSet<String> = super::config::compose_service_views(&content)
+        .map_err(|error| format!("交付包的部署清单 {compose} 无法解析：{error}"))?
+        .into_iter()
+        .map(|service| service.name)
+        .collect();
+    if available.is_empty() {
+        return Err(format!(
+            "交付包的部署清单 {compose} 没有声明任何服务，请重新制作制品"
+        ));
+    }
+    let missing: Vec<&str> = bundle
+        .descriptor
+        .runtime
+        .services
+        .iter()
+        .map(|service| service.key.as_str())
+        .filter(|key| !available.contains(*key))
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "交付包声明的服务与当前生效的部署清单 {compose} 不一致：{} 未在该清单中声明。请修正交付包后重新制作制品；本次操作未修改目标机。",
+            missing.join("、")
+        ))
+    }
 }
 
 /// 目标机上实际使用的 Compose 文件（相对部署目录）。
@@ -355,6 +421,22 @@ fn is_config_selected(bundle: &Bundle, components: &[String]) -> bool {
     })
 }
 
+fn services_to_wait(bundle: &Bundle, components: &[String]) -> Vec<String> {
+    let config_selected = is_config_selected(bundle, components)
+        || components.iter().any(|item| item == "image");
+    if config_selected {
+        bundle
+            .descriptor
+            .runtime
+            .services
+            .iter()
+            .map(|service| service.key.clone())
+            .collect()
+    } else {
+        selected_services(bundle, components)
+    }
+}
+
 fn ensure_required_services(
     bundle: &Bundle,
     components: &[String],
@@ -380,6 +462,54 @@ fn ensure_required_services(
     }
 }
 
+/// 按 Compose 解析出的实际容器检查就绪状态，不依赖容器命名约定。
+pub(super) fn readiness_script(services: &[String]) -> String {
+    let service_list = services
+        .iter()
+        .map(|service| shell_quote(service))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut script = format!(
+        "echo \"==> 等待 {} 个服务就绪（最长约 180 秒）\"\nWAIT_SERVICES={service_list}\n",
+        services.len()
+    );
+    script.push_str(
+        r#"unready=""
+for i in $(seq 1 90); do
+  unready=""
+  for service in $WAIT_SERVICES; do
+    ids=$(compose ps -a -q "$service" 2>/dev/null || true)
+    if [ -z "$ids" ]; then
+      echo "服务 $service 未创建，请检查交付包的服务声明与当前部署清单是否一致" >&2
+      compose logs --tail 20 "$service" 2>&1 || true
+      exit 4
+    fi
+    for id in $ids; do
+      health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$id" 2>/dev/null || echo missing)
+      state=$(docker inspect --format '{{.State.Status}}' "$id" 2>/dev/null || echo missing)
+      if [ "$health" = "healthy" ] || { [ "$health" = "none" ] && [ "$state" = "running" ]; }; then
+        continue
+      fi
+      unready="$unready $service"
+    done
+  done
+  if [ -z "$unready" ]; then
+    break
+  fi
+  sleep 2
+done
+if [ -n "$unready" ]; then
+  for service in $unready; do
+    echo "服务 $service 未在等待时间内就绪" >&2
+    compose logs --tail 40 "$service" 2>&1 || true
+  done
+  exit 4
+fi
+"#,
+    );
+    script
+}
+
 fn apply_remote_update(
     host: &str,
     port: u16,
@@ -388,20 +518,10 @@ fn apply_remote_update(
     deploy_dir: &str,
     components: &[String],
     bundle: &Bundle,
+    wait_services: &[String],
 ) -> Result<String, String> {
     let restart_services = selected_services(bundle, components);
     let config_selected = is_config_selected(bundle, components) || components.iter().any(|c| c == "image");
-    let wait_services: Vec<String> = if config_selected {
-        bundle
-            .descriptor
-            .runtime
-            .services
-            .iter()
-            .map(|service| service.key.clone())
-            .collect()
-    } else {
-        restart_services.clone()
-    };
 
     let compose_file = compose_file_on_target(bundle);
     let mut script = format!(
@@ -446,59 +566,7 @@ compose() {{
     }
 
     if !wait_services.is_empty() {
-        // 交付包可能声明当前变体清单里没有启用的服务（例如局域网清单不含隧道服务），
-        // 只等待实际存在的服务，避免为不存在的容器等待到超时。
-        script.push_str(&format!(
-            r#"AVAILABLE_SERVICES=$(compose config --services 2>/dev/null || true)
-if [ -z "$AVAILABLE_SERVICES" ]; then
-  echo "==> 无法读取当前部署配置的服务列表，按交付包声明检查" >&2
-  AVAILABLE_SERVICES="{}"
-fi
-WAIT_CONTAINERS=""
-"#,
-            wait_services.join(" ")
-        ));
-        for service in &wait_services {
-            let container = bundle.container_name(service);
-            script.push_str(&format!(
-                r#"if printf '%s\n' "$AVAILABLE_SERVICES" | grep -qx {service}; then
-  WAIT_CONTAINERS="$WAIT_CONTAINERS {container}"
-else
-  echo "==> 服务 {container} 未在当前部署配置中启用，跳过就绪检查"
-fi
-"#,
-                service = shell_quote(service)
-            ));
-        }
-        script.push_str(
-            r#"if [ -n "$WAIT_CONTAINERS" ]; then
-  echo "==> 等待服务健康检查"
-  unready=""
-  for i in $(seq 1 90); do
-    unready=""
-    for container in $WAIT_CONTAINERS; do
-      health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container" 2>/dev/null || echo missing)
-      state=$(docker inspect --format '{{.State.Status}}' "$container" 2>/dev/null || echo missing)
-      if [ "$health" = "healthy" ] || { [ "$health" = "none" ] && [ "$state" = "running" ]; }; then
-        continue
-      fi
-      unready="$unready $container"
-    done
-    if [ -z "$unready" ]; then
-      break
-    fi
-    sleep 2
-  done
-  if [ -n "$unready" ]; then
-    for container in $unready; do
-      echo "服务 $container 未在等待时间内就绪" >&2
-      docker logs --tail 40 "$container" 2>&1 || true
-    done
-    exit 4
-  fi
-fi
-"#,
-        );
+        script.push_str(&readiness_script(wait_services));
     }
 
     script.push_str("echo \"==> 当前容器状态\"\ncompose ps\n");
@@ -526,14 +594,35 @@ pub(super) fn remote_script_failure(stderr: &str, key: Option<&str>, code: Optio
     if let Some(line) = stderr
         .lines()
         .map(str::trim)
+        .find(|line| line.starts_with("服务 ") && line.contains("未创建"))
+    {
+        return format!("{line}。请修正交付包的服务声明或当前部署清单后重试。");
+    }
+    if let Some(line) = stderr
+        .lines()
+        .map(str::trim)
         .find(|line| line.starts_with("服务 ") && line.contains("未在等待时间内就绪"))
     {
         return format!("{line}。请查看执行详情中的服务日志，处理后重试。");
     }
-    let detail = stderr
+    let details: Vec<&str> = stderr
         .lines()
         .map(str::trim)
-        .find(|line| !line.is_empty() && !line.starts_with("==>"));
+        .filter(|line| !line.is_empty() && !line.starts_with("==>"))
+        .collect();
+    let detail = details
+        .iter()
+        .copied()
+        .find(|line| {
+            let lower = line.to_ascii_lowercase();
+            lower.contains("error")
+                || lower.contains("failed")
+                || lower.contains("cannot")
+                || lower.contains("no such")
+                || lower.contains("denied")
+                || lower.contains("not found")
+        })
+        .or_else(|| details.first().copied());
     match detail {
         Some(detail) => format!("目标机命令执行失败：{detail}。请展开执行详情查看完整输出。"),
         None => "目标机命令执行失败，请展开执行详情查看完整输出。".to_string(),

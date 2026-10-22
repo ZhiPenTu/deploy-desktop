@@ -105,6 +105,14 @@ test('failure text keeps the actionable reason instead of a generic docker messa
   );
   assert.match(notReady, /tt-net-manager-cloudflared/);
   assert.doesNotMatch(notReady, /Docker 和 Compose/);
+  const declaration = failureText(
+    '交付包声明的服务与当前生效的部署清单 deploy/docker-compose.lan.yml 不一致：cloudflared 未在该清单中声明。请修正交付包后重新制作制品；本次操作未修改目标机。',
+    '增量更新'
+  );
+  assert.match(declaration, /cloudflared/);
+  assert.match(declaration, /不一致/);
+  assert.match(declaration, /请修正交付包/);
+  assert.doesNotMatch(declaration, /Docker 和 Compose/);
   assert.match(failureText('目标机 Docker 守护进程未运行，请先启动 Docker。', '预检'), /未运行/);
   assert.match(failureText('连接超时：请检查网络连通性。', '连接检查'), /检查目标主机连接/);
 });

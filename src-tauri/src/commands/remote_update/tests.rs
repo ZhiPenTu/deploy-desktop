@@ -351,10 +351,55 @@ fn remote_script_failure_keeps_the_actionable_reason() {
     assert!(compose_error.contains("pull access denied"), "{compose_error}");
     assert!(!compose_error.contains("连接失败"), "{compose_error}");
 
+    let missing_service = remote_script_failure(
+        "服务 api 未创建，请检查交付包的服务声明与当前部署清单是否一致\n",
+        None,
+        Some(4),
+    );
+    assert!(missing_service.contains("api"), "{missing_service}");
+    assert!(missing_service.contains("交付包"), "{missing_service}");
+    assert!(!missing_service.contains("连接失败"), "{missing_service}");
+
     let connection_error = remote_script_failure(
         "ssh: connect to host 192.0.2.10 port 22: Connection refused\n",
         None,
         Some(255),
     );
     assert!(connection_error.contains("连接失败"), "{connection_error}");
+}
+
+#[test]
+fn declared_services_must_exist_in_the_effective_compose_file() {
+    use super::update::verify_service_declarations;
+
+    let root = temp_root("service-declarations");
+    let bundle_dir = generic_bundle(&root);
+    let bundle = crate::commands::bundle::Bundle::load(&bundle_dir).unwrap();
+
+    let error = verify_service_declarations(&bundle).unwrap_err();
+    assert!(error.contains("api"), "{error}");
+    assert!(error.contains("不一致"), "{error}");
+    assert!(error.contains("未在该清单中声明"), "{error}");
+    assert!(error.contains("未修改目标机"), "{error}");
+
+    let compose = bundle.root.join(bundle.effective_compose());
+    let mut content = fs::read_to_string(&compose).unwrap();
+    content.push_str("  api:\n    image: demo/api:12\n");
+    fs::write(&compose, content).unwrap();
+    verify_service_declarations(&bundle).unwrap();
+
+    fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn readiness_uses_compose_resolved_containers_instead_of_names() {
+    use super::update::readiness_script;
+
+    let script = readiness_script(&["web".to_string(), "api".to_string()]);
+    assert!(script.contains("WAIT_SERVICES='web' 'api'"), "{script}");
+    assert!(script.contains("compose ps -a -q \"$service\""), "{script}");
+    assert!(!script.contains("demo-web"), "{script}");
+    assert!(!script.contains("demo-api"), "{script}");
+    assert!(script.contains("服务 $service 未创建"), "{script}");
+    assert!(script.contains("服务 $service 未在等待时间内就绪"), "{script}");
 }
