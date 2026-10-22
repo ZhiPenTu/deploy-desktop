@@ -1,12 +1,28 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  artifactSizeText,
+  artifactTimeText,
   isBundleDirInUse,
   localStatusText,
   releaseKey,
   shortPath,
   versionText
 } from '../src/features/artifacts/domain/releases.js';
+
+test('artifactSizeText 在未记录体积时显示占位符', () => {
+  assert.equal(artifactSizeText(0), '-');
+  assert.equal(artifactSizeText(null), '-');
+  assert.equal(artifactSizeText(512), '512 B');
+  assert.equal(artifactSizeText(1536), '1.5 KB');
+  assert.equal(artifactSizeText(5 * 1024 * 1024), '5.0 MB');
+});
+
+test('artifactTimeText 在缺少构建时间时显示占位符', () => {
+  assert.equal(artifactTimeText(0), '-');
+  assert.equal(artifactTimeText(undefined), '-');
+  assert.ok(artifactTimeText(Date.UTC(2024, 0, 2, 3, 4, 5)).length > 0);
+});
 
 test('versionText 区分未标注版本与正常版本', () => {
   assert.equal(versionText({ version: '1.2.3' }), '1.2.3');

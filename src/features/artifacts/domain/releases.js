@@ -33,3 +33,23 @@ export function isBundleDirInUse(currentDir, dir) {
   if (!current || !target) return false;
   return current === target || current.startsWith(`${target}/`);
 }
+
+/** 制品体积：未记录时显示「-」，小于 1 KB 不带小数，其余保留一位。 */
+export function artifactSizeText(bytes) {
+  const value = Number(bytes || 0);
+  if (!value) return '-';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let size = value;
+  let index = 0;
+  while (size >= 1024 && index < units.length - 1) {
+    size /= 1024;
+    index += 1;
+  }
+  return `${size.toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
+}
+
+/** 构建时间：未记录时显示「-」，其余按本机时区显示完整时间。 */
+export function artifactTimeText(ms) {
+  if (!ms) return '-';
+  return new Date(Number(ms)).toLocaleString();
+}

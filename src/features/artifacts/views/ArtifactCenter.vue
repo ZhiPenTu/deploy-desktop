@@ -199,7 +199,7 @@
                 </div>
                 <span class="subtle">
                   运行 #{{ row.runId }}<template v-if="row.branch"> · 分支 {{ row.branch }}</template> ·
-                  {{ formatSize(row.sizeBytes) }}
+                  {{ artifactSizeText(row.sizeBytes) }}
                 </span>
               </div>
               <div v-else-if="row.commitShort || row.commit" class="stacked-cell">
@@ -208,14 +208,14 @@
                 </div>
                 <span class="subtle">
                   本机缓存版本<template v-if="row.branch"> · 分支 {{ row.branch }}</template> ·
-                  {{ formatSize(row.sizeBytes) }}
+                  {{ artifactSizeText(row.sizeBytes) }}
                 </span>
               </div>
               <span v-else class="subtle">{{ activeSource && activeSource.type === 'url' ? '直接下载源，无构建信息' : '本机缓存版本' }}</span>
             </template>
           </el-table-column>
           <el-table-column label="构建时间" width="145">
-            <template #default="{ row }">{{ formatTime(row.builtAt) }}</template>
+            <template #default="{ row }">{{ artifactTimeText(row.builtAt) }}</template>
           </el-table-column>
           <el-table-column label="操作" width="200">
             <template #default="{ row }">
@@ -246,141 +246,32 @@
       </div>
     </template>
 
-    <el-dialog
-      v-model="releaseVisible"
-      :title="releaseDialogTitle"
-      width="640px"
-      :close-on-click-modal="!downloading"
-    >
-      <div v-if="release" class="release-body">
-        <div class="release-grid">
-          <span class="label">版本</span>
-          <span class="value">{{ versionText(release) }}</span>
-          <template v-if="release.runId">
-            <span class="label">运行编号</span>
-            <span class="value">#{{ release.runId }}</span>
-            <span class="label">提交</span>
-            <span class="value">{{ release.commitShort || '-' }} {{ release.commitTitle }}</span>
-            <span class="label">分支</span>
-            <span class="value">{{ release.branch || '-' }}</span>
-          </template>
-          <span class="label">构建时间</span>
-          <span class="value">{{ formatTime(release.builtAt) }}</span>
-          <span class="label">文件大小</span>
-          <span class="value">{{ formatSize(release.sizeBytes) }}</span>
-          <span class="label">MD5</span>
-          <span class="value"><code>{{ release.md5 || '-' }}</code></span>
-        </div>
+    <ReleaseDownloadDialog
+      v-model:visible="releaseVisible"
+      :release="release"
+      :downloading="downloading"
+      :progress="progress"
+      :download-error="downloadError"
+      :bundle="bundle"
+      @download="download"
+      @open-run="openRunUrl"
+      @open-logs="openRuntimeLogs"
+      @deploy="deployBundle"
+    />
 
-        <el-progress
-          v-if="downloading || progress.percent > 0"
-          :percentage="progress.percent"
-          :striped="progress.phase === 'extract'"
-          :striped-flow="progress.phase === 'extract'"
-          :status="progress.percent >= 100 ? 'success' : undefined"
-        />
-        <p v-if="progress.stage" class="field-hint">{{ progress.stage }}</p>
-
-        <el-alert
-          v-if="downloadError"
-          :title="downloadError"
-          type="error"
-          :closable="false"
-          show-icon
-        >
-          <div class="alert-actions">
-            <span>下载与校验的详细过程已记录到运行日志。</span>
-            <el-button size="small" @click="openRuntimeLogs">查看运行日志</el-button>
-          </div>
-        </el-alert>
-
-        <el-alert
-          v-if="bundle"
-          :title="`已解包到 ${bundle.dir}`"
-          :description="`版本 ${bundle.version || '-'}，共 ${bundle.files} 个文件，交付包校验通过`"
-          type="success"
-          :closable="false"
-          show-icon
-        />
-      </div>
-
-      <template #footer>
-        <el-button v-if="release && release.runUrl" link type="primary" @click="openRunUrl(release)">
-          打开运行详情
-        </el-button>
-        <el-button @click="releaseVisible = false">关闭</el-button>
-        <el-button v-if="bundle" type="primary" @click="deployBundle">部署</el-button>
-        <el-button v-else type="primary" :loading="downloading" @click="download">
-          {{ downloadButtonText }}
-        </el-button>
-      </template>
-    </el-dialog>
-
-    <el-dialog
-      v-model="detailVisible"
-      :title="detailTitle"
-      width="880px"
+    <ReleaseDetailDialog
+      v-model:visible="detailVisible"
+      :release="detailRelease"
+      :plan="detailPlan"
+      :loading="detailLoading"
+      :error="detailError"
+      :target="remoteTarget"
+      :deploying="loadingVersionKey === releaseKey(detailRelease)"
       @closed="resetDetail"
-    >
-      <div v-if="detailRelease" class="release-body detail-body">
-        <div class="release-grid">
-          <span class="label">版本</span>
-          <span class="value">{{ versionText(detailRelease) }}</span>
-          <template v-if="detailRelease.runId">
-            <span class="label">运行编号</span>
-            <span class="value">#{{ detailRelease.runId }}</span>
-            <span class="label">提交</span>
-            <span class="value">{{ detailRelease.commitShort || '-' }} {{ detailRelease.commitTitle }}</span>
-            <span class="label">分支</span>
-            <span class="value">{{ detailRelease.branch || '-' }}</span>
-          </template>
-          <span class="label">构建时间</span>
-          <span class="value">{{ formatTime(detailRelease.builtAt) }}</span>
-          <span class="label">本地版本</span>
-          <span class="value">
-            {{ localStatusText(detailRelease) }}
-            <span v-if="detailRelease.localDir" class="detail-path">{{ shortPath(detailRelease.localDir) }}</span>
-          </span>
-        </div>
-
-        <p v-if="!detailRelease.localDir" class="detail-hint">
-          该版本尚未下载到本机。下载并解包后即可查看交付包链路与部署内容。
-        </p>
-        <div v-else-if="detailLoading" v-loading="true" class="plan-loading card-surface">
-          <span>正在读取交付包内容</span>
-        </div>
-        <el-alert
-          v-else-if="detailError"
-          :title="detailError"
-          type="warning"
-          :closable="false"
-          show-icon
-        />
-        <BundlePlanPanel v-else-if="detailPlan" :plan="detailPlan" :target="remoteTarget" />
-      </div>
-
-      <template #footer>
-        <el-button v-if="detailRelease && detailRelease.runUrl" link type="primary" @click="openRunUrl(detailRelease)">
-          打开运行详情
-        </el-button>
-        <el-button @click="detailVisible = false">关闭</el-button>
-        <el-button
-          v-if="detailRelease && detailRelease.localDir"
-          type="primary"
-          :loading="loadingVersionKey === releaseKey(detailRelease)"
-          @click="deployLocalVersion(detailRelease)"
-        >
-          部署
-        </el-button>
-        <el-button
-          v-else-if="detailRelease && !detailRelease.localDir && detailRelease.downloadUrl"
-          type="primary"
-          @click="downloadFromDetail"
-        >
-          下载并解包
-        </el-button>
-      </template>
-    </el-dialog>
+      @open-run="openRunUrl"
+      @deploy="deployLocalVersion"
+      @download="downloadFromDetail"
+    />
   </div>
 </template>
 
@@ -388,7 +279,8 @@
 import { computed, onMounted, reactive, ref } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { ArrowLeft, Box, Refresh } from '@element-plus/icons-vue';
-import BundlePlanPanel from '../components/BundlePlanPanel.vue';
+import ReleaseDetailDialog from '../components/ReleaseDetailDialog.vue';
+import ReleaseDownloadDialog from '../components/ReleaseDownloadDialog.vue';
 import {
   deleteLocalBundle,
   downloadArtifact,
@@ -402,6 +294,8 @@ import {
 import { reloadProjectState } from '../../connections/state.js';
 import { errorText } from '../../../shared/errors.js';
 import {
+  artifactSizeText,
+  artifactTimeText,
   isBundleDirInUse,
   localStatusText,
   releaseKey,
@@ -455,21 +349,11 @@ const latestVersionText = computed(() => {
 });
 const latestBuiltText = computed(() => {
   if (releasesLoading.value && !latestRelease.value) return '读取中';
-  return latestRelease.value ? formatTime(latestRelease.value.builtAt) : '-';
+  return latestRelease.value ? artifactTimeText(latestRelease.value.builtAt) : '-';
 });
 const loadedVersionText = computed(() => {
   if (releasesLoading.value && !releases.value.length) return '读取中';
   return `${releases.value.length}${hasMore.value ? '+' : ''}`;
-});
-const releaseDialogTitle = computed(() =>
-  release.value ? `下载版本 ${versionText(release.value)}` : '下载制品版本'
-);
-const detailTitle = computed(() =>
-  detailRelease.value ? `版本详情 ${versionText(detailRelease.value)}` : '版本详情'
-);
-const downloadButtonText = computed(() => {
-  if (downloading.value) return '正在下载并解包';
-  return release.value && release.value.localDir ? '重新下载并解包' : '下载并解包';
 });
 
 const remoteTarget = computed(() => {
@@ -489,24 +373,6 @@ function isLatest(item) {
 
 function isInUse(row) {
   return isBundleDirInUse(props.connection.bundleDir, row.lastBundleDir);
-}
-
-function formatSize(bytes) {
-  const value = Number(bytes || 0);
-  if (!value) return '-';
-  const units = ['B', 'KB', 'MB', 'GB'];
-  let size = value;
-  let index = 0;
-  while (size >= 1024 && index < units.length - 1) {
-    size /= 1024;
-    index += 1;
-  }
-  return `${size.toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
-}
-
-function formatTime(ms) {
-  if (!ms) return '-';
-  return new Date(Number(ms)).toLocaleString();
 }
 
 async function showReleaseDetail(row) {
@@ -694,7 +560,7 @@ async function removeLocal(row) {
     if (inUse) {
       await reloadProjectState();
     }
-    ElMessage.success(`已清理本地交付包，释放 ${formatSize(result.freedBytes)}`);
+    ElMessage.success(`已清理本地交付包，释放 ${artifactSizeText(result.freedBytes)}`);
     await loadSources();
     if (activeSource.value) {
       await loadReleases({ reset: true });
@@ -732,7 +598,7 @@ async function download() {
         const total = Number(event.total || 0);
         const done = Number(event.downloaded || 0);
         progress.percent = total > 0 ? Math.min(99, Math.round((done / total) * 100)) : 0;
-        progress.stage = `下载中 ${formatSize(done)} / ${formatSize(total)}`;
+        progress.stage = `下载中 ${artifactSizeText(done)} / ${artifactSizeText(total)}`;
       } else if (event.stage === 'extract') {
         progress.percent = 99;
         progress.stage = '校验并解包';
@@ -1038,29 +904,6 @@ onMounted(loadSources);
   font-size: 12px;
 }
 
-.release-body {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.release-grid {
-  display: grid;
-  grid-template-columns: 92px 1fr;
-  row-gap: 10px;
-  column-gap: 12px;
-  font-size: 13px;
-}
-
-.release-grid .label {
-  color: var(--text-muted);
-}
-
-.release-grid .value {
-  color: var(--text-main);
-  word-break: break-all;
-}
-
 .muted {
   color: var(--text-muted);
   word-break: break-all;
@@ -1123,37 +966,6 @@ onMounted(loadSources);
   margin-top: 16px;
   font-size: 11px;
   color: var(--text-faint);
-}
-
-.plan-loading {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 140px;
-  font-size: 13px;
-  color: var(--text-muted);
-}
-
-.detail-body {
-  max-height: 64vh;
-  overflow-y: auto;
-  padding-right: 4px;
-}
-
-.detail-hint {
-  margin: 0;
-  padding: 14px 16px;
-  border-radius: var(--radius-md);
-  background: var(--panel-subtle);
-  color: var(--text-muted);
-  font-size: 12.5px;
-  line-height: 1.6;
-}
-
-.detail-path {
-  margin-left: 8px;
-  color: var(--text-muted);
-  font-size: 12px;
 }
 
 @media (max-width: 980px) {
