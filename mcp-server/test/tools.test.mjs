@@ -35,8 +35,19 @@ function parseResult(result) {
 const tools = captureTools();
 
 test('注册完整工具集且名称唯一', () => {
-  assert.equal(tools.size, 40);
+  assert.equal(tools.size, 51);
   for (const name of [
+    'deploy_project_list',
+    'deploy_project_create',
+    'deploy_project_update',
+    'deploy_project_remove',
+    'deploy_project_activate',
+    'deploy_project_bind_bundle',
+    'deploy_artifact_source_list',
+    'deploy_artifact_source_save',
+    'deploy_artifact_source_remove',
+    'deploy_artifact_releases',
+    'deploy_artifact_download',
     'deploy_registry_save',
     'deploy_registry_probe',
     'deploy_manifest_load',
@@ -56,6 +67,8 @@ test('注册完整工具集且名称唯一', () => {
 
 test('破坏性工具标记 destructiveHint', () => {
   for (const name of [
+    'deploy_project_remove',
+    'deploy_artifact_source_remove',
     'deploy_host_remove',
     'deploy_registry_remove',
     'deploy_image_remove',
