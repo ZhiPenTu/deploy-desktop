@@ -33,7 +33,6 @@
           v-for="row in hosts"
           :key="row.id"
           class="host-card"
-          :class="{ 'is-active': row.id === projectHostId }"
         >
           <div class="host-head">
             <span class="host-tile">
@@ -43,9 +42,6 @@
               <div class="host-name-line">
                 <span class="host-name">{{ row.name }}</span>
                 <el-tag v-if="isLocalHost(row)" size="small" type="info" effect="plain">本机</el-tag>
-                <el-tag v-if="row.id === projectHostId" size="small" type="success" effect="plain">
-                  当前项目主机
-                </el-tag>
               </div>
               <span v-if="row.notes" class="host-notes">{{ row.notes }}</span>
             </div>
@@ -354,10 +350,6 @@ onMounted(load);
 .host-card:hover {
   border-color: #c9d2e3;
   box-shadow: var(--shadow-raised);
-}
-
-.host-card.is-active {
-  border-color: rgba(22, 119, 255, 0.45);
 }
 
 .host-head {

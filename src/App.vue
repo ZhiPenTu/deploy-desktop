@@ -11,7 +11,6 @@
         :group="currentPage.group"
         :deploy-mode="connection.mode"
         :remote-host="connection.remoteHost"
-        :project-name="projectState.project?.name || ''"
         @quick-check="handleQuickCheck"
       />
 
