@@ -4,12 +4,22 @@ import http from 'node:http';
 import path from 'node:path';
 import test from 'node:test';
 import {
+  buildBackupScript,
   checkAppUpdate,
   DEFAULT_UPDATE_ENDPOINT,
   normalizeComponents,
   resolveUpdateEndpoint,
   validateBundle
 } from '../src/update.mjs';
+
+test('buildBackupScript 使用可被 bash 解析的相对路径', () => {
+  const script = buildBackupScript('/home/tt_net_manager', [
+    { target: '/home/tt_net_manager/backend-java/server/target/tt-net-manager-server.jar' }
+  ]);
+  assert.equal(script.includes("${'"), false);
+  assert.match(script, /REL='backend-java\/server\/target\/tt-net-manager-server\.jar'/);
+  assert.match(script, /cp -a '\/home\/tt_net_manager\/backend-java\/server\/target\/tt-net-manager-server\.jar' "\$BACKUP\/\$REL"/);
+});
 import { makeTempDir, writeBundle } from './helpers.mjs';
 import { Bundle } from '../src/bundle.mjs';
 

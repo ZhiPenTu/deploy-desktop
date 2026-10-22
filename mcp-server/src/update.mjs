@@ -4,6 +4,7 @@ import { DeployError } from './errors.mjs';
 import { run } from './exec.mjs';
 import { inspectRemoteDeployment } from './deploy.mjs';
 import { Bundle, normalizeComponents as normalizeBundleComponents } from './bundle.mjs';
+import { verifyImagesRemote } from './image-lock.mjs';
 import { containerName, serviceKeysForComponent } from './profile.mjs';
 import { runRemote, uploadDir, uploadFile } from './ssh.mjs';
 import { compareVersions, expandHome, formatBytes, nowStamp, shellQuote } from './util.mjs';
@@ -84,16 +85,17 @@ async function remoteFreeKb(hostConfig, dir) {
   return Number(result.stdout.trim()) || 0;
 }
 
-async function createRemoteBackup(profile, hostConfig, installDir, deployDir, artifacts) {
+export function buildBackupScript(installDir, artifacts) {
   const lines = artifacts.map((artifact) => {
     const target = shellQuote(artifact.target);
+    const relative = shellQuote(path.posix.relative(installDir, artifact.target));
     return `if [ -e ${target} ]; then
-  REL=\${${target}#$INSTALL/}
+  REL=${relative}
   mkdir -p "$BACKUP/$(dirname "$REL")"
   cp -a ${target} "$BACKUP/$REL"
 fi`;
   }).join('\n');
-  const script = `set -e
+  return `set -e
 INSTALL=${shellQuote(installDir)}
 STAMP=$(date +%Y%m%d-%H%M%S)
 BACKUP="$INSTALL/backup/update-$STAMP"
@@ -101,6 +103,10 @@ mkdir -p "$BACKUP"
 ${lines}
 echo "BACKUP_DIR=$BACKUP"
 `;
+}
+
+async function createRemoteBackup(profile, hostConfig, installDir, deployDir, artifacts) {
+  const script = buildBackupScript(installDir, artifacts);
   const result = await runRemote(hostConfig, script, { timeoutMs: 30 * 60 * 1000 });
   const line = result.stdout.split('\n').find((item) => item.startsWith('BACKUP_DIR='));
   if (!line) throw new DeployError('备份完成但未返回备份目录');
@@ -174,6 +180,15 @@ export async function updateRemote(profile, hostConfig, options = {}) {
   progress(10, '检查目标机状态');
   const status = await inspectRemoteDeployment(profile, hostConfig, installDir);
   ensureRequiredContainers(profile, components, status);
+  progress(12, '校验基础镜像');
+  const imageCheck = await verifyImagesRemote(hostConfig, bundle);
+  if (imageCheck.problems.length > 0) {
+    throw new DeployError(`基础镜像预检未通过：${imageCheck.problems.join('；')}`, {
+      code: 'IMAGE_PRECHECK_FAILED',
+      hint: '请先在镜像分发中上传并导入交付包声明的镜像，并确认目标机架构已被镜像锁声明支持。',
+      details: { hostPlatform: imageCheck.hostPlatform, checks: imageCheck.checks }
+    });
+  }
   if (options.backup) {
     const freeKb = await remoteFreeKb(hostConfig, installDir);
     if (freeKb < 2 * 1024 * 1024) {
@@ -190,7 +205,8 @@ export async function updateRemote(profile, hostConfig, options = {}) {
       components,
       backupDir: null,
       artifacts: artifacts.map(({ key, label, root, path: relative, target }) => ({ key, label, root, path: relative, target })),
-      output: `预检通过：目标机 ${installDir} 已部署，更新包与所需容器检查通过。未上传文件，也未重启服务。`,
+      images: imageCheck,
+      output: `预检通过：目标机 ${installDir} 已部署，更新包、所需容器与 ${imageCheck.checks.length} 个基础镜像（目标机架构 ${imageCheck.hostPlatform || '未知'}）检查通过。未上传文件，也未重启服务。`,
       durationSecs: Math.round((Date.now() - started) / 1000),
       status
     };
@@ -229,6 +245,7 @@ export async function updateRemote(profile, hostConfig, options = {}) {
     components,
     backupDir,
     artifacts: artifacts.map(({ key, label, root, path: relative, target }) => ({ key, label, root, path: relative, target })),
+    images: imageCheck,
     output,
     durationSecs: Math.round((Date.now() - started) / 1000),
     status: finalStatus

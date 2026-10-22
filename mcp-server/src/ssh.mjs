@@ -77,7 +77,11 @@ export async function resolveHost(input, overrides = {}) {
   base.deployDir = base.deployDir
     ? expandHome(base.deployDir)
     : (base.installDir ? `${base.installDir.replace(/\/+$/, '')}/deploy` : '');
-  base.bundleDir = expandHome(base.bundleDir || project?.lastBundleDir || '');
+  const remoteHost = Boolean(base.host) && String(base.kind || 'ssh').toLowerCase() !== 'local';
+  base.bundleDir = expandHome(base.bundleDir || (remoteHost ? '' : project?.lastBundleDir || ''));
+  if (!base.bundleDir && remoteHost && base.installDir) {
+    base.bundleDir = `${base.installDir.replace(/\/+$/, '')}/bundle`;
+  }
   base.keyPath = base.keyPath ? expandHome(base.keyPath) : '';
   return { host: validateHost(base), configured: Boolean(configured || managed) };
 }
@@ -119,7 +123,7 @@ export function buildSshArgs(hostConfig, extra = []) {
     '-p', String(hostConfig.port || 22)
   ];
   if (keyPath) args.push('-i', keyPath);
-  args.push(...extra, `${hostConfig.user || 'root'}@${hostConfig.host}`);
+  args.push(`${hostConfig.user || 'root'}@${hostConfig.host}`, ...extra);
   return args;
 }
 
@@ -353,7 +357,7 @@ mv -f ${shellQuote(temp)} ${shellQuote(remotePath)}
     });
     await pipeline(stream, stdin);
   };
-  const result = await runStreaming(ssh, buildSshArgs(hostConfig, ['bash -s']), feed, {
+  const result = await runStreaming(ssh, buildSshArgs(hostConfig, [script]), feed, {
     timeoutMs: options.timeoutMs ?? 30 * 60 * 1000
   });
   if (result.code !== 0) {
@@ -382,7 +386,7 @@ mv ${shellQuote(temp)} ${shellQuote(remoteDir)}
   });
   const tarErrors = [];
   tarProcess.stderr.on('data', (chunk) => tarErrors.push(chunk));
-  const sshProcess = spawn(ssh, buildSshArgs(hostConfig, ['bash -s']), {
+  const sshProcess = spawn(ssh, buildSshArgs(hostConfig, [script]), {
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true
   });

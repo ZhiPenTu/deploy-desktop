@@ -208,6 +208,8 @@ deploy_update_remote { host: "lan-01", bundleDir: "/data/update", components: ["
 
 更新包目录需要包含 `app/` 与 `deploy/` 产物。组件可选 `backend`、`gateway`、`frontend`、`config`。
 
+`deploy_update_remote` 在预检阶段会读取交付包附带的镜像锁 `deploy/images.lock.json`，逐个核对目标机的基础镜像：镜像是否已导入、实际架构是否与目标机一致、镜像内容（config digest）是否与镜像锁中该架构的记录一致。任一项不通过都会在 `dryRun` 阶段直接失败（错误码 `IMAGE_PRECHECK_FAILED`），不会开始上传或重启。镜像锁同时记录了 `linux/amd64` 与 `linux/arm64` 两种架构，镜像只支持单一架构时交付包无法构建。
+
 ### 6. 应用更新检查
 
 ```text
