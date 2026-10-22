@@ -47,6 +47,7 @@
           </el-table>
 
           <div v-else class="empty-state">
+            <span class="icon-tile neutral"><el-icon><Key /></el-icon></span>
             <span class="empty-title">还没有保存的访问令牌</span>
             <span class="empty-hint">保存云效个人访问令牌后，多个制品源可以直接选用，不必重复填写。</span>
           </div>
@@ -108,6 +109,7 @@
           </el-table>
 
           <div v-else class="empty-state">
+            <span class="icon-tile neutral"><el-icon><Box /></el-icon></span>
             <span class="empty-title">还没有配置云效制品源</span>
             <span class="empty-hint">填写云效组织 ID、流水线 ID 并选择访问令牌后，即可在制品中心拉取离线交付包。</span>
           </div>
@@ -225,7 +227,7 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { FolderOpened, Plus, Refresh } from '@element-plus/icons-vue';
+import { Box, FolderOpened, Key, Plus, Refresh } from '@element-plus/icons-vue';
 import { selectLocalPath as open } from '../../../api/tauri.js';
 import ArtifactSourceEditor from '../../artifacts/components/ArtifactSourceEditor.vue';
 import ArtifactTokenEditor from '../../artifacts/components/ArtifactTokenEditor.vue';
@@ -542,29 +544,4 @@ onMounted(() => {
   color: var(--text-muted);
 }
 
-.empty-state {
-  min-height: 110px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  align-items: center;
-  justify-content: center;
-  padding: 18px;
-  color: var(--text-muted);
-  font-size: 12px;
-  text-align: center;
-  border: 1px dashed var(--border-color);
-  border-radius: var(--radius-sm);
-}
-
-.empty-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-main);
-}
-
-.empty-hint {
-  max-width: 520px;
-  line-height: 1.6;
-}
 </style>

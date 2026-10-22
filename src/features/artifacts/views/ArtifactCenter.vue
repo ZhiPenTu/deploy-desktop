@@ -845,7 +845,7 @@ onMounted(loadSources);
 
 .source-card,
 .versions-card {
-  padding: 20px;
+  padding: 22px 24px;
 }
 
 .source-table,
@@ -969,16 +969,21 @@ onMounted(loadSources);
 
 .overview-stats {
   grid-column: 1 / -1;
-  gap: 10px;
-  padding-top: 16px;
-  border-top: 1px solid var(--border-color);
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border-subtle);
 }
 
 .overview-stat {
   display: flex;
-  flex: 1;
   flex-direction: column;
-  gap: 5px;
+  gap: 6px;
+  padding: 12px 16px;
+  background: var(--panel-subtle);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
   min-width: 0;
 }
 

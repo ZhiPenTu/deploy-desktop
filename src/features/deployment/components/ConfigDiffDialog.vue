@@ -151,15 +151,15 @@ async function focusInitialChange() {
 .pane-header > code { display: block; white-space: nowrap; overflow: auto; }
 .pane-code { flex: 1; min-height: 0; position: relative; overflow: auto; background: #fff; }
 .pane-code:focus-visible { outline: 2px solid var(--primary-color); outline-offset: -2px; }
-.code-content { width: max-content; min-width: 100%; padding-bottom: 0; font-family: 'SFMono-Regular', Menlo, Consolas, monospace; font-size: 12px; line-height: 24px; }
+.code-content { width: max-content; min-width: 100%; padding-bottom: 0; font-family: ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, monospace; font-size: 12px; line-height: 24px; }
 .diff-line { display: flex; height: 24px; box-sizing: border-box; padding-right: 20px; color: var(--text-main); }
 .line-number { flex: none; width: 50px; padding-right: 12px; text-align: right; color: var(--text-faint); background: #f6f8fa; user-select: none; }
 .line-marker { flex: none; width: 22px; text-align: center; user-select: none; }
 .diff-line code { white-space: pre; font: inherit; }
-.line-removed { background: #ffebe9; color: #82071e; }
-.line-removed .line-number { background: #ffd7d5; color: #a40e26; }
-.line-added { background: #dafbe1; color: #116329; }
-.line-added .line-number { background: #b7efc5; color: #116329; }
+.line-removed { background: #fef2f2; color: #991b1b; }
+.line-removed .line-number { background: #fee2e2; color: #b91c1c; font-weight: 500; }
+.line-added { background: #f0fdf4; color: #166534; }
+.line-added .line-number { background: #dcfce7; color: #15803d; font-weight: 500; }
 .line-placeholder { background: repeating-linear-gradient(135deg, #f6f8fa, #f6f8fa 4px, #eef1f5 4px, #eef1f5 5px); }
 .line-placeholder .line-number { background: transparent; }
 .pane-footer { flex: none; display: flex; justify-content: space-between; gap: 8px; padding: 9px 14px; border-top: 1px solid var(--border-color); font-size: 11px; color: var(--text-muted); background: var(--panel-subtle); }

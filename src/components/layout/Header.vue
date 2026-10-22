@@ -31,15 +31,17 @@ defineProps({
 
 <style scoped>
 .app-header {
-  height: 60px;
+  height: 56px;
   flex: none;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 20px;
   padding: 0 32px;
-  background: rgba(255, 255, 255, 0.92);
+  background: rgba(255, 255, 255, 0.88);
+  backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--border-color);
+  box-shadow: 0 1px 2px 0 rgba(15, 23, 42, 0.03);
 }
 
 .crumb {
@@ -47,18 +49,32 @@ defineProps({
   align-items: center;
   gap: 8px;
   min-width: 0;
-  font-size: 12px;
+  font-size: 12.5px;
   color: var(--text-faint);
 }
 
+.crumb-root {
+  color: var(--text-muted);
+}
+
 .crumb-sep {
-  color: #d0d5dd;
+  color: var(--border-strong);
+  font-size: 11px;
+}
+
+.crumb-group {
+  color: var(--text-secondary);
+  font-weight: 500;
 }
 
 .crumb-current {
   font-size: 13px;
   font-weight: 600;
   color: var(--text-main);
+  background: var(--panel-subtle);
+  border: 1px solid var(--border-color);
+  padding: 2px 9px;
+  border-radius: var(--radius-xs);
 }
 
 .header-actions {

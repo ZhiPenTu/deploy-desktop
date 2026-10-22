@@ -201,11 +201,12 @@ onScopeDispose(() => {
 
 <style scoped>
 .log-viewer-view {
-  padding: 24px 28px 28px;
+  padding: 24px 32px 36px;
   height: 100%;
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
+  overflow: hidden;
 }
 
 .log-toolbar {
@@ -214,7 +215,7 @@ onScopeDispose(() => {
   align-items: center;
   margin-bottom: 16px;
   gap: 16px;
-  padding: 12px 14px;
+  padding: 14px 18px;
   flex-wrap: wrap;
 }
 
@@ -227,22 +228,22 @@ onScopeDispose(() => {
 .terminal-container {
   flex: 1;
   min-height: 0;
-  background-color: #0b0f17;
-  border: 1px solid var(--border-color);
+  background-color: #0b1120;
+  border: 1px solid #1e293b;
   border-radius: var(--radius-md);
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+  box-shadow: var(--shadow-raised);
 }
 
 .terminal-bar {
-  height: 34px;
-  background-color: #121824;
-  border-bottom: 1px solid var(--border-color);
+  height: 38px;
+  background-color: #0f172a;
+  border-bottom: 1px solid #1e293b;
   display: flex;
   align-items: center;
-  padding: 0 14px;
+  padding: 0 16px;
   gap: 8px;
 }
 
@@ -257,20 +258,20 @@ onScopeDispose(() => {
 .dot.green { background-color: #10b981; }
 
 .bar-title {
-  font-size: 12px;
-  color: var(--text-muted);
-  font-family: monospace;
+  font-size: 11.5px;
+  color: #94a3b8;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
   margin-left: 8px;
 }
 
 .terminal-body {
   flex: 1;
-  padding: 16px;
+  padding: 18px;
   overflow-y: auto;
-  font-family: "JetBrains Mono", Menlo, Consolas, monospace;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
   font-size: 12px;
-  line-height: 1.5;
-  color: #cbd5e1;
+  line-height: 1.6;
+  color: #e2e8f0;
 }
 
 pre {
@@ -282,6 +283,7 @@ pre {
 .empty-tip {
   color: #64748b;
   text-align: center;
-  margin-top: 40px;
+  margin-top: 50px;
+  font-size: 12.5px;
 }
 </style>

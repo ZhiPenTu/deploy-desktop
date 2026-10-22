@@ -125,7 +125,7 @@ const navGroups = [
   display: flex;
   align-items: center;
   gap: 11px;
-  padding: 20px 18px 18px;
+  padding: 18px 18px 16px;
   border-bottom: 1px solid var(--sidebar-border);
 }
 
@@ -139,7 +139,12 @@ const navGroups = [
   flex: none;
   display: block;
   border-radius: 9px;
-  box-shadow: 0 6px 16px rgba(51, 92, 255, 0.35);
+  box-shadow: 0 4px 14px rgba(51, 92, 255, 0.35);
+  transition: transform 0.2s ease;
+}
+
+.brand-block:hover .brand-mark {
+  transform: scale(1.04);
 }
 
 .brand-copy {
@@ -165,7 +170,7 @@ const navGroups = [
 
 .nav-scroll {
   flex: 1;
-  padding: 12px 12px 16px;
+  padding: 14px 12px 16px;
   overflow-y: auto;
   scrollbar-width: none;
   -ms-overflow-style: none;
@@ -183,9 +188,10 @@ const navGroups = [
 .nav-label {
   padding: 0 10px;
   margin-bottom: 7px;
-  font-size: 10px;
+  font-size: 10.5px;
   font-weight: 600;
-  letter-spacing: 0.12em;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
   color: #64748b;
 }
 
@@ -202,16 +208,16 @@ const navGroups = [
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 0 11px;
+  padding: 0 12px 0 14px;
   border: 1px solid transparent;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: #a8b5c7;
   font: inherit;
   font-size: 13px;
   text-align: left;
   cursor: pointer;
-  transition: background-color 0.16s ease, color 0.16s ease, border-color 0.16s ease;
+  transition: background-color 0.16s ease, color 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
 }
 
 .nav-item .el-icon {
@@ -220,31 +226,33 @@ const navGroups = [
   transition: color 0.16s ease;
 }
 
-.nav-item:hover {
-  background: rgba(255, 255, 255, 0.05);
-  color: #f1f5f9;
+.nav-item:hover:not(.active) {
+  background: rgba(255, 255, 255, 0.06);
+  color: #f8fafc;
 }
 
-.nav-item:hover .el-icon {
+.nav-item:hover:not(.active) .el-icon {
   color: #c3d0e2;
 }
 
 .nav-item.active {
   color: #ffffff;
   font-weight: 500;
-  background: linear-gradient(90deg, rgba(51, 92, 255, 0.26) 0%, rgba(51, 92, 255, 0.08) 100%);
-  border-color: rgba(120, 150, 255, 0.22);
+  background: rgba(51, 92, 255, 0.18);
+  border-color: rgba(110, 145, 255, 0.28);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
 }
 
 .nav-item.active::before {
   content: "";
   position: absolute;
-  left: -1px;
+  left: 4px;
   top: 9px;
   bottom: 9px;
   width: 3px;
-  border-radius: 3px;
+  border-radius: 999px;
   background: #6f8dff;
+  box-shadow: 0 0 8px rgba(111, 141, 255, 0.7);
 }
 
 .nav-item.active .el-icon {
@@ -272,10 +280,11 @@ const navGroups = [
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 18px;
+  padding: 13px 18px;
   border-top: 1px solid var(--sidebar-border);
   font-size: 11px;
   color: var(--sidebar-muted);
+  background: var(--sidebar-bg-elevated);
 }
 
 .run-state {
@@ -285,15 +294,16 @@ const navGroups = [
 }
 
 .state-dot {
-  width: 6px;
-  height: 6px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
-  background: #34d399;
-  box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.14);
+  background: #10b981;
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.18);
 }
 
 .version {
-  font-family: "SFMono-Regular", Menlo, Consolas, monospace;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
   color: #64748b;
+  font-size: 11px;
 }
 </style>

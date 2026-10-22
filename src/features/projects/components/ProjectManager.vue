@@ -1,8 +1,11 @@
 <template>
   <div class="card-surface settings-card">
     <div class="card-title-bar">
-      <h3>项目</h3>
-      <span class="hint">每个项目对应一台主机、一个部署目录和一个制品源</span>
+      <div>
+        <h3>项目</h3>
+        <p class="hint">每个项目对应一台主机、一个部署目录和一个制品源</p>
+      </div>
+      <el-tag v-if="projects.length" size="small" effect="plain">{{ projects.length }} 个项目</el-tag>
     </div>
 
     <div v-if="projects.length" class="project-grid">
@@ -55,6 +58,7 @@
     </div>
 
     <div v-else class="empty-state">
+      <span class="icon-tile neutral"><el-icon><FolderOpened /></el-icon></span>
       <span class="empty-title">还没有项目</span>
       <span class="empty-hint">
         新建项目后填写目标主机与部署目录，再在制品中心选择交付包，即可开始部署。
@@ -102,9 +106,9 @@
         </el-select>
       </el-form-item>
     </el-form>
-    <p class="field-hint">
+    <div class="dialog-tip">
       部署目录是目标主机上的绝对路径，填写安装根目录（例如 /opt/demo）。交付包内的文件按包内声明写入该目录及其子目录，Compose 清单通常落在其下的 deploy 子目录。
-    </p>
+    </div>
     <template #footer>
       <el-button @click="editorVisible = false">取消</el-button>
       <el-button type="primary" :loading="saving" @click="save">保存</el-button>
@@ -115,7 +119,7 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { Document, Monitor, Plus, Refresh } from '@element-plus/icons-vue';
+import { Document, FolderOpened, Monitor, Plus, Refresh } from '@element-plus/icons-vue';
 import {
   createProject,
   deleteProject,
@@ -125,40 +129,51 @@ import {
 import { projectState } from '../../../config/project.js';
 import {
   connectionInventory,
-  hostById,
+  refreshConnectionInventory,
   reloadProjectState
 } from '../../connections/state.js';
 import { errorText } from '../../../shared/errors.js';
 
 const emit = defineEmits(['deploy', 'inspect']);
-const projects = computed(() => projectState.projects);
-const hosts = computed(() => connectionInventory.hosts);
-const sources = ref([]);
+
 const loading = ref(false);
 const saving = ref(false);
 const editorVisible = ref(false);
 const editingId = ref('');
-const form = reactive({ name: '', hostId: '', installDir: '', sourceId: '' });
+const sources = ref([]);
 
-function hostText(id) {
-  const host = hostById(id);
-  if (!host) return '主机未配置';
-  return host.kind === 'local' ? '本机' : `${host.name}（${host.address}）`;
+const form = reactive({
+  name: '',
+  hostId: '',
+  installDir: '',
+  sourceId: ''
+});
+
+const projects = computed(() => projectState.projects || []);
+const hosts = computed(() => connectionInventory.hosts || []);
+
+function hostText(hostId) {
+  const host = hosts.value.find((item) => item.id === hostId);
+  if (!host) return '未指定主机';
+  if (host.kind === 'local') return '本机';
+  return `${host.name}（${host.address}:${host.port}）`;
 }
 
-function sourceText(id) {
-  if (!id) return '';
-  return sources.value.find((source) => source.id === id)?.name || '';
+function sourceText(sourceId) {
+  if (!sourceId) return '';
+  const source = sources.value.find((item) => item.id === sourceId);
+  return source?.name || '';
 }
 
 async function load() {
   loading.value = true;
   try {
-    const [list] = await Promise.all([
-      listArtifactSources(),
-      reloadProjectState()
-    ]);
-    sources.value = Array.isArray(list) ? list : [];
+    await Promise.all([reloadProjectState(), refreshConnectionInventory()]);
+    try {
+      sources.value = await listArtifactSources();
+    } catch {
+      sources.value = [];
+    }
   } catch (error) {
     ElMessage.error(errorText(error));
   } finally {
@@ -168,11 +183,13 @@ async function load() {
 
 function openCreate() {
   editingId.value = '';
+  const firstLocal = hosts.value.find((item) => item.kind === 'local');
+  const defaultHost = firstLocal || hosts.value[0];
   Object.assign(form, {
     name: '',
-    hostId: hosts.value[0]?.id || '',
-    installDir: '',
-    sourceId: ''
+    hostId: defaultHost?.id || '',
+    installDir: '/opt/demo',
+    sourceId: sources.value[0]?.id || ''
   });
   editorVisible.value = true;
 }
@@ -257,7 +274,7 @@ onMounted(load);
 
 <style scoped>
 .settings-card {
-  padding: 20px;
+  padding: 22px 24px;
   margin-bottom: 18px;
 }
 
@@ -266,7 +283,7 @@ onMounted(load);
   justify-content: space-between;
   align-items: center;
   gap: 14px;
-  margin-bottom: 16px;
+  margin-bottom: 18px;
 }
 
 .card-title-bar h3 {
@@ -276,30 +293,32 @@ onMounted(load);
 }
 
 .card-title-bar .hint {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-muted);
 }
 
 .project-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
-  gap: 14px;
+  gap: 16px;
 }
 
 .project-card {
   display: flex;
   flex-direction: column;
   gap: 14px;
-  padding: 16px;
+  padding: 18px;
   border: 1px solid var(--border-color);
-  border-radius: var(--radius-md, 12px);
-  background: var(--surface-subtle, #fff);
-  transition: border-color 0.16s ease, box-shadow 0.16s ease;
+  border-radius: var(--radius-md);
+  background: var(--panel-bg);
+  box-shadow: var(--shadow-card);
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
 }
 
 .project-card:hover {
-  border-color: var(--brand-border, rgba(51, 92, 255, 0.4));
-  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.06);
+  border-color: var(--brand-border);
+  box-shadow: var(--shadow-card-hover);
+  transform: translateY(-1px);
 }
 
 .project-head {
@@ -332,22 +351,33 @@ onMounted(load);
 
 .bundle-version {
   flex: none;
-  max-width: 46%;
+  max-width: 48%;
   font-size: 11px;
-  font-family: "SFMono-Regular", Menlo, Consolas, monospace;
-  color: var(--text-secondary);
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  color: var(--primary-color);
+  background: var(--primary-soft);
+  border: 1px solid rgba(51, 92, 255, 0.18);
+  padding: 2px 7px;
+  border-radius: var(--radius-xs);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.bundle-version.muted-text {
+  color: var(--text-muted);
+  background: var(--panel-subtle);
+  border-color: var(--border-color);
 }
 
 .project-meta {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 12px;
+  padding: 12px 14px;
   border-radius: var(--radius-sm);
-  background: var(--surface-muted, rgba(15, 23, 42, 0.03));
+  background: var(--panel-subtle);
+  border: 1px solid var(--border-subtle);
 }
 
 .meta-row {
@@ -360,6 +390,7 @@ onMounted(load);
 
 .meta-row dt {
   color: var(--text-muted);
+  font-size: 12px;
 }
 
 .meta-row dd {
@@ -371,7 +402,7 @@ onMounted(load);
 }
 
 .meta-row dd.mono-text {
-  font-size: 11px;
+  font-size: 11.5px;
 }
 
 .project-foot {
@@ -380,7 +411,7 @@ onMounted(load);
   gap: 8px;
   flex-wrap: wrap;
   margin-top: auto;
-  padding-top: 12px;
+  padding-top: 14px;
   border-top: 1px solid var(--border-color);
 }
 
@@ -390,12 +421,6 @@ onMounted(load);
 
 .foot-spacer {
   flex: 1;
-}
-
-.mono-text {
-  font-size: 11px;
-  font-family: "SFMono-Regular", Menlo, Consolas, monospace;
-  color: var(--text-secondary);
 }
 
 .muted-text {
@@ -412,39 +437,17 @@ onMounted(load);
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
-  margin-top: 16px;
+  margin-top: 18px;
 }
 
-.field-hint {
-  margin: 4px 0 0;
-  font-size: 11px;
-  line-height: 1.6;
-  color: var(--text-muted);
-}
-
-.empty-state {
-  min-height: 110px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  align-items: center;
-  justify-content: center;
-  padding: 18px;
-  color: var(--text-muted);
+.dialog-tip {
+  margin: 6px 0 0;
+  padding: 10px 14px;
   font-size: 12px;
-  text-align: center;
-  border: 1px dashed var(--border-color);
-  border-radius: var(--radius-sm);
-}
-
-.empty-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-main);
-}
-
-.empty-hint {
-  max-width: 520px;
   line-height: 1.6;
+  color: var(--text-muted);
+  background: var(--panel-subtle);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
 }
 </style>

@@ -102,7 +102,8 @@
       </div>
 
       <div v-else class="empty-state">
-        {{ loading ? '正在加载清单' : '填写清单地址后点击“加载清单”预览镜像' }}
+        <span class="icon-tile neutral"><el-icon><DocumentChecked /></el-icon></span>
+        <span class="empty-hint">{{ loading ? '正在加载清单' : '填写清单地址后点击“加载清单”预览镜像' }}</span>
       </div>
     </div>
 
@@ -553,17 +554,6 @@ onMounted(async () => {
   font-size: 12px;
 }
 
-.empty-state {
-  min-height: 120px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--text-muted);
-  font-size: 12px;
-  border: 1px dashed var(--border-color);
-  border-radius: var(--radius-sm);
-}
-
 .action-row {
   display: flex;
   align-items: center;
@@ -612,13 +602,13 @@ onMounted(async () => {
   max-height: 240px;
   overflow: auto;
   margin: 0;
-  padding: 12px;
+  padding: 14px;
   border-radius: var(--radius-sm);
-  background: #0b0f17;
-  border: 1px solid var(--border-color);
-  color: #b9c6d8;
-  font-size: 11px;
-  line-height: 1.55;
+  background: #0b1120;
+  border: 1px solid #1e293b;
+  color: #cbd5e1;
+  font-size: 12px;
+  line-height: 1.6;
   font-family: "SFMono-Regular", Menlo, Consolas, monospace;
   white-space: pre-wrap;
 }

@@ -272,7 +272,7 @@ const handleInstallDocker = async () => {
     }
     await fetchEnv();
   } catch (e) {
-    ElMessage.error(`Docker 安装失败: ${e}`);
+    ElMessage.error(`Docker 安装失败: ${errorText(e)}`);
   } finally {
     installing.value = false;
   }
@@ -299,11 +299,18 @@ watch(
 }
 
 .metric-box {
-  padding: 16px;
+  padding: 18px 20px;
   display: flex;
   align-items: flex-start;
-  gap: 13px;
+  gap: 14px;
   min-width: 0;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
+}
+
+.metric-box:hover {
+  border-color: var(--brand-border);
+  box-shadow: var(--shadow-card-hover);
+  transform: translateY(-1px);
 }
 
 .info {
@@ -311,27 +318,29 @@ watch(
 }
 
 .metric-box .label {
-  font-size: 11px;
+  font-size: 11.5px;
+  font-weight: 500;
   color: var(--text-muted);
 }
 
 .metric-box .value {
-  margin: 5px 0 3px;
-  font-size: 16px;
-  font-weight: 600;
+  margin: 6px 0 4px;
+  font-size: 17px;
+  font-weight: 650;
   color: var(--text-main);
   line-height: 1.35;
+  letter-spacing: -0.01em;
   overflow-wrap: anywhere;
 }
 
 .metric-box .sub {
-  font-size: 10px;
-  line-height: 1.45;
+  font-size: 11px;
+  line-height: 1.5;
   color: var(--text-muted);
 }
 
 .section-card {
-  padding: 20px;
+  padding: 22px 24px;
   margin-bottom: 20px;
 }
 
@@ -345,7 +354,7 @@ watch(
 
 .card-title-bar h3 {
   font-size: 15px;
-  font-weight: 600;
+  font-weight: 650;
   color: var(--text-main);
 }
 
@@ -357,7 +366,7 @@ watch(
 .docker-details {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
   font-size: 13px;
 }
 
@@ -368,14 +377,20 @@ watch(
 }
 
 .detail-row .k {
-  width: 130px;
+  width: 140px;
   flex: none;
+  font-size: 12.5px;
   color: var(--text-muted);
 }
 
 .detail-row .v {
-  color: var(--text-secondary);
-  font-family: "SFMono-Regular", Menlo, Consolas, monospace;
+  color: var(--text-main);
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  background: var(--surface-muted);
+  padding: 1px 7px;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border-subtle);
   word-break: break-all;
 }
 
@@ -384,27 +399,32 @@ watch(
 }
 
 .install-action {
-  margin-top: 12px;
+  margin-top: 14px;
 }
 
 .issues-list {
   display: flex;
   flex-direction: column;
-  gap: 9px;
+  gap: 10px;
 }
 
 .issue-item {
   display: flex;
   align-items: flex-start;
-  gap: 8px;
-  font-size: 13px;
+  gap: 10px;
+  font-size: 12.5px;
   line-height: 1.5;
-  color: #e8b65d;
+  color: var(--warning-color);
+  background: var(--warning-soft);
+  border: 1px solid rgba(245, 158, 11, 0.2);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
 }
 
 .issue-icon {
   margin-top: 2px;
   flex: none;
+  font-size: 15px;
 }
 
 .header-actions {
@@ -420,38 +440,26 @@ watch(
 }
 
 .summary-title {
-  font-size: 17px;
-  font-weight: 600;
+  font-size: 16px;
+  font-weight: 650;
   color: var(--text-main);
 }
 
 .summary-tags {
-  margin-top: -8px;
+  display: flex;
+  gap: 8px;
 }
 
 .summary-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 8px 28px;
-}
-
-.summary-grid .info-row {
   display: flex;
-  align-items: baseline;
-  gap: 10px;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
 }
 
-.summary-grid .k {
-  width: 72px;
-  flex: none;
-  font-size: 12px;
-  color: var(--text-muted);
-}
-
-.summary-grid .v {
-  min-width: 0;
-  font-size: 13px;
-  color: var(--text-secondary);
-  overflow-wrap: anywhere;
+@media (max-width: 1100px) {
+  .metrics-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 </style>

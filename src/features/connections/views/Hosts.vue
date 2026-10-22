@@ -102,6 +102,7 @@
       </div>
 
       <div v-else class="empty-state">
+        <span class="icon-tile neutral"><el-icon><Monitor /></el-icon></span>
         <span class="empty-title">还没有保存的主机</span>
         <span class="empty-hint">可添加本机（当前电脑）或通过 SSH 连接局域网服务器，保存后用于部署、更新、监控和日志诊断。</span>
       </div>
@@ -276,23 +277,17 @@ onMounted(load);
 
 <style scoped>
 .hosts-card {
-  padding: 20px;
-}
-
-.card-subtitle {
-  margin-top: 5px;
-  font-size: 11px;
-  color: var(--text-muted);
+  padding: 22px 24px;
 }
 
 .page-alert {
-  margin-bottom: 14px;
+  margin-bottom: 16px;
 }
 
 .host-list {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 16px;
 }
 
 .host-card {
@@ -303,32 +298,34 @@ onMounted(load);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-card);
-  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
 }
 
 .host-card:hover {
-  border-color: #c9d2e3;
-  box-shadow: var(--shadow-raised);
+  border-color: var(--brand-border);
+  box-shadow: var(--shadow-card-hover);
+  transform: translateY(-1px);
 }
 
 .host-head {
   display: flex;
-  align-items: flex-start;
-  gap: 11px;
-  padding: 15px 16px 13px;
-  border-bottom: 1px solid var(--border-color);
+  align-items: center;
+  gap: 12px;
+  padding: 16px 18px 14px;
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .host-tile {
-  width: 26px;
-  height: 26px;
+  width: 34px;
+  height: 34px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex: none;
-  border-radius: 7px;
+  border-radius: var(--radius-sm);
   color: var(--primary-color);
   background: var(--primary-soft);
+  font-size: 16px;
 }
 
 .host-ident {
@@ -336,18 +333,18 @@ onMounted(load);
   flex-direction: column;
   flex: 1;
   min-width: 0;
-  gap: 3px;
+  gap: 2px;
 }
 
 .host-name-line {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
   flex-wrap: wrap;
 }
 
 .host-name {
-  font-size: 13px;
+  font-size: 13.5px;
   font-weight: 600;
   color: var(--text-main);
   overflow-wrap: anywhere;
@@ -355,7 +352,7 @@ onMounted(load);
 
 .host-notes {
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 11.5px;
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
@@ -364,7 +361,7 @@ onMounted(load);
   display: flex;
   flex-direction: column;
   gap: 9px;
-  padding: 13px 16px;
+  padding: 14px 18px;
   font-size: 12px;
 }
 
@@ -378,6 +375,7 @@ onMounted(load);
 .info-row .k {
   flex: none;
   color: var(--text-muted);
+  font-size: 12px;
 }
 
 .info-row .v {
@@ -388,9 +386,13 @@ onMounted(load);
 }
 
 .info-row .v.code {
-  font-family: "SFMono-Regular", Menlo, Consolas, monospace;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
   font-size: 11px;
   color: var(--text-secondary);
+  background: var(--surface-muted);
+  padding: 1px 6px;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border-subtle);
 }
 
 .info-row .v.muted {
@@ -400,13 +402,17 @@ onMounted(load);
 .credential-value {
   display: flex;
   flex-direction: column;
+  align-items: flex-end;
   gap: 3px;
 }
 
 .credential-key {
   color: var(--text-muted);
-  font-family: "SFMono-Regular", Menlo, Consolas, monospace;
-  font-size: 10px;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 10.5px;
+  background: var(--surface-muted);
+  padding: 1px 5px;
+  border-radius: var(--radius-xs);
   overflow-wrap: anywhere;
 }
 
@@ -415,10 +421,10 @@ onMounted(load);
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
-  min-height: 41px;
+  min-height: 44px;
   margin-top: auto;
-  padding: 6px 12px;
-  border-top: 1px solid var(--border-color);
+  padding: 8px 14px 8px 18px;
+  border-top: 1px solid var(--border-subtle);
   background: var(--panel-subtle);
 }
 
@@ -426,7 +432,7 @@ onMounted(load);
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 2px;
+  gap: 4px;
   flex-wrap: wrap;
   margin-left: auto;
 }
@@ -439,43 +445,17 @@ onMounted(load);
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-top: 16px;
-}
-
-.empty-state {
-  min-height: 190px;
-  display: flex;
-  flex-direction: column;
-  gap: 9px;
-  align-items: center;
-  justify-content: center;
-  padding: 18px;
-  color: var(--text-muted);
-  font-size: 12px;
-  text-align: center;
-  border: 1px dashed var(--border-color);
-  border-radius: var(--radius-sm);
-}
-
-.empty-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-main);
-}
-
-.empty-hint {
-  max-width: 520px;
-  line-height: 1.6;
-  margin-bottom: 3px;
+  margin-top: 18px;
 }
 
 .result-body {
   display: flex;
   align-items: flex-start;
-  gap: 10px;
-  padding: 12px 14px;
+  gap: 12px;
+  padding: 14px 16px;
   border-radius: var(--radius-sm);
   background: var(--panel-subtle);
+  border: 1px solid var(--border-color);
 }
 
 .result-body .el-icon {
@@ -484,8 +464,18 @@ onMounted(load);
   font-size: 18px;
 }
 
+.result-body.success {
+  background: var(--success-soft);
+  border-color: rgba(34, 197, 94, 0.25);
+}
+
 .result-body.success .el-icon {
   color: var(--success-color);
+}
+
+.result-body.failure {
+  background: var(--danger-soft);
+  border-color: rgba(239, 68, 68, 0.25);
 }
 
 .result-body.failure .el-icon {
@@ -497,8 +487,8 @@ onMounted(load);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font-family: inherit;
-  font-size: 12px;
-  line-height: 1.65;
-  color: var(--text-secondary);
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text-main);
 }
 </style>

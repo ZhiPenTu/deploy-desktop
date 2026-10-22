@@ -28,9 +28,9 @@
         <el-checkbox v-model="clearPassword">清除已保存的初始密码</el-checkbox>
       </el-form-item>
     </el-form>
-    <p class="field-hint">
+    <div class="dialog-tip">
       私钥保留在原位置，应用只记录路径；留空时尝试使用默认 SSH 密钥。初始密码仅用于首次下发免密密钥，不会显示在列表中。
-    </p>
+    </div>
     <template #footer>
       <el-button @click="visible = false">取消</el-button>
       <el-button type="primary" :loading="saving" @click="save">保存</el-button>
@@ -130,11 +130,14 @@ async function save() {
 </script>
 
 <style scoped>
-.field-hint {
-  margin: 0;
-  padding-left: 112px;
-  font-size: 11px;
+.dialog-tip {
+  margin: 8px 0 0;
+  padding: 10px 14px;
+  font-size: 12px;
   line-height: 1.6;
   color: var(--text-muted);
+  background: var(--panel-subtle);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
 }
 </style>

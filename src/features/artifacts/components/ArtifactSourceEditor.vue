@@ -69,9 +69,9 @@
         </el-form-item>
       </template>
     </el-form>
-    <p v-if="form.type === 'yunxiaoFlow'" class="field-hint">
+    <div v-if="form.type === 'yunxiaoFlow'" class="dialog-tip">
       令牌仅保存在本机，供当前用户读取，并可在多个云效制品源之间复用。
-    </p>
+    </div>
     <template #footer>
       <el-button @click="visible = false">取消</el-button>
       <el-button type="primary" :loading="saving" @click="save">保存</el-button>
@@ -251,5 +251,16 @@ async function save() {
   font-size: 11px;
   line-height: 1.55;
   color: var(--text-muted);
+}
+
+.dialog-tip {
+  margin-top: 14px;
+  padding: 10px 14px;
+  background: var(--panel-subtle);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-color);
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.6;
 }
 </style>

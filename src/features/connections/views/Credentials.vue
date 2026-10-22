@@ -81,6 +81,7 @@
       </div>
 
       <div v-else class="empty-state">
+        <span class="icon-tile neutral"><el-icon><Key /></el-icon></span>
         <span class="empty-title">还没有 SSH 凭证</span>
         <span class="empty-hint">先保存登录用户名与私钥位置，再到主机管理中绑定目标服务器。</span>
       </div>
@@ -176,23 +177,17 @@ onMounted(load);
 
 <style scoped>
 .credentials-card {
-  padding: 20px;
-}
-
-.card-subtitle {
-  margin-top: 5px;
-  font-size: 11px;
-  color: var(--text-muted);
+  padding: 22px 24px;
 }
 
 .page-alert {
-  margin-bottom: 14px;
+  margin-bottom: 16px;
 }
 
 .credential-list {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 16px;
 }
 
 .credential-card {
@@ -203,32 +198,34 @@ onMounted(load);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-card);
-  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
 }
 
 .credential-card:hover {
-  border-color: #c9d2e3;
-  box-shadow: var(--shadow-raised);
+  border-color: var(--brand-border);
+  box-shadow: var(--shadow-card-hover);
+  transform: translateY(-1px);
 }
 
 .credential-head {
   display: flex;
-  align-items: flex-start;
-  gap: 11px;
-  padding: 15px 16px 13px;
-  border-bottom: 1px solid var(--border-color);
+  align-items: center;
+  gap: 12px;
+  padding: 16px 18px 14px;
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .credential-tile {
-  width: 26px;
-  height: 26px;
+  width: 34px;
+  height: 34px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex: none;
-  border-radius: 7px;
+  border-radius: var(--radius-sm);
   color: var(--primary-color);
   background: var(--primary-soft);
+  font-size: 16px;
 }
 
 .credential-ident {
@@ -236,18 +233,18 @@ onMounted(load);
   flex-direction: column;
   flex: 1;
   min-width: 0;
-  gap: 3px;
+  gap: 2px;
 }
 
 .credential-name {
-  font-size: 13px;
+  font-size: 13.5px;
   font-weight: 600;
   color: var(--text-main);
   overflow-wrap: anywhere;
 }
 
 .credential-user {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-muted);
 }
 
@@ -255,7 +252,7 @@ onMounted(load);
   display: flex;
   flex-direction: column;
   gap: 9px;
-  padding: 13px 16px;
+  padding: 14px 18px;
   font-size: 12px;
 }
 
@@ -269,6 +266,7 @@ onMounted(load);
 .info-row .k {
   flex: none;
   color: var(--text-muted);
+  font-size: 12px;
 }
 
 .info-row .v {
@@ -279,9 +277,13 @@ onMounted(load);
 }
 
 .info-row .v.code {
-  font-family: "SFMono-Regular", Menlo, Consolas, monospace;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
   font-size: 11px;
   color: var(--text-secondary);
+  background: var(--surface-muted);
+  padding: 1px 6px;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border-subtle);
 }
 
 .info-row .v.muted {
@@ -293,15 +295,15 @@ onMounted(load);
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  min-height: 41px;
+  min-height: 44px;
   margin-top: auto;
-  padding: 6px 12px;
-  border-top: 1px solid var(--border-color);
+  padding: 8px 14px 8px 18px;
+  border-top: 1px solid var(--border-subtle);
   background: var(--panel-subtle);
 }
 
 .foot-hint {
-  font-size: 11px;
+  font-size: 11.5px;
   color: var(--text-muted);
   line-height: 1.4;
 }
@@ -309,7 +311,7 @@ onMounted(load);
 .foot-actions {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 4px;
   flex: none;
   margin-left: auto;
 }
@@ -322,32 +324,6 @@ onMounted(load);
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-top: 16px;
-}
-
-.empty-state {
-  min-height: 170px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  align-items: center;
-  justify-content: center;
-  padding: 18px;
-  color: var(--text-muted);
-  font-size: 12px;
-  text-align: center;
-  border: 1px dashed var(--border-color);
-  border-radius: var(--radius-sm);
-}
-
-.empty-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-main);
-}
-
-.empty-hint {
-  max-width: 520px;
-  line-height: 1.6;
+  margin-top: 18px;
 }
 </style>

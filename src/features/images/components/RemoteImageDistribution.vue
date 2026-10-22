@@ -108,7 +108,10 @@
       </el-table>
 
       <div v-else class="empty-state">
-        {{ remote ? (remote.exists ? '目标机镜像目录为空' : '目标机镜像目录未就绪，请先上传离线包') : '点击“检测目标机”读取镜像包与 Docker 镜像状态' }}
+        <span class="icon-tile neutral"><el-icon><Box /></el-icon></span>
+        <span class="empty-hint">
+          {{ remote ? (remote.exists ? '目标机镜像目录为空' : '目标机镜像目录未就绪，请先上传离线包') : '点击“检测目标机”读取镜像包与 Docker 镜像状态' }}
+        </span>
       </div>
     </div>
 
@@ -174,7 +177,7 @@
 import { useDesktopProgress } from '../../../shared/composables/useDesktopProgress.js';
 import { computed, onMounted, ref } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { Refresh } from '@element-plus/icons-vue';
+import { Box, Refresh } from '@element-plus/icons-vue';
 import {
   importRemoteImageBundle,
   inspectRemoteImageBundle,
@@ -626,21 +629,6 @@ onMounted(async () => {
   flex-wrap: wrap;
 }
 
-.empty-state {
-  min-height: 120px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  align-items: center;
-  justify-content: center;
-  padding: 18px;
-  color: var(--text-muted);
-  font-size: 12px;
-  text-align: center;
-  border: 1px dashed var(--border-color);
-  border-radius: var(--radius-sm);
-}
-
 .progress-bar {
   margin-bottom: 12px;
 }
@@ -674,13 +662,13 @@ onMounted(async () => {
   max-height: 240px;
   overflow: auto;
   margin: 0;
-  padding: 12px;
+  padding: 14px;
   border-radius: var(--radius-sm);
-  background: #0b0f17;
-  border: 1px solid var(--border-color);
-  color: #b9c6d8;
-  font-size: 11px;
-  line-height: 1.55;
+  background: #0b1120;
+  border: 1px solid #1e293b;
+  color: #cbd5e1;
+  font-size: 12px;
+  line-height: 1.6;
   font-family: "SFMono-Regular", Menlo, Consolas, monospace;
   white-space: pre-wrap;
 }

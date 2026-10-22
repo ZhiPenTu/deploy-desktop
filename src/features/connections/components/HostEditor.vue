@@ -65,14 +65,14 @@
         />
       </el-form-item>
     </el-form>
-    <p class="field-hint">
+    <div class="dialog-tip">
       <template v-if="isLocal">
         本机主机不需要 SSH 地址与登录凭证；切换为当前主机后，部署和运维操作直接在当前电脑执行。
       </template>
       <template v-else>
         选择主机后会一并带入登录身份与地址；部署目录由项目保存，同一台主机可用于多个项目。
       </template>
-    </p>
+    </div>
     <template #footer>
       <el-button @click="visible = false">取消</el-button>
       <el-button type="primary" :loading="saving" @click="save">保存</el-button>
@@ -211,29 +211,33 @@ async function save() {
 <style scoped>
 .credential-summary {
   display: flex;
-  gap: 8px 18px;
+  gap: 8px 16px;
   flex-wrap: wrap;
-  margin: -4px 0 16px 112px;
-  padding: 9px 12px;
+  margin: -4px 0 18px;
+  padding: 10px 14px;
   border-radius: var(--radius-sm);
   background: var(--panel-subtle);
-  color: var(--text-muted);
-  font-size: 11px;
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  font-size: 12px;
   line-height: 1.5;
 }
 
-.field-hint {
-  margin: 0;
-  padding-left: 112px;
-  font-size: 11px;
+.dialog-tip {
+  margin: 8px 0 0;
+  padding: 10px 14px;
+  font-size: 12px;
   line-height: 1.6;
   color: var(--text-muted);
+  background: var(--panel-subtle);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
 }
 
 .kind-hint {
   width: 100%;
-  margin: 5px 0 0;
-  font-size: 11px;
+  margin: 6px 0 0;
+  font-size: 12px;
   line-height: 1.55;
   color: var(--text-muted);
 }

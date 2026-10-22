@@ -37,7 +37,7 @@
         <el-checkbox v-model="clearPassword">清除已保存的密码</el-checkbox>
       </el-form-item>
     </el-form>
-    <p class="field-hint">密码仅保存在本机，保存后不再显示原文。更换仓库地址或用户名后，需要重新填写密码。</p>
+    <div class="dialog-tip">密码仅保存在本机，保存后不再显示原文。更换仓库地址或用户名后，需要重新填写密码。</div>
     <template #footer>
       <el-button :disabled="saving" @click="visible = false">取消</el-button>
       <el-button type="primary" :loading="saving" @click="save">保存</el-button>
@@ -103,5 +103,16 @@ async function save() {
   font-size: 12px;
   line-height: 1.6;
   color: var(--text-muted);
+}
+
+.dialog-tip {
+  margin-top: 14px;
+  padding: 10px 14px;
+  background: var(--panel-subtle);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-color);
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.6;
 }
 </style>

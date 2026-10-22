@@ -34,10 +34,19 @@
       </el-table-column>
     </el-table>
     <div v-else-if="!loading && !errorMessage" class="empty-state">
+      <span class="icon-tile neutral"><el-icon><Box /></el-icon></span>
       <span class="empty-title">还没有配置镜像源</span>
-      <span>添加仓库地址，需要登录的私有仓库还可保存用户名和密码。</span>
+      <span class="empty-hint">添加仓库地址，需要登录的私有仓库还可保存用户名和密码。</span>
+      <div class="empty-actions">
+        <el-button size="small" type="primary" :disabled="disabled" @click="edit(null)">
+          <el-icon><Plus /></el-icon>
+          <span>新增镜像源</span>
+        </el-button>
+      </div>
     </div>
-    <div v-else-if="loading" class="empty-state">正在读取镜像源</div>
+    <div v-else-if="loading" class="empty-state">
+      <span class="empty-hint">正在读取镜像源</span>
+    </div>
     <el-alert v-if="testResult" :title="testResult.message" :type="testResult.success ? 'success' : 'error'" :closable="false" show-icon class="source-alert result-alert" />
     <RegistrySourceEditor v-model="editorVisible" :source="editing" @saved="saved" />
   </div>
@@ -46,7 +55,7 @@
 <script setup>
 import { onMounted, ref } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { Plus, Refresh } from '@element-plus/icons-vue';
+import { Box, Plus, Refresh } from '@element-plus/icons-vue';
 import RegistrySourceEditor from './RegistrySourceEditor.vue';
 import { deleteRegistrySource, listRegistrySources, testRegistrySource } from '../../../api/tauri.js';
 import { errorText } from '../../../shared/errors.js';
@@ -133,7 +142,6 @@ onMounted(load);
 .field-hint { margin: 5px 0 0; font-size: 12px; color: var(--text-muted); line-height: 1.6; }
 .source-alert { margin-bottom: 14px; }
 .result-alert { margin-top: 16px; margin-bottom: 0; }
-.empty-state { min-height: 120px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: var(--text-muted); font-size: 13px; padding: 20px; text-align: center; border: 1px dashed var(--border-color); border-radius: var(--radius-sm); }
-.empty-title { font-weight: 600; color: var(--text-main); }
+.empty-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
 code { overflow-wrap: anywhere; }
 </style>

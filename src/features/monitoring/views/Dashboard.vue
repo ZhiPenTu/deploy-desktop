@@ -38,6 +38,7 @@
     <el-alert v-if="readError" :title="readError" type="error" :closable="false" show-icon class="read-error" />
 
     <div v-if="!serviceCards.length" class="endpoint-empty card-surface">
+      <span class="icon-tile neutral"><el-icon><Connection /></el-icon></span>
       <span class="cluster-empty-title">当前项目还没有可展示的服务端口</span>
       <span class="cluster-empty-hint">选择并绑定交付包后，这里会显示交付包声明的服务地址。</span>
     </div>
@@ -334,10 +335,12 @@ onMounted(fetchStatus);
 </script>
 
 <style scoped>
-.read-error { margin-bottom: 20px; }
-
 .dashboard-view {
   display: block;
+}
+
+.read-error {
+  margin-bottom: 20px;
 }
 
 .header-actions {
@@ -351,27 +354,33 @@ onMounted(fetchStatus);
   display: flex;
   align-items: center;
   gap: 8px;
+  padding: 5px 12px;
+  background: var(--panel-subtle);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
 }
 
 .host-switch-label {
   flex: none;
-  font-size: 12px;
+  font-size: 11.5px;
   color: var(--text-muted);
 }
 
 .host-name {
   font-size: 12.5px;
+  font-weight: 600;
   color: var(--text-main);
 }
 
 .endpoint-empty {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
   align-items: center;
   justify-content: center;
-  min-height: 120px;
+  min-height: 140px;
   margin-bottom: 28px;
+  padding: 24px;
   text-align: center;
 }
 
@@ -379,88 +388,75 @@ onMounted(fetchStatus);
   width: 1px;
   height: 20px;
   background: var(--border-color);
-  margin: 0 2px;
+  margin: 0 4px;
 }
 
 .endpoint-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 14px;
+  gap: 16px;
   margin-bottom: 28px;
 }
 
 .endpoint-card {
-  position: relative;
-  display: block;
-  min-width: 0;
-  padding: 16px 18px 17px;
+  display: flex;
+  flex-direction: column;
+  padding: 18px 20px;
   background: var(--panel-bg);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-card);
-  text-decoration: none;
   transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
 }
 
-a.endpoint-card:hover {
-  border-color: #c9d2e3;
-  box-shadow: var(--shadow-raised);
-  transform: translateY(-2px);
+.endpoint-card:hover {
+  border-color: var(--brand-border);
+  box-shadow: var(--shadow-card-hover);
+  transform: translateY(-1px);
 }
 
 .endpoint-top {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 15px;
+  margin-bottom: 12px;
 }
 
 .endpoint-icon {
-  width: 30px;
-  height: 30px;
+  width: 34px;
+  height: 34px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: var(--primary-soft);
   color: var(--primary-color);
-  font-size: 15px;
-}
-
-.endpoint-arrow {
-  color: var(--text-faint);
-  font-size: 14px;
-  transition: color 0.16s ease, transform 0.16s ease;
-}
-
-a.endpoint-card:hover .endpoint-arrow {
-  color: var(--primary-color);
-  transform: translate(1px, -1px);
+  font-size: 16px;
 }
 
 .endpoint-label {
-  font-size: 11px;
+  font-size: 11.5px;
   font-weight: 500;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.02em;
   color: var(--text-muted);
 }
 
 .endpoint-value {
-  margin-top: 5px;
+  margin-top: 6px;
   font-size: 16px;
-  font-weight: 600;
+  font-weight: 650;
   letter-spacing: -0.01em;
   color: var(--text-main);
-  font-family: "SFMono-Regular", Menlo, Consolas, monospace;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
 .endpoint-desc {
-  margin-top: 4px;
-  font-size: 11px;
-  color: var(--text-faint);
+  margin-top: 5px;
+  font-size: 11.5px;
+  color: var(--text-muted);
 }
 
 .endpoint-card.empty .endpoint-value {
@@ -471,7 +467,7 @@ a.endpoint-card:hover .endpoint-arrow {
 }
 
 .endpoint-card.empty .endpoint-icon {
-  background: #f1f3f7;
+  background: var(--surface-muted);
   color: var(--text-faint);
 }
 
@@ -486,16 +482,16 @@ a.endpoint-card:hover .endpoint-arrow {
 }
 
 .health-card.neutral .endpoint-icon {
-  background: #f1f3f7;
+  background: var(--surface-muted);
   color: var(--text-secondary);
 }
 
 .health-pill {
   display: inline-flex;
   align-items: center;
-  padding: 2px 8px;
+  padding: 2px 9px;
   border-radius: 999px;
-  font-size: 10.5px;
+  font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.02em;
 }
@@ -512,19 +508,20 @@ a.endpoint-card:hover .endpoint-arrow {
 
 .health-pill.neutral {
   color: var(--text-secondary);
-  background: #f1f3f7;
+  background: var(--surface-muted);
 }
 
 .section-head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  margin-bottom: 12px;
+  margin-bottom: 14px;
 }
 
 .section-head h3 {
   font-size: 15px;
-  font-weight: 600;
+  font-weight: 650;
+  color: var(--text-main);
 }
 
 .section-head span {
@@ -535,7 +532,7 @@ a.endpoint-card:hover .endpoint-arrow {
 .containers-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 14px;
+  gap: 16px;
 }
 
 .containers-grid.is-loading {
@@ -547,9 +544,9 @@ a.endpoint-card:hover .endpoint-arrow {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  min-height: 120px;
-  padding: 24px;
+  gap: 8px;
+  min-height: 140px;
+  padding: 28px;
   text-align: center;
   background: var(--panel-bg);
   border: 1px dashed var(--border-color);
@@ -557,7 +554,7 @@ a.endpoint-card:hover .endpoint-arrow {
 }
 
 .cluster-empty-title {
-  font-size: 13px;
+  font-size: 13.5px;
   font-weight: 600;
   color: var(--text-main);
 }
@@ -579,9 +576,9 @@ a.endpoint-card:hover .endpoint-arrow {
 }
 
 .container-card:hover {
-  border-color: #c9d2e3;
-  box-shadow: var(--shadow-raised);
-  transform: translateY(-2px);
+  border-color: var(--brand-border);
+  box-shadow: var(--shadow-card-hover);
+  transform: translateY(-1px);
 }
 
 .c-head {
@@ -589,8 +586,8 @@ a.endpoint-card:hover .endpoint-arrow {
   justify-content: space-between;
   align-items: flex-start;
   gap: 12px;
-  padding: 16px 16px 14px;
-  border-bottom: 1px solid var(--border-color);
+  padding: 16px 18px 14px;
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .c-ident {
@@ -601,16 +598,16 @@ a.endpoint-card:hover .endpoint-arrow {
 }
 
 .c-icon {
-  width: 32px;
-  height: 32px;
+  width: 34px;
+  height: 34px;
   flex: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 8px;
-  background: #f1f3f7;
+  border-radius: var(--radius-sm);
+  background: var(--surface-muted);
   color: var(--text-secondary);
-  font-size: 15px;
+  font-size: 16px;
 }
 
 .container-card.is-running .c-icon {
@@ -628,7 +625,7 @@ a.endpoint-card:hover .endpoint-arrow {
   font-size: 13px;
   font-weight: 600;
   color: var(--text-main);
-  font-family: "SFMono-Regular", Menlo, Consolas, monospace;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
   line-height: 1.35;
   white-space: nowrap;
   overflow: hidden;
@@ -637,17 +634,17 @@ a.endpoint-card:hover .endpoint-arrow {
 
 .c-role {
   margin-top: 2px;
-  font-size: 11px;
+  font-size: 11.5px;
   color: var(--text-muted);
 }
 
 .status-pill {
   flex: none;
-  padding: 2px 8px;
+  padding: 2px 9px;
   border-radius: 999px;
-  font-size: 10px;
+  font-size: 10.5px;
   font-weight: 600;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.02em;
 }
 
 .status-pill.good {
@@ -670,7 +667,7 @@ a.endpoint-card:hover .endpoint-arrow {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding: 14px 16px;
+  padding: 14px 18px;
   font-size: 12px;
 }
 
@@ -695,7 +692,7 @@ a.endpoint-card:hover .endpoint-arrow {
 }
 
 .info-row .v.code {
-  font-family: "SFMono-Regular", Menlo, Consolas, monospace;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
   color: var(--text-secondary);
 }
 
@@ -703,8 +700,8 @@ a.endpoint-card:hover .endpoint-arrow {
   display: flex;
   justify-content: flex-end;
   gap: 4px;
-  padding: 8px 12px;
-  border-top: 1px solid var(--border-color);
+  padding: 8px 14px;
+  border-top: 1px solid var(--border-subtle);
   background: var(--panel-subtle);
 }
 

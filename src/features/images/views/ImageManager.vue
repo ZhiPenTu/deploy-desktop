@@ -112,6 +112,7 @@
           </el-table>
 
           <div v-else-if="!imagesError" class="empty-state">
+            <span class="icon-tile neutral"><el-icon><Box /></el-icon></span>
             <span class="empty-title">{{ loadingImages ? '正在读取本机镜像' : '本机还没有 Docker 镜像' }}</span>
             <span class="empty-hint">
               {{ loadingImages ? '请稍候' : '填写镜像地址后拉取，或先在目标机上导入离线包。' }}
@@ -201,6 +202,7 @@
           </el-table>
 
           <div v-else-if="!packagesError" class="empty-state">
+            <span class="icon-tile neutral"><el-icon><Files /></el-icon></span>
             <span class="empty-title">
               {{ loadingPackages ? '正在读取离线包' : offlineScan?.exists === false ? '离线包目录尚未创建' : '还没有离线包' }}
             </span>
@@ -294,7 +296,7 @@
 import { useDesktopProgress } from '../../../shared/composables/useDesktopProgress.js';
 import { computed, onMounted, reactive, ref } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { Download, Refresh } from '@element-plus/icons-vue';
+import { Box, Download, Files, Refresh } from '@element-plus/icons-vue';
 import RemoteImageDistribution from '../components/RemoteImageDistribution.vue';
 import {
   exportLocalDockerImages,
@@ -837,11 +839,15 @@ onMounted(async () => {
 }
 
 .selection-row {
-  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 12px 14px;
   margin-bottom: 14px;
   border: 1px solid var(--border-color);
   border-radius: var(--radius-sm);
-  background: #fbfcfe;
+  background: var(--panel-subtle);
 }
 
 .selection-hint {
@@ -917,32 +923,6 @@ onMounted(async () => {
   font-size: 12px;
 }
 
-.empty-state {
-  min-height: 160px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  align-items: center;
-  justify-content: center;
-  padding: 18px;
-  color: var(--text-muted);
-  font-size: 12px;
-  text-align: center;
-  border: 1px dashed var(--border-color);
-  border-radius: var(--radius-sm);
-}
-
-.empty-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-main);
-}
-
-.empty-hint {
-  max-width: 520px;
-  line-height: 1.6;
-}
-
 .empty-actions {
   display: flex;
   gap: 8px;
@@ -992,9 +972,10 @@ onMounted(async () => {
 }
 
 .dialog-hint {
-  padding: 10px 12px;
+  padding: 10px 14px;
   border-radius: var(--radius-sm);
-  background: #f7f9fc;
+  background: var(--panel-subtle);
+  border: 1px solid var(--border-color);
   color: var(--text-muted);
   font-size: 12px;
   line-height: 1.6;
@@ -1004,13 +985,13 @@ onMounted(async () => {
   max-height: 260px;
   overflow: auto;
   margin: 0;
-  padding: 12px;
+  padding: 14px;
   border-radius: var(--radius-sm);
-  background: #0b0f17;
-  border: 1px solid var(--border-color);
-  color: #b9c6d8;
-  font-size: 11px;
-  line-height: 1.55;
+  background: #0b1120;
+  border: 1px solid #1e293b;
+  color: #cbd5e1;
+  font-size: 12px;
+  line-height: 1.6;
   font-family: "SFMono-Regular", Menlo, Consolas, monospace;
   white-space: pre-wrap;
 }

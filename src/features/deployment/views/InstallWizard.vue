@@ -35,6 +35,7 @@
         show-icon
       />
       <div v-if="!hasProject" class="project-empty">
+        <span class="icon-tile neutral"><el-icon><FolderOpened /></el-icon></span>
         <span class="empty-title">当前没有可用项目</span>
         <span class="empty-hint">
           一个项目对应一台主机、一个部署目录和一个制品源。新建项目后即可选择制品并部署。
@@ -439,7 +440,7 @@
 <script setup>
 import { computed, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
-import { ArrowRight, Check, Loading } from '@element-plus/icons-vue';
+import { ArrowRight, Check, FolderOpened, Loading } from '@element-plus/icons-vue';
 import ConfigDiffDialog from '../components/ConfigDiffDialog.vue';
 import WizardArtifactPicker from '../../artifacts/components/WizardArtifactPicker.vue';
 import { useDeploymentWizard } from '../composables/useDeploymentWizard.js';
@@ -549,7 +550,7 @@ watch([review, activeStep], () => {
 }
 .steps-header {
   margin-bottom: 20px;
-  padding: 20px 22px;
+  padding: 18px 24px;
 }
 .stepper {
   display: flex;
@@ -558,33 +559,37 @@ watch([review, activeStep], () => {
   list-style: none;
   gap: 12px;
   overflow-x: auto;
+  margin: 0;
+  padding: 0;
 }
 .step {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 10px;
   color: var(--text-muted);
   white-space: nowrap;
-  font-size: 12px;
+  font-size: 12.5px;
 }
 .step:not(:last-child)::after {
   content: '';
   width: clamp(8px, 2.4vw, 46px);
   height: 2px;
   background: var(--border-color);
-  margin-left: 9px;
+  margin-left: 10px;
 }
 .step-node {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 29px;
-  height: 29px;
+  width: 28px;
+  height: 28px;
   flex: none;
-  border: 1px solid var(--border-strong);
+  border: 1px solid var(--border-color);
   border-radius: 50%;
-  background: white;
+  background: var(--panel-bg);
   font-size: 12px;
+  font-weight: 600;
+  transition: all 0.18s ease;
 }
 .step.active {
   color: var(--text-main);
@@ -594,28 +599,31 @@ watch([review, activeStep], () => {
   background: var(--primary-color);
   border-color: var(--primary-color);
   color: white;
-  box-shadow: 0 0 0 4px var(--primary-ring);
+  box-shadow: 0 0 0 3px var(--primary-ring);
 }
 .step.done .step-node {
   color: var(--success-color);
-  border-color: var(--success-color);
+  border-color: rgba(34, 197, 94, 0.4);
   background: var(--success-soft);
 }
 .step-card {
-  padding: 28px;
+  padding: 26px 28px;
   background: var(--panel-bg);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-card);
 }
 h3 {
-  font-size: 17px;
-  margin-bottom: 7px;
+  font-size: 16px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  margin-bottom: 6px;
+  color: var(--text-main);
 }
 .desc {
   color: var(--text-muted);
-  font-size: 13px;
-  line-height: 1.65;
+  font-size: 12.5px;
+  line-height: 1.6;
   margin-bottom: 22px;
 }
 .project-empty {
@@ -623,11 +631,12 @@ h3 {
   flex-direction: column;
   align-items: center;
   gap: 10px;
-  padding: 28px 20px;
+  padding: 32px 20px;
   border: 1px dashed var(--border-color);
   border-radius: var(--radius-md);
   text-align: center;
   color: var(--text-muted);
+  background: var(--panel-subtle);
 }
 
 .project-empty .empty-title {
@@ -643,14 +652,18 @@ h3 {
 }
 
 .path-text {
-  font-family: "SFMono-Regular", Menlo, Consolas, monospace;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
   font-size: 12px;
   color: var(--text-main);
+  background: var(--surface-muted);
+  padding: 2px 8px;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border-subtle);
   overflow-wrap: anywhere;
 }
 
 .host-form {
-  margin-top: 26px;
+  margin-top: 24px;
   max-width: 850px;
 }
 
@@ -666,7 +679,7 @@ h3 {
   align-items: center;
   gap: 12px;
 }
-.compose-review-heading { align-items: center; margin-bottom: 10px; }
+.compose-review-heading { align-items: center; margin-bottom: 12px; }
 .compose-review-heading .field-hint { flex: 1; margin-top: 0; }
 .input-row {
   width: 100%;
@@ -699,44 +712,54 @@ h3 {
   width: 100%;
   font-size: 12px;
   color: var(--text-muted);
-  line-height: 1.7;
-  margin-top: 7px;
+  line-height: 1.65;
+  margin-top: 6px;
   overflow-wrap: anywhere;
 }
 .env-metrics {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
-  margin: 22px 0;
+  gap: 14px;
+  margin: 20px 0 24px;
 }
 .metric-card {
-  padding: 15px;
+  padding: 16px 18px;
   background: var(--panel-subtle);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-sm);
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+}
+.metric-card:hover {
+  border-color: var(--brand-border);
+  box-shadow: var(--shadow-card);
 }
 .metric-card span {
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: 11.5px;
+  font-weight: 500;
 }
 .metric-card strong {
-  font-size: 14px;
+  font-size: 15px;
+  font-weight: 650;
+  color: var(--text-main);
+  letter-spacing: -0.01em;
   word-break: break-word;
 }
 .status-row {
   flex-wrap: wrap;
-  margin: 18px 0;
+  margin: 16px 0;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: 12.5px;
 }
 .issue-list {
-  padding: 14px 14px 14px 30px;
+  padding: 14px 18px 14px 34px;
   margin: 16px 0;
   color: var(--warning-color);
   background: var(--warning-soft);
+  border: 1px solid rgba(245, 158, 11, 0.2);
   border-radius: var(--radius-sm);
   font-size: 12px;
   line-height: 1.8;
@@ -750,7 +773,7 @@ h3 {
   margin: 12px 0;
 }
 .image-preparation {
-  padding: 18px;
+  padding: 18px 20px;
   background: var(--panel-subtle);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-sm);
@@ -768,14 +791,24 @@ code {
   grid-template-columns: 1fr 1fr;
   gap: 16px;
   width: 100%;
-  margin: 10px 0 22px;
+  margin: 12px 0 24px;
 }
 .deployment-actions :deep(.el-radio) {
   margin: 0;
-  padding: 22px 18px;
+  padding: 20px 22px;
   height: auto;
   white-space: normal;
   align-items: flex-start;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-color);
+  background: var(--panel-bg);
+  box-shadow: var(--shadow-card);
+  transition: all 0.18s ease;
+}
+.deployment-actions :deep(.el-radio.is-bordered.is-checked) {
+  border-color: var(--primary-color);
+  background: var(--primary-soft);
+  box-shadow: var(--shadow-raised);
 }
 .deployment-actions :deep(.el-radio__input) {
   margin-top: 4px;
@@ -785,14 +818,15 @@ code {
 }
 .action-title {
   display: block;
-  font-size: 15px;
+  font-size: 14.5px;
   font-weight: 600;
-  margin-bottom: 9px;
+  color: var(--text-main);
+  margin-bottom: 6px;
 }
 .action-description {
   display: block;
   font-size: 12px;
-  line-height: 1.7;
+  line-height: 1.65;
   color: var(--text-muted);
 }
 .backup-hint {
@@ -802,11 +836,18 @@ code {
 .execution-status {
   display: flex;
   align-items: center;
-  gap: 8px;
-  color: var(--text-secondary);
+  gap: 10px;
+  color: var(--primary-color);
+  font-size: 13.5px;
+  font-weight: 550;
+  padding: 12px 16px;
+  background: var(--primary-soft);
+  border: 1px solid rgba(51, 92, 255, 0.2);
+  border-radius: var(--radius-sm);
+  margin-top: 18px;
 }
 .execution-progress {
-  margin-top: 12px;
+  margin-top: 14px;
 }
 .execution-progress .field-hint {
   margin: 8px 0 0;
@@ -815,16 +856,19 @@ code {
   margin-top: 16px;
 }
 .terminal-log {
-  padding: 16px;
-  color: #d7dde8;
-  background: #0b1220;
+  padding: 16px 18px;
+  color: #e2e8f0;
+  background: #0f172a;
+  border: 1px solid #1e293b;
   border-radius: var(--radius-sm);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  max-height: 340px;
-  overflow: auto;
-  font-size: 12px;
+  max-height: 360px;
+  overflow-y: auto;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
+  font-size: 11.5px;
   line-height: 1.65;
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.4);
 }
 @media (max-width: 1100px) {
   .env-metrics {
@@ -835,7 +879,7 @@ code {
     margin-left: 2px;
   }
   .steps-header {
-    padding: 18px 14px;
+    padding: 16px 18px;
   }
   .stepper {
     gap: 8px;
