@@ -9,7 +9,7 @@
         </div>
       </div>
       <dl class="overview-stats">
-        <div><dt>工具能力</dt><dd>{{ allTools.length }}<span>项</span></dd></div>
+        <div><dt>工具能力</dt><dd>{{ mcpTools.length }}<span>项</span></dd></div>
         <div><dt>能力分类</dt><dd>{{ mcpCategories.length }}<span>类</span></dd></div>
         <div><dt>只读查询</dt><dd>{{ readOnlyCount }}<span>项</span></dd></div>
       </dl>
@@ -100,17 +100,16 @@
 <script setup>
 import { computed, ref, watch } from 'vue';
 import { Box, Connection, Document, Download, Files, FolderOpened, Grid, Monitor, Operation, Search, Setting, Tickets } from '@element-plus/icons-vue';
-import { mcpCategories } from '../catalog.js';
+import { filterMcpCategories, mcpCategories, mcpTools } from '../catalog.js';
 
 const categoryIcons = {
   profile: Setting, projects: FolderOpened, hosts: Monitor, registries: Box,
   manifests: Document, images: Files, bundles: Download, artifacts: Tickets,
   operations: Operation, updates: Connection
 };
-const allTools = mcpCategories.flatMap((category) => category.tools);
-const readOnlyCount = allTools.filter((tool) => tool.access === 'read').length;
+const readOnlyCount = mcpTools.filter((tool) => tool.access === 'read').length;
 const categoryOptions = [
-  { id: 'all', title: '全部能力', count: allTools.length },
+  { id: 'all', title: '全部能力', count: mcpTools.length },
   ...mcpCategories.map((category) => ({ id: category.id, title: category.title, count: category.tools.length }))
 ];
 const activeCategory = ref('all');
@@ -118,21 +117,13 @@ const query = ref('');
 const accessFilter = ref('all');
 const resultsPanel = ref(null);
 const hasFilters = computed(() => activeCategory.value !== 'all' || Boolean(query.value) || accessFilter.value !== 'all');
-const visibleCategories = computed(() => {
-  const keyword = query.value.trim().toLocaleLowerCase();
-  return mcpCategories
-    .filter((category) => activeCategory.value === 'all' || category.id === activeCategory.value)
-    .map((category) => ({
-      ...category,
-      tools: category.tools.filter((tool) => {
-        const matchesAccess = accessFilter.value === 'all' || tool.access === accessFilter.value ||
-          (accessFilter.value === 'confirm' && Boolean(tool.confirmation));
-        const content = `${category.title} ${category.description} ${tool.title} ${tool.description} ${tool.requirement || ''}`;
-        return matchesAccess && content.toLocaleLowerCase().includes(keyword);
-      })
-    }))
-    .filter((category) => category.tools.length > 0);
-});
+const visibleCategories = computed(() =>
+  filterMcpCategories({
+    category: activeCategory.value,
+    keyword: query.value,
+    access: accessFilter.value
+  })
+);
 const visibleToolCount = computed(() => visibleCategories.value.reduce((total, category) => total + category.tools.length, 0));
 
 watch([activeCategory, query, accessFilter], () => {

@@ -108,3 +108,28 @@ export const mcpCategories = [
     ]
   }
 ];
+
+/** 全部能力条目，按目录顺序展开。 */
+export const mcpTools = mcpCategories.flatMap((category) => category.tools);
+
+/**
+ * 按分类、关键词与操作类型筛选能力目录，结果只保留仍有条目的分类。
+ * 关键词只匹配展示文案，不匹配工具标识，避免筛选暴露注册层信息。
+ */
+export function filterMcpCategories({ category = 'all', keyword = '', access = 'all' } = {}) {
+  const text = String(keyword ?? '').trim().toLocaleLowerCase();
+  return mcpCategories
+    .filter((item) => category === 'all' || item.id === category)
+    .map((item) => ({
+      ...item,
+      tools: item.tools.filter((tool) => {
+        const matchesAccess =
+          access === 'all' ||
+          tool.access === access ||
+          (access === 'confirm' && Boolean(tool.confirmation));
+        const content = `${item.title} ${item.description} ${tool.title} ${tool.description} ${tool.requirement || ''}`;
+        return matchesAccess && content.toLocaleLowerCase().includes(text);
+      })
+    }))
+    .filter((item) => item.tools.length > 0);
+}

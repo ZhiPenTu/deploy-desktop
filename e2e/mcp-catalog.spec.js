@@ -1,6 +1,12 @@
 import { expect, test } from '@playwright/test';
+import { filterMcpCategories, mcpCategories, mcpTools } from '../src/features/mcp/catalog.js';
 
-const total = 40;
+const countOf = (options) =>
+  filterMcpCategories(options).reduce((total, category) => total + category.tools.length, 0);
+
+const total = mcpTools.length;
+const keywordHits = countOf({ keyword: '日志' });
+const logCategory = mcpCategories.find((category) => category.title === '日志');
 
 async function openMcpPage(page) {
   await page.goto('/');
@@ -17,8 +23,8 @@ test('MCP 能力目录按关键词筛选并显示匹配数量', async ({ page })
   await expect(page.locator('.capability-item')).toHaveCount(total);
 
   await search.fill('日志');
-  await expect(count).toHaveText('9 项能力');
-  await expect(page.locator('.capability-item')).toHaveCount(9);
+  await expect(count).toHaveText(`${keywordHits} 项能力`);
+  await expect(page.locator('.capability-item')).toHaveCount(keywordHits);
 
   await search.fill('不存在的关键词');
   await expect(count).toHaveText('0 项能力');
@@ -33,9 +39,9 @@ test('MCP 能力目录按分类筛选，并能回到全部能力', async ({ page
   await openMcpPage(page);
   const count = page.locator('.result-count');
 
-  await page.locator('.category-button', { hasText: '日志' }).first().click();
-  await expect(count).toHaveText('2 项能力');
-  await expect(page.locator('.capability-item')).toHaveCount(2);
+  await page.locator('.category-button', { hasText: logCategory.title }).first().click();
+  await expect(count).toHaveText(`${logCategory.tools.length} 项能力`);
+  await expect(page.locator('.capability-item')).toHaveCount(logCategory.tools.length);
 
   await page.locator('.category-button', { hasText: '全部能力' }).click();
   await expect(count).toHaveText(`${total} 项能力`);
