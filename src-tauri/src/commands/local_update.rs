@@ -327,6 +327,10 @@ fn reject_symlinks(path: &Path) -> Result<(), String> {
     let mut cursor = PathBuf::new();
     for part in path.components() {
         cursor.push(part);
+        // 盘符前缀单独取出时指向该驱动器的当前目录，不是磁盘上的实际路径，无法检查。
+        if matches!(part, std::path::Component::Prefix(_)) {
+            continue;
+        }
         match fs::symlink_metadata(&cursor) {
             Ok(meta) if meta.file_type().is_symlink() => {
                 return Err("部署路径含符号链接，请选择实际目录".to_string())
@@ -1133,7 +1137,11 @@ mod tests {
                 collect(root, &path, out);
                 continue;
             }
-            let relative = path.strip_prefix(root).unwrap().to_string_lossy().to_string();
+            let relative = path
+                .strip_prefix(root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
             if relative == "bundle.json" {
                 continue;
             }

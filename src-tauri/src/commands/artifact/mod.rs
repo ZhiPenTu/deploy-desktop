@@ -460,7 +460,7 @@ mod tests {
                     .strip_prefix(dir)
                     .unwrap()
                     .to_string_lossy()
-                    .to_string();
+                    .replace('\\', "/");
                 if relative == "bundle.json" {
                     continue;
                 }

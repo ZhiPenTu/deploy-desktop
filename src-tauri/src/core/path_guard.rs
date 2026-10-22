@@ -30,7 +30,9 @@ pub fn check_relative(value: &str) -> Result<(), RelativeIssue> {
     if text.contains('\\') {
         return Err(RelativeIssue::Backslash);
     }
-    if Path::new(text).is_absolute() {
+    // 复用与运行平台无关的判断：在 Windows 上 `/x` 也要按绝对路径报错，
+    // 而不是被后面的分段检查归为不合法路径。
+    if is_absolute(text) {
         return Err(RelativeIssue::Absolute);
     }
     // 与 `Path::components` 保持一致：中间的 `.` 与重复分隔符会被规范化，

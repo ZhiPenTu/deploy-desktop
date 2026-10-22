@@ -388,7 +388,9 @@ impl Sink {
 
     fn clear(&mut self) -> io::Result<()> {
         self.file.flush()?;
-        self.file.set_len(0)?;
+        // Windows 的追加句柄不允许截断文件，另开写句柄清空后继续使用原追加句柄。
+        let current = self.dir.join(LOG_FILE);
+        OpenOptions::new().write(true).open(&current)?.set_len(0)?;
         self.size = 0;
         let _ = fs::remove_file(self.dir.join(BACKUP_FILE));
         Ok(())
