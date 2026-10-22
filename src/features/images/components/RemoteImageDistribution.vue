@@ -9,111 +9,22 @@
       class="remote-alert"
     />
 
-    <div class="card-surface remote-card">
-      <div class="card-title-bar">
-        <h3>离线包来源</h3>
-        <span class="hint">{{ offlineCountText }}</span>
-      </div>
-      <div class="summary-row">
-        <span class="summary-text">保存目录</span>
-        <code class="path-text">{{ offlineDir || '正在读取' }}</code>
-        <el-button size="small" :loading="loadingLocal" @click="loadLocal">
-          <el-icon><Refresh /></el-icon>
-          <span>刷新离线包</span>
-        </el-button>
-      </div>
-      <div class="field-hint">
-        这里列出设置中保存目录下的离线包。没有离线包时，请先在镜像列表勾选镜像并导出。
-      </div>
-    </div>
+    <RemoteOfflineSourceCard
+      :dir="offlineDir"
+      :count-text="offlineCountText"
+      :loading="loadingLocal"
+      @refresh="loadLocal"
+    />
 
-    <div class="card-surface remote-card">
-      <div class="card-title-bar">
-        <h3>目标机镜像包</h3>
-        <span v-if="remote" class="hint">
-          {{ remote.exists ? `${remote.files.length} 个文件 · ${formatSize(remote.total_bytes)}` : '镜像目录未就绪' }}
-        </span>
-      </div>
-
-      <el-form label-width="110px">
-        <el-form-item label="目标机目录">
-          <div class="dir-input-row">
-            <el-input v-model="remoteDirPath" placeholder="/home/deploy/bundle" />
-            <el-button :loading="inspecting" @click="inspectRemote()">
-              <el-icon><Refresh /></el-icon>
-              <span>检测目标机</span>
-            </el-button>
-          </div>
-          <div class="field-hint">
-            镜像包会上传到该目录下的 images/；留空时使用目标部署目录下的 bundle/。
-          </div>
-        </el-form-item>
-      </el-form>
-
-      <el-alert
-        v-if="remoteError"
-        type="warning"
-        :closable="false"
-        show-icon
-        :title="remoteError"
-        class="remote-alert"
-      />
-
-      <div v-if="remote" class="summary-row">
-        <el-tag :type="remote.docker_running ? 'success' : 'warning'" size="small" effect="plain">
-          {{ remote.docker_running ? 'Docker 已运行' : 'Docker 未运行' }}
-        </el-tag>
-        <span class="summary-text">{{ remote.files.length }} 个镜像包</span>
-        <span class="summary-text">可用空间 {{ formatSize(remote.free_kb * 1024) }}</span>
-        <code class="path-text">{{ remote.images_dir }}</code>
-      </div>
-
-      <div v-if="remote && remote.issues.length" class="issue-row">
-        <span v-for="issue in remote.issues" :key="issue" class="issue-chip">{{ issue }}</span>
-      </div>
-
-      <el-table
-        v-if="remote && remoteRows.length"
-        :data="remoteRows"
-        size="small"
-        class="image-table"
-        @selection-change="handleRemoteSelection"
-      >
-        <el-table-column type="selection" width="44" :selectable="isRowSelectable" />
-        <el-table-column prop="name" label="镜像包文件" min-width="170" />
-        <el-table-column label="对应镜像" min-width="250">
-          <template #default="{ row }">
-            <code v-if="row.known">{{ row.image_ref }}</code>
-            <span v-else class="muted-text">{{ row.image_ref }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="镜像包" width="110">
-          <template #default="{ row }">
-            <el-tag :type="row.present ? 'success' : 'info'" size="small" effect="plain">
-              {{ row.present ? formatSize(row.size_bytes) : '缺失' }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="Docker 镜像" width="130">
-          <template #default="{ row }">
-            <el-tag v-if="row.known" :type="row.loaded ? 'success' : 'warning'" size="small" effect="plain">
-              {{ row.loaded ? '已导入' : '未导入' }}
-            </el-tag>
-            <span v-else class="muted-text">未识别</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="修改时间" width="170">
-          <template #default="{ row }">{{ row.present ? formatTimestamp(row.modified_ms) : '-' }}</template>
-        </el-table-column>
-      </el-table>
-
-      <div v-else class="empty-state">
-        <span class="icon-tile neutral"><el-icon><Box /></el-icon></span>
-        <span class="empty-hint">
-          {{ remote ? (remote.exists ? '目标机镜像目录为空' : '目标机镜像目录未就绪，请先上传离线包') : '点击“检测目标机”读取镜像包与 Docker 镜像状态' }}
-        </span>
-      </div>
-    </div>
+    <RemoteBundlePanel
+      v-model:dir-path="remoteDirPath"
+      :remote="remote"
+      :error="remoteError"
+      :rows="remoteRows"
+      :inspecting="inspecting"
+      @inspect="inspectRemote()"
+      @selection-change="handleRemoteSelection"
+    />
 
     <div class="card-surface remote-card">
       <div class="card-title-bar">
@@ -145,31 +56,14 @@
       </div>
     </div>
 
-    <div v-if="progress.length" class="card-surface remote-card">
-      <div class="card-title-bar">
-        <h3>执行进度</h3>
-        <span class="hint">{{ progressMessage }}</span>
-      </div>
-      <el-progress :percentage="currentPercent" class="progress-bar" />
-      <div class="progress-list">
-        <div
-          v-for="(item, index) in progress.slice(-8)"
-          :key="`${item.file_name}-${index}`"
-          class="progress-row"
-        >
-          <span class="progress-percent">{{ item.percent }}%</span>
-          <span class="progress-text">{{ item.message }}</span>
-        </div>
-      </div>
-    </div>
+    <RemoteProgressCard
+      v-if="progress.length"
+      :progress="progress"
+      :percent="currentPercent"
+      :message="progressMessage"
+    />
 
-    <div v-if="resultLog" class="card-surface remote-card">
-      <div class="card-title-bar">
-        <h3>执行结果</h3>
-        <span class="hint">{{ resultTitle }}</span>
-      </div>
-      <pre class="output-log">{{ resultLog }}</pre>
-    </div>
+    <RemoteResultCard v-if="resultLog" :log="resultLog" :title="resultTitle" />
   </div>
 </template>
 
@@ -177,7 +71,6 @@
 import { useDesktopProgress } from '../../../shared/composables/useDesktopProgress.js';
 import { computed, onMounted, ref } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { Box, Refresh } from '@element-plus/icons-vue';
 import {
   importRemoteImageBundle,
   inspectRemoteImageBundle,
@@ -187,7 +80,11 @@ import {
   uploadRemoteImageBundle
 } from '../../../api/tauri.js';
 import { errorText } from '../../../shared/errors.js';
-import { formatSize, formatTimestamp } from '../../../shared/format.js';
+import { formatSize } from '../../../shared/format.js';
+import RemoteBundlePanel from './RemoteBundlePanel.vue';
+import RemoteOfflineSourceCard from './RemoteOfflineSourceCard.vue';
+import RemoteProgressCard from './RemoteProgressCard.vue';
+import RemoteResultCard from './RemoteResultCard.vue';
 
 const props = defineProps({
   connection: {
@@ -317,8 +214,6 @@ const isImageLoaded = (imageRef) => {
   }
   return refs.every((ref) => remote.value.docker_images.includes(ref));
 };
-
-const isRowSelectable = (row) => row.present && row.known;
 
 const handleRemoteSelection = (rows) => {
   selectedRemoteFiles.value = rows.map((row) => row.name);
@@ -536,115 +431,10 @@ onMounted(async () => {
   color: var(--text-muted);
 }
 
-.dir-input-row {
-  display: flex;
-  gap: 10px;
-  width: 100%;
-}
-
-.summary-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  margin-bottom: 12px;
-}
-
-.summary-text {
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-
-.path-text {
-  font-size: 11px;
-  padding: 2px 8px;
-  border-radius: 6px;
-  color: var(--primary-color);
-  background: rgba(66, 133, 244, 0.08);
-  font-family: "SFMono-Regular", Menlo, Consolas, monospace;
-  overflow-wrap: anywhere;
-}
-
-.image-table {
-  width: 100%;
-  background: transparent;
-}
-
-.image-table :deep(code) {
-  color: var(--primary-color);
-  font-size: 11px;
-  font-family: "SFMono-Regular", Menlo, Consolas, monospace;
-}
-
-.muted-text {
-  color: var(--text-muted);
-  font-size: 12px;
-}
-
-.issue-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: 12px;
-}
-
-.issue-chip {
-  font-size: 11px;
-  padding: 3px 8px;
-  border-radius: 999px;
-  color: var(--warning-color);
-  background: rgba(242, 196, 109, 0.1);
-  border: 1px solid rgba(242, 196, 109, 0.22);
-}
-
 .action-row {
   display: flex;
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
-}
-
-.progress-bar {
-  margin-bottom: 12px;
-}
-
-.progress-list {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.progress-row {
-  display: flex;
-  gap: 10px;
-  align-items: baseline;
-  font-size: 11px;
-  color: var(--text-muted);
-}
-
-.progress-percent {
-  width: 42px;
-  text-align: right;
-  font-family: "SFMono-Regular", Menlo, Consolas, monospace;
-  color: var(--text-secondary);
-}
-
-.progress-text {
-  overflow-wrap: anywhere;
-}
-
-.output-log {
-  max-height: 240px;
-  overflow: auto;
-  margin: 0;
-  padding: 14px;
-  border-radius: var(--radius-sm);
-  background: #0b1120;
-  border: 1px solid #1e293b;
-  color: #cbd5e1;
-  font-size: 12px;
-  line-height: 1.6;
-  font-family: "SFMono-Regular", Menlo, Consolas, monospace;
-  white-space: pre-wrap;
 }
 </style>
