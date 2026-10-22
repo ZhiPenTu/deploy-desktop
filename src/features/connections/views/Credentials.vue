@@ -112,6 +112,7 @@ import { Key, Plus, Refresh } from '@element-plus/icons-vue';
 import CredentialEditor from '../components/CredentialEditor.vue';
 import { connectionInventory, refreshConnectionInventory } from '../state.js';
 import { deleteSshCredential } from '../../../api/tauri.js';
+import { errorText } from '../../../shared/errors.js';
 
 defineEmits(['go-hosts']);
 
@@ -137,7 +138,7 @@ async function load() {
   try {
     await refreshConnectionInventory();
   } catch (error) {
-    ElMessage.error(String(error));
+    ElMessage.error(errorText(error));
   }
 }
 
@@ -166,7 +167,7 @@ async function remove(row) {
     ElMessage.success('凭证已删除');
     await load();
   } catch (error) {
-    ElMessage.error(String(error));
+    ElMessage.error(errorText(error));
   }
 }
 

@@ -169,6 +169,7 @@ import UpdateChecker from '../components/UpdateChecker.vue';
 import RuntimeLogs from '../components/RuntimeLogs.vue';
 import { projectState } from '../../../config/project.js';
 import { deleteArtifactSource, listArtifactSources, getImageLibrarySettings, saveImageLibrarySettings } from '../../../api/tauri.js';
+import { errorText } from '../../../shared/errors.js';
 
 const props = defineProps({
   connection: {
@@ -208,7 +209,7 @@ async function loadSources() {
   try {
     sources.value = await listArtifactSources();
   } catch (error) {
-    ElMessage.error(String(error));
+    ElMessage.error(errorText(error));
   } finally {
     loading.value = false;
   }
@@ -230,7 +231,7 @@ async function loadImageSettings() {
     offlineDir.value = settings.offlineDir || '';
     defaultOfflineDir.value = settings.defaultDir || '';
   } catch (error) {
-    ElMessage.error(String(error));
+    ElMessage.error(errorText(error));
   }
 }
 
@@ -245,7 +246,7 @@ async function pickOfflineDir() {
       offlineDir.value = selected;
     }
   } catch (error) {
-    ElMessage.error(`选择目录失败：${error}`);
+    ElMessage.error(`选择目录失败：${errorText(error)}`);
   }
 }
 
@@ -270,7 +271,7 @@ async function saveOfflineDir() {
     defaultOfflineDir.value = settings.defaultDir || defaultOfflineDir.value;
     ElMessage.success('离线包保存目录已保存');
   } catch (error) {
-    ElMessage.error(String(error));
+    ElMessage.error(errorText(error));
   } finally {
     savingOfflineDir.value = false;
   }
@@ -291,7 +292,7 @@ async function remove(row) {
     ElMessage.success('制品源已删除');
     await loadSources();
   } catch (error) {
-    ElMessage.error(String(error));
+    ElMessage.error(errorText(error));
   }
 }
 

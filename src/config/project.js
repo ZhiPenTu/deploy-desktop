@@ -5,6 +5,7 @@ import {
   listProjects,
   setActiveProject
 } from '../api/tauri.js';
+import { errorText } from '../shared/errors.js';
 
 /**
  * 当前项目状态：项目只记录部署目标（主机、部署目录、制品源），
@@ -55,7 +56,7 @@ export async function refreshProjectContext() {
     projectState.loaded = true;
     return context;
   } catch (error) {
-    projectState.error = String(error);
+    projectState.error = errorText(error);
     throw error;
   } finally {
     projectState.loading = false;

@@ -148,6 +148,7 @@ import {
   setRuntimeLogDir,
   setRuntimeLogLevel
 } from '../../../api/tauri.js';
+import { errorText } from '../../../shared/errors.js';
 
 const level = ref('');
 const keyword = ref('');
@@ -309,7 +310,7 @@ async function load() {
     setCommandTrace(debugEnabled.value);
     expanded.clear();
   } catch (error) {
-    ElMessage.error(String(error));
+    ElMessage.error(errorText(error));
   } finally {
     loading.value = false;
   }
@@ -324,7 +325,7 @@ async function toggleDebug(value) {
     await load();
   } catch (error) {
     debugEnabled.value = !value;
-    ElMessage.error(String(error));
+    ElMessage.error(errorText(error));
   } finally {
     switching.value = false;
   }
@@ -365,7 +366,7 @@ async function changeDir() {
     await load();
     ElMessage.success('日志位置已更新');
   } catch (error) {
-    ElMessage.error(String(error));
+    ElMessage.error(errorText(error));
   }
 }
 
@@ -384,7 +385,7 @@ async function resetDir() {
     await load();
     ElMessage.success('已恢复默认日志位置');
   } catch (error) {
-    ElMessage.error(String(error));
+    ElMessage.error(errorText(error));
   }
 }
 
@@ -413,7 +414,7 @@ async function openDir() {
   try {
     await openRuntimeLogDir();
   } catch (error) {
-    ElMessage.error(String(error));
+    ElMessage.error(errorText(error));
   }
 }
 
@@ -432,7 +433,7 @@ async function clear() {
     ElMessage.success('运行日志已清空');
     await load();
   } catch (error) {
-    ElMessage.error(String(error));
+    ElMessage.error(errorText(error));
   }
 }
 

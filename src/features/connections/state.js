@@ -6,6 +6,7 @@ import {
   switchProject
 } from '../../config/project.js';
 import { listConnectionInventory, setActiveManagedHost } from '../../api/tauri.js';
+import { errorText } from '../../shared/errors.js';
 
 /**
  * 连接信息全部由当前项目派生：项目决定主机与部署目录，
@@ -140,7 +141,7 @@ export async function refreshConnectionInventory() {
     applyConnectionInventory(inventory);
     return inventory;
   } catch (error) {
-    connectionInventory.error = String(error);
+    connectionInventory.error = errorText(error);
     throw error;
   } finally {
     connectionInventory.loading = false;

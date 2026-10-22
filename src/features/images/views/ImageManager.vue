@@ -308,6 +308,7 @@ import {
   removeOfflinePackages,
   scanOfflinePackages
 } from '../../../api/tauri.js';
+import { errorText } from '../../../shared/errors.js';
 
 const props = defineProps({
   connection: {
@@ -459,7 +460,7 @@ const loadSettings = async () => {
     const settings = await getImageLibrarySettings();
     offlineDir.value = settings.offlineDir || '';
   } catch (error) {
-    ElMessage.error(String(error));
+    ElMessage.error(errorText(error));
   } finally {
     loadingSettings.value = false;
   }
@@ -475,7 +476,7 @@ const loadImages = async () => {
   } catch (error) {
     dockerImages.value = [];
     imageSelection.value = [];
-    imagesError.value = String(error);
+    imagesError.value = errorText(error);
   } finally {
     loadingImages.value = false;
   }
@@ -494,7 +495,7 @@ const loadPackages = async () => {
   } catch (error) {
     offlineScan.value = null;
     packageSelection.value = [];
-    packagesError.value = String(error);
+    packagesError.value = errorText(error);
   } finally {
     loadingPackages.value = false;
   }
@@ -530,7 +531,7 @@ const openPullDialog = async () => {
   try {
     updateRegistrySources(await listRegistrySources());
   } catch (error) {
-    ElMessage.error(String(error));
+    ElMessage.error(errorText(error));
   } finally {
     loadingSources.value = false;
   }
@@ -583,7 +584,7 @@ const handlePull = async () => {
     pullForm.password = '';
     await loadImages();
   } catch (error) {
-    resultLog.value = String(error);
+    resultLog.value = errorText(error);
     resultTitle.value = '镜像拉取失败';
     ElMessage.error('镜像拉取失败');
   } finally {
@@ -622,7 +623,7 @@ const handleExport = async () => {
       ElMessage.warning(`有 ${failed.length} 个镜像导出失败，请查看执行结果`);
     }
   } catch (error) {
-    resultLog.value = String(error);
+    resultLog.value = errorText(error);
     resultTitle.value = '导出失败';
     ElMessage.error('导出离线包失败');
   } finally {
@@ -666,7 +667,7 @@ const handleDeleteImages = async () => {
     }
     await loadImages();
   } catch (error) {
-    resultLog.value = String(error);
+    resultLog.value = errorText(error);
     resultTitle.value = '删除镜像失败';
     ElMessage.error('删除镜像失败');
   } finally {
@@ -709,7 +710,7 @@ const handleDeletePackages = async () => {
     }
     await loadPackages();
   } catch (error) {
-    resultLog.value = String(error);
+    resultLog.value = errorText(error);
     resultTitle.value = '删除离线包失败';
     ElMessage.error('删除离线包失败');
   } finally {
@@ -752,7 +753,7 @@ const handleImportPackages = async () => {
     }
     await loadImages();
   } catch (error) {
-    resultLog.value = String(error);
+    resultLog.value = errorText(error);
     resultTitle.value = '导入离线包失败';
     ElMessage.error('导入离线包失败');
   } finally {

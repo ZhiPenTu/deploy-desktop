@@ -128,6 +128,7 @@ import {
   hostById,
   reloadProjectState
 } from '../../connections/state.js';
+import { errorText } from '../../../shared/errors.js';
 
 const emit = defineEmits(['deploy', 'inspect']);
 const projects = computed(() => projectState.projects);
@@ -159,7 +160,7 @@ async function load() {
     ]);
     sources.value = Array.isArray(list) ? list : [];
   } catch (error) {
-    ElMessage.error(String(error));
+    ElMessage.error(errorText(error));
   } finally {
     loading.value = false;
   }
@@ -218,7 +219,7 @@ async function save() {
     editorVisible.value = false;
     ElMessage.success(editingId.value ? '项目已更新' : '项目已创建');
   } catch (error) {
-    ElMessage.error(String(error));
+    ElMessage.error(errorText(error));
   } finally {
     saving.value = false;
   }
@@ -247,7 +248,7 @@ async function remove(row) {
     await reloadProjectState();
     ElMessage.success('项目已删除');
   } catch (error) {
-    ElMessage.error(String(error));
+    ElMessage.error(errorText(error));
   }
 }
 

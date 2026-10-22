@@ -217,6 +217,7 @@ import {
   pullManifestImagesLocal,
   pullManifestImagesRemote
 } from '../../../api/tauri.js';
+import { errorText } from '../../../shared/errors.js';
 
 const props = defineProps({
   connection: {
@@ -350,7 +351,7 @@ const loadManifest = async () => {
     }
     ElMessage.success(`清单已加载，共 ${summary.value.images.length} 个镜像`);
   } catch (e) {
-    ElMessage.error(String(e));
+    ElMessage.error(errorText(e));
   } finally {
     loading.value = false;
   }
@@ -424,7 +425,7 @@ const startPull = async () => {
       .join('\n');
     ElMessage.success(`已完成 ${results.value.length} 个镜像的拉取`);
   } catch (e) {
-    resultLog.value = String(e);
+    resultLog.value = errorText(e);
     ElMessage.error('镜像拉取失败，请查看执行结果');
   } finally {
     registryPassword.value = '';

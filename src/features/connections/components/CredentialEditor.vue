@@ -42,6 +42,7 @@
 import { computed, reactive, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 import { saveSshCredential } from '../../../api/tauri.js';
+import { errorText } from '../../../shared/errors.js';
 
 const props = defineProps({
   modelValue: {
@@ -121,7 +122,7 @@ async function save() {
     ElMessage.success('SSH 凭证已保存');
     emit('saved', saved);
   } catch (error) {
-    ElMessage.error(String(error));
+    ElMessage.error(errorText(error));
   } finally {
     saving.value = false;
   }

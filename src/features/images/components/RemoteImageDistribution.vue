@@ -183,6 +183,7 @@ import {
   scanOfflinePackages,
   uploadRemoteImageBundle
 } from '../../../api/tauri.js';
+import { errorText } from '../../../shared/errors.js';
 
 const props = defineProps({
   connection: {
@@ -351,7 +352,7 @@ const loadLocal = async () => {
     offlineScan.value = await scanOfflinePackages();
   } catch (error) {
     offlineScan.value = null;
-    ElMessage.error(String(error));
+    ElMessage.error(errorText(error));
   } finally {
     loadingLocal.value = false;
   }
@@ -380,7 +381,7 @@ const inspectRemote = async ({ silent = false } = {}) => {
     selectedRemoteFiles.value = [];
   } catch (error) {
     remote.value = null;
-    remoteError.value = String(error);
+    remoteError.value = errorText(error);
     if (!silent) {
       ElMessage.error('检测目标机镜像包失败');
     }
@@ -432,7 +433,7 @@ const handleUpload = async (overwrite) => {
     ElMessage.success('离线包上传完成');
     await inspectRemote();
   } catch (error) {
-    resultLog.value = String(error);
+    resultLog.value = errorText(error);
     resultTitle.value = '上传失败';
     ElMessage.error('离线包上传失败');
   } finally {
@@ -458,7 +459,7 @@ const applyImport = async (files) => {
     ElMessage.success('镜像导入完成');
     await inspectRemote();
   } catch (error) {
-    resultLog.value = String(error);
+    resultLog.value = errorText(error);
     resultTitle.value = '导入失败';
     ElMessage.error('镜像导入失败');
   } finally {
@@ -504,7 +505,7 @@ const handleDelete = async () => {
     ElMessage.success('已删除目标机镜像包');
     await inspectRemote();
   } catch (error) {
-    resultLog.value = String(error);
+    resultLog.value = errorText(error);
     resultTitle.value = '删除失败';
     ElMessage.error('删除目标机镜像包失败');
   }

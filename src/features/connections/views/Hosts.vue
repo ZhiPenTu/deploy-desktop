@@ -166,6 +166,7 @@ import {
   setupManagedHostAccess,
   testManagedHostConnection
 } from '../../../api/tauri.js';
+import { errorText } from '../../../shared/errors.js';
 
 defineEmits(['go-credentials', 'view-status']);
 
@@ -201,7 +202,7 @@ async function load() {
   try {
     await refreshConnectionInventory();
   } catch (error) {
-    ElMessage.error(String(error));
+    ElMessage.error(errorText(error));
   }
 }
 
@@ -232,7 +233,7 @@ async function testHost(row) {
       result.success
     );
   } catch (error) {
-    showResult('连接失败', String(error), false);
+    showResult('连接失败', errorText(error), false);
   } finally {
     busyKey.value = '';
   }
@@ -248,7 +249,7 @@ async function setupAccess(row) {
       result.success
     );
   } catch (error) {
-    showResult('免密配置未完成', String(error), false);
+    showResult('免密配置未完成', errorText(error), false);
   } finally {
     busyKey.value = '';
   }
@@ -274,7 +275,7 @@ async function remove(row) {
     await reloadProjectState();
     ElMessage.success('主机已删除');
   } catch (error) {
-    ElMessage.error(String(error));
+    ElMessage.error(errorText(error));
   }
 }
 

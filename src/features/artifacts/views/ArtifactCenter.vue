@@ -400,6 +400,7 @@ import {
   openArtifactRunUrl
 } from '../../../api/tauri.js';
 import { applyProjectBundle, reloadProjectState } from '../../connections/state.js';
+import { errorText } from '../../../shared/errors.js';
 
 const props = defineProps({
   connection: {
@@ -561,7 +562,7 @@ async function loadDetailPlan() {
     detailPlan.value = result;
   } catch (error) {
     if (requestId !== detailRequestId) return;
-    detailError.value = String(error);
+    detailError.value = errorText(error);
   } finally {
     if (requestId === detailRequestId) {
       detailLoading.value = false;
@@ -592,7 +593,7 @@ async function loadSources() {
       activeSourceId.value = '';
     }
   } catch (error) {
-    ElMessage.error(String(error));
+    ElMessage.error(errorText(error));
   } finally {
     loading.value = false;
   }
@@ -628,9 +629,9 @@ async function loadReleases({ reset = false } = {}) {
   } catch (error) {
     if (requestId !== releaseRequestId || activeSourceId.value !== sourceId) return;
     if (reset) {
-      releasesError.value = String(error);
+      releasesError.value = errorText(error);
     } else {
-      ElMessage.error(String(error));
+      ElMessage.error(errorText(error));
     }
   } finally {
     if (requestId === releaseRequestId) {
@@ -728,7 +729,7 @@ async function removeLocal(row) {
       await loadReleases({ reset: true });
     }
   } catch (error) {
-    ElMessage.error(String(error));
+    ElMessage.error(errorText(error));
   } finally {
     removingId.value = '';
   }
@@ -778,8 +779,8 @@ async function download() {
       await loadReleases({ reset: true });
     }
   } catch (error) {
-    downloadError.value = String(error);
-    ElMessage.error(String(error));
+    downloadError.value = errorText(error);
+    ElMessage.error(errorText(error));
     progress.percent = 0;
     progress.stage = '';
     progress.phase = '';
@@ -801,7 +802,7 @@ async function useExisting(row) {
       await loadReleases({ reset: true });
     }
   } catch (error) {
-    ElMessage.error(String(error));
+    ElMessage.error(errorText(error));
   } finally {
     loadingVersionKey.value = '';
   }
@@ -820,7 +821,7 @@ async function applyBundle() {
   try {
     await applyProjectBundle(bundle.value.dir, bundle.value.version);
   } catch (error) {
-    ElMessage.error(String(error));
+    ElMessage.error(errorText(error));
     return;
   }
   ElMessage.success('已设为当前部署包');
@@ -833,7 +834,7 @@ async function openRunUrl(item) {
   try {
     await openArtifactRunUrl(url);
   } catch (error) {
-    ElMessage.error(String(error));
+    ElMessage.error(errorText(error));
   }
 }
 

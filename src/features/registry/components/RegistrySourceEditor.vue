@@ -49,6 +49,7 @@
 import { computed, reactive, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 import { saveRegistrySource } from '../../../api/tauri.js';
+import { errorText } from '../../../shared/errors.js';
 
 const props = defineProps({ modelValue: Boolean, source: { type: Object, default: null } });
 const emit = defineEmits(['update:modelValue', 'saved']);
@@ -88,7 +89,7 @@ async function save() {
     ElMessage.success('镜像源已保存');
     emit('saved', saved);
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : String(error));
+    ElMessage.error(errorText(error));
   } finally {
     saving.value = false;
   }

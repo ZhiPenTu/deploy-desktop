@@ -153,6 +153,7 @@ import {
 import { clusterServices } from '../../../config/cluster.js';
 import { projectState } from '../../../config/project.js';
 import { hostById, isLocalHost } from '../../connections/state.js';
+import { errorText } from '../../../shared/errors.js';
 
 const props = defineProps({
   connection: {
@@ -296,7 +297,7 @@ const handleStackAction = async (action) => {
     }
     await fetchStatus();
   } catch (e) {
-    ElMessage.error(String(e));
+    ElMessage.error(errorText(e));
   } finally {
     operating.value = false;
   }
@@ -325,7 +326,7 @@ const handleRestartService = async (serviceKey) => {
     }
     await fetchStatus();
   } catch (e) {
-    ElMessage.error(String(e));
+    ElMessage.error(errorText(e));
   }
 };
 

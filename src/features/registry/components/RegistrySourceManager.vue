@@ -49,6 +49,7 @@ import { ElMessage, ElMessageBox } from 'element-plus';
 import { Plus, Refresh } from '@element-plus/icons-vue';
 import RegistrySourceEditor from './RegistrySourceEditor.vue';
 import { deleteRegistrySource, listRegistrySources, testRegistrySource } from '../../../api/tauri.js';
+import { errorText } from '../../../shared/errors.js';
 
 const emit = defineEmits(['changed']);
 const props = defineProps({ disabled: Boolean });
@@ -69,7 +70,7 @@ async function load() {
     sources.value = await listRegistrySources();
     emit('changed', sources.value);
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : String(error);
+    errorMessage.value = errorText(error);
   } finally {
     loading.value = false;
   }
@@ -94,7 +95,7 @@ async function test(source) {
     const result = await testRegistrySource(source.id);
     testResult.value = { success: true, message: `${source.name}：${result.message}` };
   } catch (error) {
-    testResult.value = { success: false, message: `${source.name}：${error instanceof Error ? error.message : String(error)}` };
+    testResult.value = { success: false, message: `${source.name}：${errorText(error)}` };
   } finally {
     testingId.value = '';
   }
@@ -114,7 +115,7 @@ async function remove(source) {
     ElMessage.success('镜像源已删除');
     await load();
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : String(error));
+    ElMessage.error(errorText(error));
   } finally {
     deletingId.value = '';
   }

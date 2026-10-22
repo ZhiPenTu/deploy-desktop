@@ -96,6 +96,7 @@
 import { computed, ref } from 'vue';
 import { checkAppUpdate, installAppUpdate } from '../../../api/tauri.js';
 import { Download } from '@element-plus/icons-vue';
+import { errorText } from '../../../shared/errors.js';
 
 const currentVersion = __APP_VERSION__;
 
@@ -170,7 +171,7 @@ const checkNow = async () => {
     }
   } catch (error) {
     status.value = 'error';
-    errorMessage.value = String(error);
+    errorMessage.value = errorText(error);
   } finally {
     checking.value = false;
   }
@@ -211,7 +212,7 @@ const installNow = async () => {
   } catch (error) {
     installing.value = false;
     status.value = 'error';
-    errorMessage.value = String(error);
+    errorMessage.value = errorText(error);
   }
 };
 </script>

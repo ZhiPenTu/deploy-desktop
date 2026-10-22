@@ -434,6 +434,7 @@ import { useDeploymentWizard } from '../composables/useDeploymentWizard.js';
 import { connectionInventory, switchActiveProject } from '../../connections/state.js';
 import { projectState } from '../../../config/project.js';
 import { safeText } from '../domain/errors.js';
+import { errorText } from '../../../shared/errors.js';
 
 const props = defineProps({ connection: { type: Object, required: true } });
 const emit = defineEmits(['go-dashboard', 'go-images', 'go-artifacts', 'go-projects', 'busy-change']);
@@ -456,7 +457,7 @@ async function selectProject(id) {
     await switchActiveProject(id);
     ElMessage.success(`已选择项目「${projectState.project?.name || ''}」`);
   } catch (error) {
-    ElMessage.error(String(error));
+    ElMessage.error(errorText(error));
   } finally {
     switchingProject.value = false;
   }

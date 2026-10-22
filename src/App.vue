@@ -115,6 +115,7 @@ import ArtifactCenter from './features/artifacts/views/ArtifactCenter.vue';
 import Settings from './features/settings/views/Settings.vue';
 import McpService from './features/mcp/views/McpService.vue';
 import LogViewer from './features/monitoring/views/LogViewer.vue';
+import { errorText } from './shared/errors.js';
 
 
 const pages = {
@@ -160,7 +161,7 @@ async function handleDeployProject(id) {
     activeLogContainer.value = '';
     navigateTab('wizard');
   } catch (error) {
-    ElMessage.error(String(error));
+    ElMessage.error(errorText(error));
   }
 }
 
@@ -172,7 +173,7 @@ async function handleInspectProject({ id, tab } = {}) {
     activeLogContainer.value = '';
     navigateTab(tab);
   } catch (error) {
-    ElMessage.error(String(error));
+    ElMessage.error(errorText(error));
   }
 }
 
