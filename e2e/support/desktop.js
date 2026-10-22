@@ -2,11 +2,16 @@
  * 测试用桌面后端替身：只在浏览器里模拟 Tauri 的 invoke 通道，
  * 供界面测试覆盖有数据时的交互。它不代表真实 Rust、Docker 或 SSH 行为。
  */
-export async function useDesktopBackend(page, { hosts = [], credentials = [] } = {}) {
-  await page.addInitScript(({ initialHosts, initialCredentials }) => {
+export async function useDesktopBackend(
+  page,
+  { hosts = [], credentials = [], artifactSources = [], artifactTokens = [] } = {}
+) {
+  await page.addInitScript(({ initialHosts, initialCredentials, initialSources, initialTokens }) => {
     const state = {
       hosts: structuredClone(initialHosts),
       credentials: structuredClone(initialCredentials),
+      sources: structuredClone(initialSources),
+      tokens: structuredClone(initialTokens),
       activeHostId: ''
     };
     const callbacks = new Map();
@@ -62,6 +67,42 @@ export async function useDesktopBackend(page, { hosts = [], credentials = [] } =
           case 'get_active_project_context':
             return { project: null, bundle: null, deployDir: '' };
           case 'list_artifact_sources':
+            return state.sources.map((item) => ({ ...item }));
+          case 'save_artifact_source': {
+            const saved = {
+              ...args.source,
+              id: args.source.id || `src-${state.sources.length + 1}`,
+              hasToken: Boolean(args.source.tokenId),
+              lastVersion: '',
+              lastBundleDir: ''
+            };
+            const index = state.sources.findIndex((item) => item.id === saved.id);
+            if (index >= 0) state.sources[index] = saved;
+            else state.sources.push(saved);
+            return saved;
+          }
+          case 'list_artifact_tokens':
+            return state.tokens.map((item) => ({
+              ...item,
+              inUse: state.sources.filter((source) => source.tokenId === item.id).length
+            }));
+          case 'save_artifact_token': {
+            const saved = {
+              id: args.token.id || `tok-${state.tokens.length + 1}`,
+              name: args.token.name,
+              hasToken: true,
+              inUse: 0,
+              createdAt: 1,
+              updatedAt: 1
+            };
+            const index = state.tokens.findIndex((item) => item.id === saved.id);
+            if (index >= 0) state.tokens[index] = saved;
+            else state.tokens.push(saved);
+            return saved;
+          }
+          case 'delete_artifact_token':
+            state.tokens = state.tokens.filter((item) => item.id !== args.id);
+            return null;
           case 'list_registry_sources':
             return [];
           case 'log_client_event':
@@ -71,7 +112,12 @@ export async function useDesktopBackend(page, { hosts = [], credentials = [] } =
         }
       }
     };
-  }, { initialHosts: hosts, initialCredentials: credentials });
+  }, {
+    initialHosts: hosts,
+    initialCredentials: credentials,
+    initialSources: artifactSources,
+    initialTokens: artifactTokens
+  });
 }
 
 export const remoteHost = {

@@ -21,13 +21,15 @@ test('browser preview starts with empty inventories and no active project', asyn
   assert.deepEqual(await api.listProjects(), { schemaVersion: 1, activeProjectId: '', projects: [] });
   assert.deepEqual(await api.getActiveProjectContext(), { project: null, bundle: null, deployDir: '' });
   assert.deepEqual(await api.listArtifactSources(), []);
+  assert.deepEqual(await api.listArtifactTokens(), []);
   assert.deepEqual(await api.listRegistrySources(), []);
   assert.deepEqual(await api.listConnectionInventory(), { credentials: [], hosts: [], activeHostId: '' });
 });
 
 test('every desktop operation rejects in the browser instead of reporting simulated success', async () => {
   const previewHelpers = new Set([
-    'isDesktopApp', 'listProjects', 'getActiveProjectContext', 'listArtifactSources', 'listRegistrySources',
+    'isDesktopApp', 'listProjects', 'getActiveProjectContext', 'listArtifactSources', 'listArtifactTokens',
+    'listRegistrySources',
     'listConnectionInventory', 'openArtifactRunUrl', 'reportClientEvent', 'onImageLibraryProgress',
     'onImageManagerProgress', 'onRegistryProgress', 'onRemoteUpdateProgress', 'setCommandTrace'
   ]);

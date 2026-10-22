@@ -26,16 +26,36 @@
           <el-input v-model="form.pipelineId" placeholder="数字流水线 ID" />
         </el-form-item>
         <el-form-item label="访问令牌">
-          <el-input
-            v-model="tokenInput"
-            type="password"
-            show-password
-            :placeholder="editing && form.hasToken ? '已保存，留空表示不修改' : '云效个人访问令牌'"
-          />
+          <div class="token-field">
+            <el-select v-model="form.tokenId" placeholder="选择已保存的令牌" style="width: 100%">
+              <el-option
+                v-for="item in tokens"
+                :key="item.id"
+                :label="item.name"
+                :value="item.id"
+              />
+              <el-option v-if="legacyToken" label="沿用当前保存的令牌" value="__legacy__" />
+              <el-option label="新建访问令牌" value="__new__" />
+            </el-select>
+            <span v-if="selectedTokenMissing" class="token-warning">
+              该令牌的内容已缺失，请在设置中重新填写。
+            </span>
+          </div>
         </el-form-item>
-        <el-form-item v-if="editing && form.hasToken" label=" ">
-          <el-checkbox v-model="clearToken">清除已保存的令牌</el-checkbox>
-        </el-form-item>
+        <template v-if="form.tokenId === '__new__'">
+          <el-form-item label="令牌名称">
+            <el-input v-model="newToken.name" placeholder="例如：云效个人令牌" />
+          </el-form-item>
+          <el-form-item label="令牌内容">
+            <el-input
+              v-model="newToken.value"
+              type="password"
+              show-password
+              autocomplete="new-password"
+              placeholder="云效个人访问令牌"
+            />
+          </el-form-item>
+        </template>
       </template>
       <template v-else>
         <el-form-item label="制品名" required>
@@ -49,8 +69,8 @@
         </el-form-item>
       </template>
     </el-form>
-    <p class="field-hint">
-      令牌仅在本机使用，供当前用户读取。
+    <p v-if="form.type === 'yunxiaoFlow'" class="field-hint">
+      令牌仅保存在本机，供当前用户读取，并可在多个云效制品源之间复用。
     </p>
     <template #footer>
       <el-button @click="visible = false">取消</el-button>
@@ -62,7 +82,7 @@
 <script setup>
 import { computed, reactive, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
-import { saveArtifactSource } from '../../../api/tauri.js';
+import { listArtifactTokens, saveArtifactSource, saveArtifactToken } from '../../../api/tauri.js';
 import { errorText } from '../../../shared/errors.js';
 
 const props = defineProps({
@@ -79,8 +99,8 @@ const props = defineProps({
 const emit = defineEmits(['update:modelValue', 'saved']);
 
 const saving = ref(false);
-const tokenInput = ref('');
-const clearToken = ref(false);
+const tokens = ref([]);
+const newToken = reactive({ name: '', value: '' });
 const form = reactive({
   id: '',
   name: '',
@@ -90,6 +110,7 @@ const form = reactive({
   artifactName: 'deploy-bundle',
   version: '',
   downloadUrl: '',
+  tokenId: '',
   hasToken: false
 });
 
@@ -99,6 +120,12 @@ const visible = computed({
 });
 
 const editing = computed(() => Boolean(props.source && props.source.id));
+const legacyToken = computed(
+  () => editing.value && form.hasToken && !(props.source && props.source.tokenId)
+);
+const selectedTokenMissing = computed(() =>
+  tokens.value.some((item) => item.id === form.tokenId && !item.hasToken)
+);
 
 watch(
   () => [props.modelValue, props.source],
@@ -110,7 +137,7 @@ watch(
   { immediate: true }
 );
 
-function resetForm() {
+async function resetForm() {
   const source = props.source || {};
   Object.assign(form, {
     id: source.id || '',
@@ -121,10 +148,31 @@ function resetForm() {
     artifactName: source.artifactName || 'deploy-bundle',
     version: source.version || (source.lastVersion !== 'manual' ? source.lastVersion : '') || '',
     downloadUrl: source.downloadUrl || '',
+    tokenId: source.tokenId || '',
     hasToken: Boolean(source.hasToken)
   });
-  tokenInput.value = '';
-  clearToken.value = false;
+  newToken.name = '';
+  newToken.value = '';
+  await loadTokens();
+  if (!form.tokenId) {
+    form.tokenId = defaultTokenId();
+  }
+}
+
+async function loadTokens() {
+  try {
+    tokens.value = await listArtifactTokens();
+  } catch (error) {
+    tokens.value = [];
+    ElMessage.error(errorText(error));
+  }
+}
+
+function defaultTokenId() {
+  if (legacyToken.value) return '__legacy__';
+  if (tokens.value.length === 1) return tokens.value[0].id;
+  if (!tokens.value.length) return '__new__';
+  return '';
 }
 
 async function save() {
@@ -136,8 +184,34 @@ async function save() {
     ElMessage.warning('请填写版本号，以字母或数字开头，仅使用字母、数字、点、短横线和下划线，最多 128 个字符');
     return;
   }
+  if (form.type === 'yunxiaoFlow') {
+    if (form.tokenId === '__new__' && (!newToken.name.trim() || !newToken.value.trim())) {
+      ElMessage.warning('请填写令牌名称和令牌内容');
+      return;
+    }
+    if (form.tokenId !== '__new__' && !form.tokenId) {
+      ElMessage.warning('请选择访问令牌，或新建一个令牌');
+      return;
+    }
+  }
   saving.value = true;
   try {
+    let tokenId = '';
+    if (form.type === 'yunxiaoFlow') {
+      if (form.tokenId === '__new__') {
+        const created = await saveArtifactToken({
+          name: newToken.name.trim(),
+          token: newToken.value
+        });
+        tokenId = created.id;
+        tokens.value = [...tokens.value, created];
+        form.tokenId = created.id;
+        newToken.name = '';
+        newToken.value = '';
+      } else if (form.tokenId !== '__legacy__') {
+        tokenId = form.tokenId;
+      }
+    }
     await saveArtifactSource({
       id: form.id,
       name: form.name,
@@ -147,8 +221,7 @@ async function save() {
       artifactName: form.artifactName,
       version: form.version,
       downloadUrl: form.downloadUrl,
-      token: tokenInput.value ? tokenInput.value : null,
-      clearToken: clearToken.value
+      tokenId
     });
     visible.value = false;
     ElMessage.success('制品源已保存');
@@ -162,6 +235,17 @@ async function save() {
 </script>
 
 <style scoped>
+.token-field {
+  width: 100%;
+}
+
+.token-warning {
+  display: block;
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--el-color-warning);
+}
+
 .field-hint {
   margin: 0;
   font-size: 11px;
