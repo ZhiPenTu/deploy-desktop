@@ -14,19 +14,18 @@ test('保存主机后列表、计数与提示同步更新', async ({ page }) => 
 
   await page.getByRole('button', { name: '新增主机' }).click();
   const dialog = page.locator('.el-dialog');
+  await expect(dialog.locator('.el-form-item__label', { hasText: '部署目录' })).toHaveCount(0);
   await dialog.getByPlaceholder('例如：本机').fill('本机目标');
-  await dialog.getByPlaceholder('例如：/opt/deploy').fill('/opt/demo');
   await dialog.getByRole('button', { name: '保存' }).click();
 
   await expect(page.locator('.el-message__content').last()).toContainText('主机已保存');
   await expect(page.locator('.content-panel')).toContainText('1 台主机');
   await expect(page.locator('.host-card')).toHaveCount(1);
   await expect(page.locator('.host-card')).toContainText('本机目标');
-  await expect(page.locator('.host-card')).toContainText('/opt/demo');
   await expect(page.locator('.empty-state')).toHaveCount(0);
 });
 
-test('已保存的远程主机显示地址、凭证与部署目录', async ({ page }) => {
+test('已保存的远程主机显示地址与凭证', async ({ page }) => {
   await useDesktopBackend(page, { hosts: [remoteHost], credentials: [sshCredential] });
   await openHosts(page);
 
@@ -35,7 +34,7 @@ test('已保存的远程主机显示地址、凭证与部署目录', async ({ pa
   await expect(card).toContainText('测试服务器');
   await expect(card).toContainText('192.0.2.10:2222');
   await expect(card).toContainText('部署账号');
-  await expect(card).toContainText('/opt/demo');
+  await expect(card).not.toContainText('部署目录');
   await expect(card.getByRole('button', { name: '测试连接' })).toBeVisible();
 });
 

@@ -72,12 +72,6 @@
               </div>
             </template>
             <div class="info-row">
-              <span class="k">部署目录</span>
-              <span class="v" :class="row.deployDir ? 'code' : 'muted'">
-                {{ row.deployDir || '沿用当前配置' }}
-              </span>
-            </div>
-            <div class="info-row">
               <span class="k">更新于</span>
               <span class="v muted">{{ formatTime(row.updatedAt) }}</span>
             </div>
@@ -129,7 +123,6 @@
       :host="editing"
       :credentials="credentials"
       :hosts="hosts"
-      :default-deploy-dir="connection.deployDir"
       @saved="load"
     />
 
@@ -152,7 +145,6 @@ import { CircleCheck, CircleClose, Connection, Monitor, Plus, Refresh } from '@e
 import HostEditor from '../components/HostEditor.vue';
 import {
   applyConnectionInventory,
-  connection,
   connectionInventory,
   credentialById,
   credentialLabel,

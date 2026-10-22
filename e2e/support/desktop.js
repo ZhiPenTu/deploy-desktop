@@ -47,7 +47,6 @@ export async function useDesktopBackend(page, { hosts = [], credentials = [] } =
               address: args.host.address,
               port: args.host.port,
               credentialId: args.host.credentialId,
-              deployDir: args.host.deployDir,
               notes: args.host.notes,
               updatedAt: 1_760_000_000_000
             };
@@ -82,7 +81,6 @@ export const remoteHost = {
   address: '192.0.2.10',
   port: 2222,
   credentialId: 'credential-1',
-  deployDir: '/opt/demo',
   notes: '自动化测试数据',
   updatedAt: 1_760_000_000_000
 };

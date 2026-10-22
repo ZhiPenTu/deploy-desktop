@@ -54,9 +54,6 @@
           <span>{{ selectedCredential.privateKeyPath || '自动选择默认密钥' }}</span>
         </div>
       </template>
-      <el-form-item label="部署目录">
-        <el-input v-model="form.deployDir" placeholder="例如：/opt/deploy" />
-      </el-form-item>
       <el-form-item label="备注">
         <el-input
           v-model="form.notes"
@@ -73,7 +70,7 @@
         本机主机不需要 SSH 地址与登录凭证；切换为当前主机后，部署和运维操作直接在当前电脑执行。
       </template>
       <template v-else>
-        选择主机后会一并带入登录身份与部署目录；在部署向导中临时修改的地址不会覆盖这里保存的内容。
+        选择主机后会一并带入登录身份与地址；部署目录由项目保存，同一台主机可用于多个项目。
       </template>
     </p>
     <template #footer>
@@ -105,10 +102,6 @@ const props = defineProps({
   hosts: {
     type: Array,
     default: () => []
-  },
-  defaultDeployDir: {
-    type: String,
-    default: ''
   }
 });
 
@@ -122,7 +115,6 @@ const form = reactive({
   address: '',
   port: 22,
   credentialId: '',
-  deployDir: '',
   notes: ''
 });
 
@@ -141,7 +133,7 @@ const selectedCredential = computed(
 );
 
 watch(
-  () => [props.modelValue, props.host, props.credentials, props.defaultDeployDir],
+  () => [props.modelValue, props.host, props.credentials],
   ([open]) => {
     if (open) {
       resetForm();
@@ -160,7 +152,6 @@ function resetForm() {
     address: host.address || '',
     port: host.port || 22,
     credentialId: host.credentialId || (kind === 'ssh' ? props.credentials[0]?.id || '' : ''),
-    deployDir: host.deployDir || props.defaultDeployDir || '',
     notes: host.notes || ''
   });
 }
@@ -204,7 +195,6 @@ async function save() {
       address: isLocal.value ? '' : form.address.trim(),
       port: isLocal.value ? 22 : form.port,
       credentialId: isLocal.value ? '' : form.credentialId,
-      deployDir: form.deployDir.trim(),
       notes: form.notes.trim()
     });
     visible.value = false;

@@ -53,7 +53,6 @@ pub struct ManagedHost {
     pub address: String,
     pub port: u16,
     pub credential_id: String,
-    pub deploy_dir: String,
     pub notes: String,
     pub updated_at: u64,
 }
@@ -67,7 +66,6 @@ impl Default for ManagedHost {
             address: String::new(),
             port: default_ssh_port(),
             credential_id: String::new(),
-            deploy_dir: String::new(),
             notes: String::new(),
             updated_at: 0,
         }
@@ -83,7 +81,6 @@ pub struct ManagedHostInput {
     pub address: String,
     pub port: u16,
     pub credential_id: String,
-    pub deploy_dir: String,
     pub notes: String,
 }
 
@@ -216,7 +213,6 @@ fn default_local_host(store: &ConnectionsFile) -> ManagedHost {
         address: String::new(),
         port: default_ssh_port(),
         credential_id: String::new(),
-        deploy_dir: String::new(),
         notes: String::new(),
         updated_at: now_millis(),
     }
@@ -451,7 +447,6 @@ fn save_host_at(dir: &Path, input: ManagedHostInput) -> Result<ManagedHost, Stri
         address,
         port,
         credential_id,
-        deploy_dir: input.deploy_dir.trim().to_string(),
         notes: input.notes.trim().to_string(),
         updated_at: now_millis(),
     };
@@ -625,7 +620,6 @@ mod tests {
             address: "192.0.2.10".to_string(),
             port: 22,
             credential_id: credential_id.to_string(),
-            deploy_dir: "/opt/deploy".to_string(),
             ..ManagedHostInput::default()
         }
     }
@@ -634,7 +628,6 @@ mod tests {
         ManagedHostInput {
             kind: HOST_KIND_LOCAL.to_string(),
             name: name.to_string(),
-            deploy_dir: "/opt/deploy".to_string(),
             ..ManagedHostInput::default()
         }
     }
@@ -745,7 +738,6 @@ mod tests {
                 address: "ignored.example.com".to_string(),
                 port: 2222,
                 credential_id: "missing-credential".to_string(),
-                deploy_dir: "/srv/deploy".to_string(),
                 ..ManagedHostInput::default()
             },
         )
@@ -754,7 +746,6 @@ mod tests {
         assert!(saved.address.is_empty());
         assert_eq!(saved.port, 22);
         assert!(saved.credential_id.is_empty());
-        assert_eq!(saved.deploy_dir, "/srv/deploy");
 
         let error = save_host_at(&dir, local_host("另一台本机")).unwrap_err();
         assert!(error.contains("本机"));
@@ -780,7 +771,6 @@ mod tests {
             address: "192.0.2.20".to_string(),
             port: 22,
             credential_id: "cred-remote".to_string(),
-            deploy_dir: "/opt/deploy".to_string(),
             notes: String::new(),
             updated_at: 1,
         });

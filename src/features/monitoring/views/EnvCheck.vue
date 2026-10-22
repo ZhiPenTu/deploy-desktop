@@ -37,10 +37,6 @@
           <span class="k">{{ isRemote ? 'SSH 地址' : '目标位置' }}</span>
           <span class="v">{{ targetText }}</span>
         </div>
-        <div class="info-row">
-          <span class="k">部署目录</span>
-          <span class="v" :class="deployDir ? 'code' : 'muted'">{{ deployDir || '沿用当前配置' }}</span>
-        </div>
       </div>
     </div>
 
@@ -219,10 +215,8 @@ const envRequests = createRequestScope();
 onScopeDispose(() => envRequests.dispose());
 const credential = computed(() => credentialById(props.host?.credentialId));
 const isProjectHost = computed(() => Boolean(props.host?.id) && props.host.id === projectState.project?.hostId);
-const deployDir = computed(() => (
-  isProjectHost.value
-    ? props.connection.deployDir || props.connection.installDir
-    : props.host?.deployDir || props.connection.deployDir
+const checkDir = computed(() => (
+  isProjectHost.value ? props.connection.deployDir || props.connection.installDir : ''
 ));
 const targetText = computed(() => (
   isRemote.value
@@ -249,7 +243,7 @@ const fetchEnv = async () => {
           credential.value?.username || props.connection.remoteUser || 'root',
           credential.value?.privateKeyPath || props.connection.remoteKey || null
         )
-      : await checkLocalEnv(deployDir.value);
+      : await checkLocalEnv(checkDir.value || undefined);
     if (envRequests.isCurrent(ticket)) env.value = response;
   } catch (e) {
     if (!envRequests.isCurrent(ticket)) return;

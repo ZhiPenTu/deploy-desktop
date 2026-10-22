@@ -94,7 +94,6 @@ test('浏览器预览不伪造数据：保存主机时明确提示需在桌面�
   const dialog = page.locator('.el-dialog');
   await expect(dialog).toBeVisible();
   await dialog.getByPlaceholder('例如：本机').fill('自动化测试主机');
-  await dialog.getByPlaceholder('例如：/opt/deploy').fill('/opt/deploy');
   await dialog.getByRole('button', { name: '保存' }).click();
 
   const message = page.locator('.el-message__content').last();
