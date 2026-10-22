@@ -374,6 +374,17 @@
         </el-icon>
         {{ phase }}
       </div>
+      <div v-if="executing" class="execution-progress">
+        <el-progress :percentage="progressPercent" :stroke-width="8" />
+        <p class="field-hint">
+          当前步骤：{{ progressStep || '准备执行' }}
+          <template v-if="progressMessage"> · {{ progressMessage }}</template>
+          · 已用时 {{ elapsedText }}
+        </p>
+        <p class="field-hint">
+          应用配置后的服务就绪检查最长约 3 分钟，请保持页面打开，完成或失败后都会显示结果。
+        </p>
+      </div>
       <div v-if="result" class="execution-result">
         <el-alert
           :title="
@@ -515,7 +526,11 @@ const {
   pickImageDirectory,
   prepareImages,
   runPreflight,
-  executeDeployment
+  executeDeployment,
+  progressStep,
+  progressPercent,
+  progressMessage,
+  elapsedText
 } = useDeploymentWizard(config, emit);
 
 watch([review, activeStep], () => {
@@ -785,6 +800,12 @@ code {
   align-items: center;
   gap: 8px;
   color: var(--text-secondary);
+}
+.execution-progress {
+  margin-top: 12px;
+}
+.execution-progress .field-hint {
+  margin: 8px 0 0;
 }
 .execution-result > .el-button {
   margin-top: 16px;

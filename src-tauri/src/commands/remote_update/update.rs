@@ -254,7 +254,7 @@ fn update_remote_deployment_blocking(
         "应用更新",
         88,
         "running",
-        "重启受影响的服务并等待就绪",
+        "应用部署配置并重启服务，随后检查就绪状态（最长约 3 分钟）",
     );
     let output = apply_remote_update(
         &host,
@@ -446,29 +446,59 @@ compose() {{
     }
 
     if !wait_services.is_empty() {
-        script.push_str("echo \"==> 等待服务健康检查\"\n");
+        // 交付包可能声明当前变体清单里没有启用的服务（例如局域网清单不含隧道服务），
+        // 只等待实际存在的服务，避免为不存在的容器等待到超时。
+        script.push_str(&format!(
+            r#"AVAILABLE_SERVICES=$(compose config --services 2>/dev/null || true)
+if [ -z "$AVAILABLE_SERVICES" ]; then
+  echo "==> 无法读取当前部署配置的服务列表，按交付包声明检查" >&2
+  AVAILABLE_SERVICES="{}"
+fi
+WAIT_CONTAINERS=""
+"#,
+            wait_services.join(" ")
+        ));
         for service in &wait_services {
             let container = bundle.container_name(service);
             script.push_str(&format!(
-                r#"ready=no
-for i in $(seq 1 45); do
-  health=$(docker inspect --format '{{{{if .State.Health}}}}{{{{.State.Health.Status}}}}{{{{else}}}}none{{{{end}}}}' {container} 2>/dev/null || echo missing)
-  state=$(docker inspect --format '{{{{.State.Status}}}}' {container} 2>/dev/null || echo missing)
-  if [ "$health" = "healthy" ] || {{ [ "$health" = "none" ] && [ "$state" = "running" ]; }}; then
-    ready=yes
-    break
-  fi
-  sleep 2
-done
-if [ "$ready" != "yes" ]; then
-  echo "服务 {container} 未就绪 (health=$health, state=$state)" >&2
-  docker logs --tail 40 {container} 2>&1 || true
-  exit 4
+                r#"if printf '%s\n' "$AVAILABLE_SERVICES" | grep -qx {service}; then
+  WAIT_CONTAINERS="$WAIT_CONTAINERS {container}"
+else
+  echo "==> 服务 {container} 未在当前部署配置中启用，跳过就绪检查"
 fi
 "#,
-                container = shell_quote(&container)
+                service = shell_quote(service)
             ));
         }
+        script.push_str(
+            r#"if [ -n "$WAIT_CONTAINERS" ]; then
+  echo "==> 等待服务健康检查"
+  unready=""
+  for i in $(seq 1 90); do
+    unready=""
+    for container in $WAIT_CONTAINERS; do
+      health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container" 2>/dev/null || echo missing)
+      state=$(docker inspect --format '{{.State.Status}}' "$container" 2>/dev/null || echo missing)
+      if [ "$health" = "healthy" ] || { [ "$health" = "none" ] && [ "$state" = "running" ]; }; then
+        continue
+      fi
+      unready="$unready $container"
+    done
+    if [ -z "$unready" ]; then
+      break
+    fi
+    sleep 2
+  done
+  if [ -n "$unready" ]; then
+    for container in $unready; do
+      echo "服务 $container 未在等待时间内就绪" >&2
+      docker logs --tail 40 "$container" 2>&1 || true
+    done
+    exit 4
+  fi
+fi
+"#,
+        );
     }
 
     script.push_str("echo \"==> 当前容器状态\"\ncompose ps\n");
@@ -481,10 +511,32 @@ fi
         Ok(combined)
     } else {
         Err(format!(
-            "应用更新失败: {}\n{}",
-            explain_ssh_failure(&stderr, key),
+            "应用更新失败：{}\n{}",
+            remote_script_failure(&stderr, key, output.status.code()),
             combined
         ))
+    }
+}
+
+pub(super) fn remote_script_failure(stderr: &str, key: Option<&str>, code: Option<i32>) -> String {
+    // 255 是 SSH 自身返回的连接或认证错误，此时才使用 SSH 故障说明。
+    if code == Some(255) {
+        return explain_ssh_failure(stderr, key);
+    }
+    if let Some(line) = stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("服务 ") && line.contains("未在等待时间内就绪"))
+    {
+        return format!("{line}。请查看执行详情中的服务日志，处理后重试。");
+    }
+    let detail = stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with("==>"));
+    match detail {
+        Some(detail) => format!("目标机命令执行失败：{detail}。请展开执行详情查看完整输出。"),
+        None => "目标机命令执行失败，请展开执行详情查看完整输出。".to_string(),
     }
 }
 

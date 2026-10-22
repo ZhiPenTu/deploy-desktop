@@ -19,6 +19,7 @@ import {
   loadOfflineImages,
   uploadRemoteImageBundle,
   importRemoteImageBundle,
+  onRemoteUpdateProgress,
 } from '../../../api/tauri.js';
 import { validInstallDir, createDeploymentContext, contextTarget } from '../domain/context.js';
 import {
@@ -29,6 +30,7 @@ import {
 } from '../domain/components.js';
 import { safeText, failureText } from '../domain/errors.js';
 import { invokeIncremental } from '../services/operations.js';
+import { createProgressSubscription } from '../../../shared/async/progressSubscription.js';
 
 export function useDeploymentWizard(config, emit) {
   const steps = ['选择项目', '检测环境', '选择制品', '解压制品', '清单比对', '选择更新'];
@@ -95,6 +97,56 @@ export function useDeploymentWizard(config, emit) {
     diagnostics = ref(''),
     result = ref(null);
 
+  const progressStep = ref(''),
+    progressPercent = ref(0),
+    progressMessage = ref(''),
+    elapsedSeconds = ref(0);
+
+  let progressSubscription = null,
+    elapsedTimer = null;
+
+  const elapsedText = computed(() => {
+    const minutes = Math.floor(elapsedSeconds.value / 60);
+    const seconds = elapsedSeconds.value % 60;
+    return minutes ? `${minutes} 分 ${String(seconds).padStart(2, '0')} 秒` : `${seconds} 秒`;
+  });
+
+  function startExecutionFeedback() {
+    stopExecutionFeedback();
+    progressStep.value = '准备执行';
+    progressPercent.value = 2;
+    progressMessage.value = '';
+    elapsedSeconds.value = 0;
+    progressSubscription = createProgressSubscription(
+      onRemoteUpdateProgress,
+      (payload) => {
+        if (!payload) return;
+        const percent = Number(payload.percent);
+        if (Number.isFinite(percent)) {
+          progressPercent.value = Math.max(0, Math.min(100, Math.round(percent)));
+        }
+        if (payload.step) progressStep.value = String(payload.step);
+        if (payload.message) {
+          progressMessage.value = String(payload.message);
+          phase.value = progressMessage.value;
+        }
+      },
+      () => {
+        progressMessage.value = '无法订阅执行进度，完成结果不受影响。';
+      }
+    );
+    elapsedTimer = setInterval(() => {
+      elapsedSeconds.value += 1;
+    }, 1000);
+  }
+
+  function stopExecutionFeedback() {
+    progressSubscription?.dispose();
+    progressSubscription = null;
+    if (elapsedTimer) clearInterval(elapsedTimer);
+    elapsedTimer = null;
+  }
+
   const busy = computed(
     () =>
       testingSsh.value ||
@@ -137,6 +189,7 @@ export function useDeploymentWizard(config, emit) {
   watch(navigationBlocked, (value) => emit('busy-change', value), { flush: 'sync' });
 
   onBeforeUnmount(() => {
+    stopExecutionFeedback();
     disposed = true;
     revision += 1;
     envRevision += 1;
@@ -513,6 +566,7 @@ export function useDeploymentWizard(config, emit) {
       } catch {
         return;
       }
+      startExecutionFeedback();
       phase.value = `正在${action}，请等待执行结果`;
       let response;
       if (context.action === 'incremental') {
@@ -573,6 +627,7 @@ export function useDeploymentWizard(config, emit) {
       phase.value = '';
     } finally {
       executing.value = false;
+      stopExecutionFeedback();
     }
   }
 
@@ -583,5 +638,5 @@ export function useDeploymentWizard(config, emit) {
       allowedComponents: deploymentComponents(bundlePlan.value) });
   }
 
-  return { steps, activeStep, selectedHost, isRemote, targetLabel, hostReady, testingSsh, settingKey, sshMessage, sshOk, envData, envError, checkingEnv, installingDocker, artifactPicker, candidate, preparedBundle, artifactBusy, review, reviewError, checkingReview, reviewTab, imageMediaDir, importingImages, deploymentAction, selectedComponents, backup, executing, preflighting, preflightPassed, phase, operationError, diagnostics, result, busy, environmentReady, componentOptions, canExecute, changeLabel, stateLabel, artifactChosen, artifactPrepared, testConnection, setupAccess, checkEnvironment, installDocker, nextStep, previousStep, loadReview, pickImageDirectory, prepareImages, runPreflight, executeDeployment };
+  return { steps, activeStep, selectedHost, isRemote, targetLabel, hostReady, testingSsh, settingKey, sshMessage, sshOk, envData, envError, checkingEnv, installingDocker, artifactPicker, candidate, preparedBundle, artifactBusy, review, reviewError, checkingReview, reviewTab, imageMediaDir, importingImages, deploymentAction, selectedComponents, backup, executing, preflighting, preflightPassed, phase, operationError, diagnostics, result, busy, environmentReady, componentOptions, canExecute, changeLabel, stateLabel, artifactChosen, artifactPrepared, testConnection, setupAccess, checkEnvironment, installDocker, nextStep, previousStep, loadReview, pickImageDirectory, prepareImages, runPreflight, executeDeployment, progressStep, progressPercent, progressMessage, elapsedText };
 }

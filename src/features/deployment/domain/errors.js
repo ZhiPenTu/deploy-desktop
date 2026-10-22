@@ -10,8 +10,24 @@ export function safeText(value) {
     .replace(/(Bearer\s+)[\w.-]+/gi, '$1[已隐藏]');
 }
 
+function actionableReason(text) {
+  for (const line of text.split('\n').map((item) => item.trim()).filter(Boolean)) {
+    if (!/(未在等待时间内就绪|未就绪|缺少|不足|尚未|未安装|未运行|未找到)/.test(line))
+      continue;
+    const cleaned = line
+      .replace(/^应用更新失败[：:]\s*/, '')
+      .replace(/^更新未完成[：:]\s*/, '')
+      .split('。')[0]
+      .trim();
+    if (cleaned) return cleaned;
+  }
+  return '';
+}
+
 export function failureText(error, action) {
   const text = String(error || '');
+  const reason = actionableReason(text);
+  if (reason) return `${action}失败：${reason}。`;
   if (/权限|denied|认证|authentication|publickey/i.test(text))
     return `${action}失败，请检查主机登录权限和凭证后重试。`;
   if (/Docker|docker|Compose|compose/.test(text))

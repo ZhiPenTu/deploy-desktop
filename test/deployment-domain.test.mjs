@@ -3,7 +3,7 @@ import { afterEach, test } from 'node:test';
 import { mockIPC, clearMocks } from '@tauri-apps/api/mocks';
 import { validInstallDir, createDeploymentContext, contextTarget } from '../src/features/deployment/domain/context.js';
 import { deploymentComponents, servicesAreReady, requireSuccessfulResult } from '../src/features/deployment/domain/components.js';
-import { safeText } from '../src/features/deployment/domain/errors.js';
+import { safeText, failureText } from '../src/features/deployment/domain/errors.js';
 import { invokeIncremental } from '../src/features/deployment/services/operations.js';
 
 const input = () => ({
@@ -96,4 +96,15 @@ test('operation service preserves target and dry-run, rejects failed responses a
 test('deployment diagnostics redact credentials and private keys', () => {
   const text=safeText('password=secret-value token="private-token" Bearer opaque-token https://user:password@example.com/path -----BEGIN PRIVATE KEY-----\nprivate-material\n-----END PRIVATE KEY-----');
   for(const secret of ['secret-value','private-token','opaque-token','user:password','private-material']) assert.equal(text.includes(secret),false);
+});
+
+test('failure text keeps the actionable reason instead of a generic docker message', () => {
+  const notReady = failureText(
+    '应用更新失败：服务 tt-net-manager-cloudflared 未在等待时间内就绪。请查看执行详情中的服务日志，处理后重试。\n==> 当前容器状态',
+    '增量更新'
+  );
+  assert.match(notReady, /tt-net-manager-cloudflared/);
+  assert.doesNotMatch(notReady, /Docker 和 Compose/);
+  assert.match(failureText('目标机 Docker 守护进程未运行，请先启动 Docker。', '预检'), /未运行/);
+  assert.match(failureText('连接超时：请检查网络连通性。', '连接检查'), /检查目标主机连接/);
 });

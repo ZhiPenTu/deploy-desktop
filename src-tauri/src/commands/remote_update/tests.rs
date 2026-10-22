@@ -329,3 +329,32 @@ fn compose_package_directory_preserves_explicit_selection_and_bundled_images() {
 
     fs::remove_dir_all(&root).ok();
 }
+
+#[test]
+fn remote_script_failure_keeps_the_actionable_reason() {
+    use super::update::remote_script_failure;
+
+    let not_ready = remote_script_failure(
+        "服务 tt-net-manager-frontend 未在等待时间内就绪\napp: starting\n",
+        None,
+        Some(4),
+    );
+    assert!(not_ready.contains("tt-net-manager-frontend"), "{not_ready}");
+    assert!(not_ready.contains("服务日志"), "{not_ready}");
+    assert!(!not_ready.contains("连接失败"), "{not_ready}");
+
+    let compose_error = remote_script_failure(
+        "Error response from daemon: pull access denied\n",
+        None,
+        Some(1),
+    );
+    assert!(compose_error.contains("pull access denied"), "{compose_error}");
+    assert!(!compose_error.contains("连接失败"), "{compose_error}");
+
+    let connection_error = remote_script_failure(
+        "ssh: connect to host 192.0.2.10 port 22: Connection refused\n",
+        None,
+        Some(255),
+    );
+    assert!(connection_error.contains("连接失败"), "{connection_error}");
+}
