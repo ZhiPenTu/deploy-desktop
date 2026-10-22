@@ -9,9 +9,6 @@
       <Header
         :page-title="currentPage.title"
         :group="currentPage.group"
-        :deploy-mode="connection.mode"
-        :remote-host="connection.remoteHost"
-        @quick-check="handleQuickCheck"
       />
 
       <main class="content-panel">
@@ -176,12 +173,6 @@ async function handleInspectProject({ id, tab } = {}) {
     ElMessage.error(errorText(error));
   }
 }
-
-const handleQuickCheck = () => {
-  const targetHost = hostById(selectedStatusHostId.value) || hostById(connection.activeHostId);
-  selectedStatusHostId.value = targetHost?.id || '';
-  navigateTab('host-status');
-};
 
 function viewHostStatus(host) {
   selectedStatusHostId.value = host?.id || '';
