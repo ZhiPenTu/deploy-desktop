@@ -213,6 +213,7 @@ import { selectLocalPath as open } from '../../../api/tauri.js';
 import { Box, DocumentChecked, FolderOpened, Refresh } from '@element-plus/icons-vue';
 import { downloadArtifact, fetchArtifactRelease, isDesktopApp, listArtifactReleases, listArtifactSources, openArtifactBundle, openArtifactBundleVersion, prepareLocalArtifactBundle } from '../../../api/tauri.js';
 import { applyProjectBundle } from '../../connections/state.js';
+import { releaseKey } from '../domain/releases.js';
 
 const props = defineProps({
   connection: { type: Object, required: true },
@@ -402,10 +403,6 @@ function isChosen(item) {
   if (candidate.value.sourceId !== sourceId.value) return false;
   const version = String(item.version || '').trim();
   return Boolean(version) && candidate.value.version === version;
-}
-
-function releaseKey(item) {
-  return `${item.runId || 0}-${item.artifactName || ''}-${item.version || ''}`;
 }
 
 function formatTime(ms) {
