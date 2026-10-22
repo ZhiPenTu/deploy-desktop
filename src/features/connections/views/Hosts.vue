@@ -73,7 +73,7 @@
             </template>
             <div class="info-row">
               <span class="k">更新于</span>
-              <span class="v muted">{{ formatTime(row.updatedAt) }}</span>
+              <span class="v muted">{{ formatShortTimestamp(row.updatedAt) }}</span>
             </div>
           </div>
 
@@ -160,6 +160,7 @@ import {
   testManagedHostConnection
 } from '../../../api/tauri.js';
 import { errorText } from '../../../shared/errors.js';
+import { formatShortTimestamp } from '../../../shared/format.js';
 
 defineEmits(['go-credentials', 'view-status']);
 
@@ -179,16 +180,6 @@ function credentialKeyText(credentialId) {
   const credential = credentialById(credentialId);
   if (!credential) return '凭证不可用';
   return credential.privateKeyPath || '自动选择默认密钥';
-}
-
-function formatTime(value) {
-  if (!value) return '未记录';
-  return new Intl.DateTimeFormat('zh-CN', {
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit'
-  }).format(new Date(value));
 }
 
 async function load() {

@@ -1,9 +1,8 @@
-use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
-use tauri::{ipc::Channel, AppHandle, Manager, State};
+use tauri::{ipc::Channel, AppHandle, State};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
 const DEFAULT_UPDATE_ENDPOINT: &str =
@@ -40,12 +39,7 @@ pub struct UpdateSettings {
 }
 
 fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app
-        .path()
-        .app_config_dir()
-        .map_err(|e| format!("读取应用配置目录失败：{e}"))?;
-    fs::create_dir_all(&dir).map_err(|e| format!("创建应用配置目录失败：{e}"))?;
-    Ok(dir.join("update-settings.json"))
+    Ok(crate::core::config::app_config_dir(app)?.join("update-settings.json"))
 }
 
 fn friendly_update_error(message: String) -> String {
@@ -155,19 +149,18 @@ fn resolve_update_endpoint(endpoint: Option<String>) -> Result<tauri::Url, Strin
 #[tauri::command]
 pub fn get_update_settings(app: AppHandle) -> Result<UpdateSettings, String> {
     let path = settings_path(&app)?;
-    if !path.exists() {
-        return Ok(UpdateSettings::default());
-    }
-    let content = fs::read_to_string(&path).map_err(|e| format!("读取更新设置失败：{e}"))?;
-    serde_json::from_str(&content).map_err(|e| format!("解析更新设置失败：{e}"))
+    Ok(crate::core::json_store::load::<UpdateSettings>(&path, "更新设置")?.unwrap_or_default())
 }
 
 #[tauri::command]
 pub fn save_update_settings(app: AppHandle, settings: UpdateSettings) -> Result<(), String> {
     let path = settings_path(&app)?;
-    let content =
-        serde_json::to_string_pretty(&settings).map_err(|e| format!("序列化更新设置失败：{e}"))?;
-    fs::write(&path, content).map_err(|e| format!("保存更新设置失败：{e}"))
+    crate::core::json_store::save(
+        &path,
+        &settings,
+        "更新设置",
+        crate::core::atomic_file::FilePermission::Default,
+    )
 }
 
 #[tauri::command]

@@ -113,24 +113,10 @@ import ArtifactCenter from './features/artifacts/views/ArtifactCenter.vue';
 import Settings from './features/settings/views/Settings.vue';
 import McpService from './features/mcp/views/McpService.vue';
 import LogViewer from './features/monitoring/views/LogViewer.vue';
+import { defaultPage, pageOf } from './config/pages.js';
 import { errorText } from './shared/errors.js';
 
-
-const pages = {
-  projects: { title: '项目管理', group: '项目' },
-  credentials: { title: '凭证管理', group: '连接' },
-  hosts: { title: '主机管理', group: '连接' },
-  wizard: { title: '部署向导', group: '部署' },
-  'host-status': { title: '主机状态', group: '连接' },
-  dashboard: { title: '集群监控', group: '运行' },
-  logs: { title: '日志诊断', group: '运行' },
-  artifacts: { title: '制品中心', group: '资源' },
-  images: { title: '镜像与离线包', group: '资源' },
-  mcp: { title: 'MCP 服务', group: '高级' },
-  settings: { title: '设置', group: '高级' }
-};
-
-const currentTab = ref('wizard');
+const currentTab = ref(defaultPage);
 const settingsSection = ref('artifacts');
 function openSettings(section) {
   settingsSection.value = section || 'artifacts';
@@ -151,7 +137,7 @@ function openWizardWithBundle(preset) {
   navigateTab('wizard');
 }
 const activeLogContainer = ref('');
-const currentPage = computed(() => pages[currentTab.value] || pages.wizard);
+const currentPage = computed(() => pageOf(currentTab.value));
 
 const handleViewLog = (containerName) => {
   activeLogContainer.value = containerName;

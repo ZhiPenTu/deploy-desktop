@@ -1,10 +1,13 @@
-import fs from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import { DeployError } from './errors.mjs';
 import { Bundle } from './bundle.mjs';
 import { appVersion } from './config.mjs';
-import { expandHome, isObject } from './util.mjs';
+import { appConfigDir } from './paths.mjs';
+import { formatJson, readJsonFile, writePrivateFile } from './fs-atomic.mjs';
+import { withFileLock } from './file-lock.mjs';
+import { isObject } from './util.mjs';
+
+export { appConfigDir };
 
 export const PROJECTS_FILE = 'projects.json';
 export const CONNECTIONS_FILE = 'connections.json';
@@ -13,41 +16,20 @@ export const DEPLOYED_FILE = 'deployed.json';
 
 let storeQueue = Promise.resolve();
 
-export function appConfigDir() {
-  const override = process.env.DEPLOY_DESKTOP_APP_CONFIG_DIR;
-  if (override) return expandHome(override);
-  const home = os.homedir();
-  if (process.platform === 'darwin') {
-    return path.join(home, 'Library', 'Application Support', 'com.deploydesktop.app');
-  }
-  if (process.platform === 'win32') {
-    const appData = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
-    return path.join(appData, 'com.deploydesktop.app');
-  }
-  return path.join(process.env.XDG_CONFIG_HOME || path.join(home, '.config'), 'com.deploydesktop.app');
-}
-
-async function readJson(file) {
+async function readJson(file, label) {
   try {
-    return JSON.parse(await fs.readFile(file, 'utf8'));
+    return await readJsonFile(file);
   } catch (error) {
-    if (error.code === 'ENOENT') return null;
-    throw new DeployError(`读取配置失败：${file}`, {
+    throw new DeployError(`读取${label}失败：${file}`, {
       code: 'CONFIG_READ_FAILED',
       details: { path: file, error: error.message }
     });
   }
 }
 
-async function writePrivateJson(file, value) {
-  const dir = path.dirname(file);
-  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
-  if (process.platform !== 'win32') await fs.chmod(dir, 0o700).catch(() => {});
-  const temp = `${file}.${process.pid}.${Date.now()}.tmp`;
-  await fs.writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
-  if (process.platform !== 'win32') await fs.chmod(temp, 0o600).catch(() => {});
-  await fs.rename(temp, file);
-  if (process.platform !== 'win32') await fs.chmod(file, 0o600).catch(() => {});
+/** 不加锁的写入实现；调用方必须持有 `file-lock`，避免嵌套加锁。 */
+async function writeStoreFile(file, value) {
+  await writePrivateFile(file, formatJson(value));
 }
 
 export function normalizeProjectStore(raw) {
@@ -73,7 +55,7 @@ export function normalizeProjectStore(raw) {
 export async function loadProjectStore() {
   const dir = appConfigDir();
   const file = path.join(dir, PROJECTS_FILE);
-  const raw = await readJson(file);
+  const raw = await readJson(file, '项目配置');
   if (raw === null) {
     return { schemaVersion: 1, activeProjectId: '', projects: [], path: file };
   }
@@ -89,17 +71,26 @@ export async function loadProjectStore() {
 
 export async function saveProjectStore(store) {
   const file = path.join(appConfigDir(), PROJECTS_FILE);
-  await writePrivateJson(file, normalizeProjectStore(store));
+  await withFileLock(file, () => writeStoreFile(file, normalizeProjectStore(store)));
   return file;
 }
 
+/**
+ * 读取、修改、写回都在同一把跨进程锁内完成。
+ *
+ * 桌面端「设置 → 项目管理」会写同一份 `projects.json`，先锁后读再写，
+ * 两边的修改才不会因为各自基于旧快照而互相覆盖。
+ */
 export function mutateProjectStore(mutator) {
   const run = storeQueue.then(async () => {
-    const store = await loadProjectStore();
-    const next = structuredClone(store);
-    const result = await mutator(next);
-    const file = await saveProjectStore(next);
-    return { store: next, path: file, result };
+    const file = path.join(appConfigDir(), PROJECTS_FILE);
+    return withFileLock(file, async () => {
+      const store = await loadProjectStore();
+      const next = structuredClone(store);
+      const result = await mutator(next);
+      await writeStoreFile(file, normalizeProjectStore(next));
+      return { store: next, path: file, result };
+    });
   });
   storeQueue = run.catch(() => {});
   return run;
@@ -141,7 +132,7 @@ export async function activeBundle() {
 
 export async function loadConnections() {
   const file = path.join(appConfigDir(), CONNECTIONS_FILE);
-  const raw = await readJson(file);
+  const raw = await readJson(file, '连接配置');
   if (!raw) return { hosts: [], credentials: [], path: file };
   return {
     hosts: Array.isArray(raw.hosts) ? raw.hosts : [],
@@ -269,7 +260,7 @@ export function deployedRecordPath(installDir) {
 }
 
 export async function readDeployedRecord(installDir) {
-  const raw = await readJson(deployedRecordPath(installDir)).catch(() => null);
+  const raw = await readJson(deployedRecordPath(installDir), '部署记录').catch(() => null);
   if (!raw || !Array.isArray(raw.artifacts)) return null;
   return raw;
 }

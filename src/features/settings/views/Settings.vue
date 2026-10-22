@@ -34,7 +34,7 @@
               </template>
             </el-table-column>
             <el-table-column label="更新于" width="150">
-              <template #default="{ row }">{{ formatTime(row.updatedAt) }}</template>
+              <template #default="{ row }">{{ formatShortTimestamp(row.updatedAt) }}</template>
             </el-table-column>
             <el-table-column label="操作" width="140">
               <template #default="{ row }">
@@ -243,6 +243,7 @@ import {
   saveImageLibrarySettings
 } from '../../../api/tauri.js';
 import { errorText } from '../../../shared/errors.js';
+import { formatShortTimestamp } from '../../../shared/format.js';
 
 const props = defineProps({
   connection: {
@@ -305,16 +306,6 @@ function tokenName(tokenId) {
   if (!tokenId) return '';
   const match = tokens.value.find((item) => item.id === tokenId);
   return match ? match.name : '';
-}
-
-function formatTime(value) {
-  if (!value) return '未记录';
-  return new Intl.DateTimeFormat('zh-CN', {
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit'
-  }).format(new Date(value));
 }
 
 function openTokenCreate() {

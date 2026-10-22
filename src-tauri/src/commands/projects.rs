@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
 use super::bundle::{Bundle, BundleDescriptor};
+use crate::core::path_guard;
 
 const PROJECTS_FILE: &str = "projects.json";
 
@@ -84,10 +85,8 @@ struct BundleCache {
 static BUNDLE_CACHE: Mutex<Option<BundleCache>> = Mutex::new(None);
 
 pub fn init_projects(app: &tauri::AppHandle) {
-    use tauri::Manager;
-    let dir = app.path().app_config_dir().ok();
+    let dir = crate::core::config::app_config_dir(app).ok();
     if let Some(dir) = &dir {
-        let _ = fs::create_dir_all(dir);
         let _ = CONFIG_DIR.set(dir.clone());
     }
     let store = dir
@@ -114,8 +113,13 @@ fn store_path() -> Result<PathBuf, String> {
 
 fn load_store(dir: &Path) -> Option<ProjectStore> {
     let path = dir.join(PROJECTS_FILE);
-    let text = fs::read_to_string(path).ok()?;
-    serde_json::from_str(&text).ok()
+    match crate::core::json_store::load::<ProjectStore>(&path, "项目配置") {
+        Ok(store) => store,
+        Err(error) => {
+            log::warn!("{error}");
+            None
+        }
+    }
 }
 
 fn file_stamp(path: &Path) -> Option<(SystemTime, u64)> {
@@ -151,16 +155,17 @@ fn reload_if_changed() {
     if !changed {
         return;
     }
-    let text = match fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(_) => {
-            remember_stamp(Some(stamp));
+    let loaded = match crate::core::json_store::load::<ProjectStore>(&path, "项目配置") {
+        Ok(Some(loaded)) => loaded,
+        Ok(None) => {
+            remember_stamp(file_stamp(&path));
             return;
         }
-    };
-    let Ok(loaded) = serde_json::from_str::<ProjectStore>(text.as_str()) else {
-        remember_stamp(Some(stamp));
-        return;
+        Err(error) => {
+            log::warn!("{error}");
+            remember_stamp(file_stamp(&path));
+            return;
+        }
     };
     if let Ok(mut current) = store().lock() {
         *current = loaded;
@@ -169,15 +174,28 @@ fn reload_if_changed() {
     invalidate_bundle_cache();
 }
 
-fn persist(current: &ProjectStore) -> Result<(), String> {
+/// 在跨进程锁内按磁盘最新内容修改项目配置，并同步内存快照。
+///
+/// MCP 服务会改写同一份 `projects.json`，因此不能拿内存里的旧快照直接覆盖磁盘：
+/// 锁内重新读取，修改完成后再写回，写入成功后才刷新内存与交付包缓存。
+fn mutate_store<F>(mutate: F) -> Result<ProjectStore, String>
+where
+    F: FnOnce(&mut ProjectStore) -> Result<(), String>,
+{
     let path = store_path()?;
-    let text = serde_json::to_string_pretty(current)
-        .map_err(|_| "无法生成项目配置".to_string())?;
-    let temp = path.with_extension("json.tmp");
-    fs::write(&temp, text).map_err(|_| "无法写入项目配置".to_string())?;
-    fs::rename(&temp, &path).map_err(|_| "无法保存项目配置".to_string())?;
+    let updated = crate::core::json_store::update(
+        &path,
+        ProjectStore::default(),
+        "项目配置",
+        crate::core::atomic_file::FilePermission::Default,
+        mutate,
+    )?;
     remember_stamp(file_stamp(&path));
-    Ok(())
+    if let Ok(mut guard) = store().lock() {
+        *guard = updated.clone();
+    }
+    invalidate_bundle_cache();
+    Ok(updated)
 }
 
 pub fn snapshot() -> ProjectStore {
@@ -239,26 +257,31 @@ pub fn invalidate_bundle_cache() {
 
 /// 本地交付包被删除后，清空仍指向该目录的项目绑定。
 pub fn clear_bundle_dir(root: &Path) {
-    let mut current = snapshot();
     let target = root.to_string_lossy().trim_end_matches('/').to_string();
-    let mut changed = false;
-    for project in current.projects.iter_mut() {
-        let dir = project.last_bundle_dir.trim().trim_end_matches('/').to_string();
-        if !dir.is_empty() && (dir == target || dir.starts_with(&format!("{target}/"))) {
-            project.last_bundle_dir.clear();
-            project.last_version.clear();
-            changed = true;
-        }
-    }
-    if !changed {
+    if snapshot()
+        .projects
+        .iter()
+        .all(|project| !points_into(project, &target))
+    {
         return;
     }
-    if persist(&current).is_ok() {
-        if let Ok(mut guard) = store().lock() {
-            *guard = current;
+    let result = mutate_store(|current| {
+        for project in current.projects.iter_mut() {
+            if points_into(project, &target) {
+                project.last_bundle_dir.clear();
+                project.last_version.clear();
+            }
         }
-        invalidate_bundle_cache();
+        Ok(())
+    });
+    if let Err(error) = result {
+        log::warn!("清理已删除交付包的项目绑定失败：{error}");
     }
+}
+
+fn points_into(project: &Project, target: &str) -> bool {
+    let dir = project.last_bundle_dir.trim().trim_end_matches('/');
+    !dir.is_empty() && (dir == target || dir.starts_with(&format!("{target}/")))
 }
 
 fn summarize(descriptor: &BundleDescriptor) -> BundleSummary {
@@ -305,59 +328,53 @@ pub fn get_active_project_context() -> ActiveProjectContext {
 
 #[tauri::command]
 pub fn set_active_project(id: String) -> Result<ProjectStore, String> {
-    let mut current = snapshot();
-    let target = current
-        .projects
-        .iter()
-        .find(|project| project.id == id)
-        .ok_or_else(|| "所选项目不存在，请刷新后重试".to_string())?
-        .clone();
-    current.active_project_id = target.id.clone();
-    log::info!(target: "project", "切换当前项目：{} ({})", target.name, target.id);
-    persist(&current)?;
-    *store().lock().map_err(|_| "项目配置不可用".to_string())? = current.clone();
-    invalidate_bundle_cache();
-    Ok(current)
+    mutate_store(|current| {
+        let target = current
+            .projects
+            .iter()
+            .find(|project| project.id == id)
+            .ok_or_else(|| "所选项目不存在，请刷新后重试".to_string())?;
+        current.active_project_id = target.id.clone();
+        log::info!(target: "project", "切换当前项目：{} ({})", target.name, target.id);
+        Ok(())
+    })
 }
 
 #[tauri::command]
 pub fn create_project(input: ProjectInput) -> Result<ProjectStore, String> {
-    let mut current = snapshot();
     let name = validate_name(&input.name)?;
     let install_dir = validate_install_dir(&input.install_dir)?;
     validate_host(&input.host_id)?;
-    let project = Project {
-        id: next_id(&current),
-        name,
-        product: String::new(),
-        host_id: input.host_id.trim().to_string(),
-        install_dir,
-        source_id: input.source_id.trim().to_string(),
-        last_version: String::new(),
-        last_bundle_dir: String::new(),
-    };
-    log::info!(
-        target: "project",
-        "新建项目：{} 目录={} 主机={} 制品源={}",
-        project.name,
-        project.install_dir,
-        project.host_id,
-        project.source_id
-    );
-    current.projects.push(project.clone());
-    if current.active_project_id.trim().is_empty() {
-        current.active_project_id = project.id;
-    }
-    current.schema_version = 1;
-    persist(&current)?;
-    *store().lock().map_err(|_| "项目配置不可用".to_string())? = current.clone();
-    invalidate_bundle_cache();
-    Ok(current)
+    mutate_store(|current| {
+        let project = Project {
+            id: next_id(current),
+            name,
+            product: String::new(),
+            host_id: input.host_id.trim().to_string(),
+            install_dir,
+            source_id: input.source_id.trim().to_string(),
+            last_version: String::new(),
+            last_bundle_dir: String::new(),
+        };
+        log::info!(
+            target: "project",
+            "新建项目：{} 目录={} 主机={} 制品源={}",
+            project.name,
+            project.install_dir,
+            project.host_id,
+            project.source_id
+        );
+        if current.active_project_id.trim().is_empty() {
+            current.active_project_id = project.id.clone();
+        }
+        current.projects.push(project);
+        current.schema_version = 1;
+        Ok(())
+    })
 }
 
 #[tauri::command]
 pub fn update_project(input: ProjectInput) -> Result<ProjectStore, String> {
-    let mut current = snapshot();
     let id = input.id.trim().to_string();
     if id.is_empty() {
         return Err("缺少项目标识，请刷新后重试".to_string());
@@ -365,48 +382,45 @@ pub fn update_project(input: ProjectInput) -> Result<ProjectStore, String> {
     let name = validate_name(&input.name)?;
     let install_dir = validate_install_dir(&input.install_dir)?;
     validate_host(&input.host_id)?;
-    let project = current
-        .projects
-        .iter_mut()
-        .find(|project| project.id == id)
-        .ok_or_else(|| "所选项目不存在，请刷新后重试".to_string())?;
-    project.name = name;
-    project.host_id = input.host_id.trim().to_string();
-    project.install_dir = install_dir;
-    project.source_id = input.source_id.trim().to_string();
-    log::info!(
-        target: "project",
-        "更新项目：{} 目录={} 主机={}",
-        project.name,
-        project.install_dir,
-        project.host_id
-    );
-    persist(&current)?;
-    *store().lock().map_err(|_| "项目配置不可用".to_string())? = current.clone();
-    invalidate_bundle_cache();
-    Ok(current)
+    mutate_store(|current| {
+        let project = current
+            .projects
+            .iter_mut()
+            .find(|project| project.id == id)
+            .ok_or_else(|| "所选项目不存在，请刷新后重试".to_string())?;
+        project.name = name;
+        project.host_id = input.host_id.trim().to_string();
+        project.install_dir = install_dir;
+        project.source_id = input.source_id.trim().to_string();
+        log::info!(
+            target: "project",
+            "更新项目：{} 目录={} 主机={}",
+            project.name,
+            project.install_dir,
+            project.host_id
+        );
+        Ok(())
+    })
 }
 
 #[tauri::command]
 pub fn delete_project(id: String) -> Result<ProjectStore, String> {
-    let mut current = snapshot();
-    let before = current.projects.len();
-    current.projects.retain(|project| project.id != id);
-    if current.projects.len() == before {
-        return Err("所选项目不存在，请刷新后重试".to_string());
-    }
-    if current.active_project_id == id {
-        current.active_project_id = current
-            .projects
-            .first()
-            .map(|project| project.id.clone())
-            .unwrap_or_default();
-    }
-    log::info!(target: "project", "删除项目：{id}");
-    persist(&current)?;
-    *store().lock().map_err(|_| "项目配置不可用".to_string())? = current.clone();
-    invalidate_bundle_cache();
-    Ok(current)
+    mutate_store(|current| {
+        let before = current.projects.len();
+        current.projects.retain(|project| project.id != id);
+        if current.projects.len() == before {
+            return Err("所选项目不存在，请刷新后重试".to_string());
+        }
+        if current.active_project_id == id {
+            current.active_project_id = current
+                .projects
+                .first()
+                .map(|project| project.id.clone())
+                .unwrap_or_default();
+        }
+        log::info!(target: "project", "删除项目：{id}");
+        Ok(())
+    })
 }
 
 #[tauri::command]
@@ -422,26 +436,24 @@ pub fn activate_project_bundle(
             bundle.version()
         ));
     }
-    let mut current = snapshot();
-    let project = current
-        .projects
-        .iter_mut()
-        .find(|project| project.id == project_id)
-        .ok_or_else(|| "所选项目不存在，请刷新后重试".to_string())?;
-    if !project.product.trim().is_empty() && project.product.trim() != bundle.product() {
-        return Err(format!(
-            "该交付包属于「{}」，当前项目已绑定「{}」，请选择匹配的制品",
-            bundle.product(),
-            project.product
-        ));
-    }
-    project.product = bundle.product().to_string();
-    project.last_version = bundle.version().to_string();
-    project.last_bundle_dir = bundle_dir.trim().to_string();
-    persist(&current)?;
-    *store().lock().map_err(|_| "项目配置不可用".to_string())? = current.clone();
-    invalidate_bundle_cache();
-    Ok(current)
+    mutate_store(|current| {
+        let project = current
+            .projects
+            .iter_mut()
+            .find(|project| project.id == project_id)
+            .ok_or_else(|| "所选项目不存在，请刷新后重试".to_string())?;
+        if !project.product.trim().is_empty() && project.product.trim() != bundle.product() {
+            return Err(format!(
+                "该交付包属于「{}」，当前项目已绑定「{}」，请选择匹配的制品",
+                bundle.product(),
+                project.product
+            ));
+        }
+        project.product = bundle.product().to_string();
+        project.last_version = bundle.version().to_string();
+        project.last_bundle_dir = bundle_dir.trim().to_string();
+        Ok(())
+    })
 }
 
 fn validate_name(raw: &str) -> Result<String, String> {
@@ -466,19 +478,10 @@ fn validate_install_dir(raw: &str) -> Result<String, String> {
     if value.contains(['\n', '\r', '\0']) {
         return Err("部署目录包含不支持的字符".to_string());
     }
-    let windows_absolute = {
-        let bytes = value.as_bytes();
-        bytes.len() > 2
-            && bytes[0].is_ascii_alphabetic()
-            && bytes[1] == b':'
-            && (bytes[2] == b'\\' || bytes[2] == b'/')
-    };
-    if !value.starts_with('/') && !windows_absolute {
+    if !path_guard::is_absolute(value) {
         return Err("部署目录必须填写绝对路径".to_string());
     }
-    if Path::new(value).components().any(|part| {
-        matches!(part, std::path::Component::ParentDir)
-    }) {
+    if path_guard::has_parent_dir(Path::new(value)) {
         return Err("部署目录不能包含上级目录".to_string());
     }
     Ok(value.to_string())

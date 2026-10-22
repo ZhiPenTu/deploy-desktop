@@ -205,12 +205,7 @@ pub fn log_dir_or_app(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app
-        .path()
-        .app_config_dir()
-        .map_err(|_| "无法读取应用配置目录".to_string())?;
-    fs::create_dir_all(&dir).map_err(|_| "无法创建应用配置目录".to_string())?;
-    Ok(dir.join(SETTINGS_FILE))
+    Ok(crate::core::config::app_config_dir(app)?.join(SETTINGS_FILE))
 }
 
 fn read_settings(app: &AppHandle) -> Option<PathBuf> {
@@ -243,10 +238,12 @@ fn persist_settings_file(path: &Path, dir: Option<&Path>) -> Result<(), String> 
         .map_err(|error| format!("保存日志设置失败：{error}"))?,
         None => "{}".to_string(),
     };
-    let temp = path.with_extension("json.tmp");
-    fs::write(&temp, text).map_err(|error| format!("保存日志设置失败：{error}"))?;
-    fs::rename(&temp, path).map_err(|error| format!("保存日志设置失败：{error}"))?;
-    Ok(())
+    crate::core::atomic_file::write_text_atomic(
+        path,
+        &text,
+        crate::core::atomic_file::FilePermission::Default,
+    )
+    .map_err(|error| format!("保存日志设置失败：{error}"))
 }
 
 fn ensure_writable(dir: &Path) -> Result<(), String> {

@@ -1,0 +1,633 @@
+{
+  "note": "Rust（src-tauri/src/commands/bundle.rs）与 MCP（mcp-server/src/bundle.mjs）共用同一份描述符校验用例。每个用例只断言「接受 / 拒绝」这一可观察结果，不比对错误文案。case.patch 递归合并到 base：对象逐键合并，数组与标量整体替换。带 divergence 的用例表示两侧当前结论不同，字段记录了原因；两侧实现对齐后需要同步更新本文件。",
+  "base": {
+    "apiVersion": "deploy.desktop/bundle/v2",
+    "kind": "DeploymentBundle",
+    "metadata": {
+      "product": "demo",
+      "displayName": "示例产品",
+      "version": "1.0.0",
+      "buildNumber": "42"
+    },
+    "runtime": {
+      "type": "compose",
+      "compose": "app/docker-compose.yml",
+      "containerPrefix": "demo",
+      "services": [
+        {
+          "key": "api",
+          "label": "接口服务",
+          "port": 8080,
+          "protocol": "TCP"
+        },
+        {
+          "key": "db",
+          "label": "数据库",
+          "port": 5432,
+          "protocol": "TCP"
+        }
+      ],
+      "database": {
+        "serviceKey": "db",
+        "name": "demo",
+        "client": "postgres",
+        "port": 5432
+      }
+    },
+    "components": [
+      {
+        "key": "config",
+        "label": "配置",
+        "artifacts": [
+          "compose"
+        ],
+        "services": [
+          "api"
+        ]
+      }
+    ],
+    "artifacts": [
+      {
+        "key": "compose",
+        "label": "编排文件",
+        "source": "app/docker-compose.yml",
+        "root": "deploy",
+        "path": "docker-compose.yml",
+        "type": "file"
+      }
+    ],
+    "images": [],
+    "plan": {
+      "steps": [
+        {
+          "key": "deploy",
+          "title": "部署",
+          "hint": "确认目标后开始"
+        }
+      ]
+    },
+    "files": [
+      {
+        "path": "app/docker-compose.yml",
+        "size": 128,
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    ]
+  },
+  "cases": [
+    {
+      "name": "minimal-valid",
+      "reason": "基础描述符两侧都应接受",
+      "patch": {},
+      "expect": {
+        "rust": "ok",
+        "mcp": "ok"
+      }
+    },
+    {
+      "name": "unknown-top-level-field",
+      "reason": "未知顶层字段必须拒绝，避免拼写错误静默生效",
+      "patch": {
+        "extra": true
+      },
+      "expect": {
+        "rust": "reject",
+        "mcp": "reject"
+      }
+    },
+    {
+      "name": "api-version-v1",
+      "reason": "旧版本描述符不再支持",
+      "patch": {
+        "apiVersion": "deploy.desktop/bundle/v1"
+      },
+      "expect": {
+        "rust": "reject",
+        "mcp": "reject"
+      }
+    },
+    {
+      "name": "kind-mismatch",
+      "reason": "kind 必须是 DeploymentBundle",
+      "patch": {
+        "kind": "Bundle"
+      },
+      "expect": {
+        "rust": "reject",
+        "mcp": "reject"
+      }
+    },
+    {
+      "name": "product-blank",
+      "reason": "产品名称不能为空白",
+      "patch": {
+        "metadata": {
+          "product": "   "
+        }
+      },
+      "expect": {
+        "rust": "reject",
+        "mcp": "reject"
+      }
+    },
+    {
+      "name": "version-empty",
+      "reason": "版本号不能为空",
+      "patch": {
+        "metadata": {
+          "version": ""
+        }
+      },
+      "expect": {
+        "rust": "reject",
+        "mcp": "reject"
+      }
+    },
+    {
+      "name": "version-too-long",
+      "reason": "版本号长度为 129 个字符",
+      "patch": {
+        "metadata": {
+          "version": "111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
+        }
+      },
+      "expect": {
+        "rust": "reject",
+        "mcp": "ok"
+      },
+      "divergence": "Rust 限制版本号不超过 128 个字符；MCP 未限制长度。"
+    },
+    {
+      "name": "runtime-unsupported",
+      "reason": "仅支持 Compose 运行时",
+      "patch": {
+        "runtime": {
+          "type": "k8s"
+        }
+      },
+      "expect": {
+        "rust": "reject",
+        "mcp": "reject"
+      }
+    },
+    {
+      "name": "compose-absolute-path",
+      "reason": "Compose 清单路径必须是交付包内相对路径",
+      "patch": {
+        "runtime": {
+          "compose": "/app/docker-compose.yml"
+        }
+      },
+      "expect": {
+        "rust": "reject",
+        "mcp": "reject"
+      }
+    },
+    {
+      "name": "service-duplicate-key",
+      "reason": "服务标识重复",
+      "patch": {
+        "runtime": {
+          "services": [
+            {
+              "key": "api",
+              "label": "接口服务",
+              "port": 8080
+            },
+            {
+              "key": "api",
+              "label": "接口服务",
+              "port": 8081
+            }
+          ]
+        }
+      },
+      "expect": {
+        "rust": "reject",
+        "mcp": "reject"
+      }
+    },
+    {
+      "name": "service-label-empty",
+      "reason": "服务缺少显示名称",
+      "patch": {
+        "runtime": {
+          "services": [
+            {
+              "key": "api",
+              "label": "",
+              "port": 8080
+            }
+          ]
+        }
+      },
+      "expect": {
+        "rust": "reject",
+        "mcp": "reject"
+      }
+    },
+    {
+      "name": "service-port-zero",
+      "reason": "服务端口为 0",
+      "patch": {
+        "runtime": {
+          "services": [
+            {
+              "key": "api",
+              "label": "接口服务",
+              "port": 0
+            },
+            {
+              "key": "db",
+              "label": "数据库",
+              "port": 5432,
+              "protocol": "TCP"
+            }
+          ]
+        }
+      },
+      "expect": {
+        "rust": "ok",
+        "mcp": "reject"
+      },
+      "divergence": "Rust 只把端口解析为 u16，未校验 0；MCP 要求 1-65535。"
+    },
+    {
+      "name": "service-port-out-of-range",
+      "reason": "服务端口超出 u16 范围",
+      "patch": {
+        "runtime": {
+          "services": [
+            {
+              "key": "api",
+              "label": "接口服务",
+              "port": 70000
+            },
+            {
+              "key": "db",
+              "label": "数据库",
+              "port": 5432,
+              "protocol": "TCP"
+            }
+          ]
+        }
+      },
+      "expect": {
+        "rust": "reject",
+        "mcp": "reject"
+      }
+    },
+    {
+      "name": "service-protocol-unsupported",
+      "reason": "服务协议不是 TCP 或 UDP",
+      "patch": {
+        "runtime": {
+          "services": [
+            {
+              "key": "api",
+              "label": "接口服务",
+              "port": 8080,
+              "protocol": "ICMP"
+            },
+            {
+              "key": "db",
+              "label": "数据库",
+              "port": 5432,
+              "protocol": "TCP"
+            }
+          ]
+        }
+      },
+      "expect": {
+        "rust": "ok",
+        "mcp": "reject"
+      },
+      "divergence": "Rust 不校验服务协议取值；MCP 要求 TCP 或 UDP。"
+    },
+    {
+      "name": "database-service-unknown",
+      "reason": "数据库引用了未声明的服务",
+      "patch": {
+        "runtime": {
+          "database": {
+            "serviceKey": "cache"
+          }
+        }
+      },
+      "expect": {
+        "rust": "reject",
+        "mcp": "reject"
+      }
+    },
+    {
+      "name": "database-port-zero",
+      "reason": "数据库端口为 0",
+      "patch": {
+        "runtime": {
+          "database": {
+            "port": 0
+          }
+        }
+      },
+      "expect": {
+        "rust": "reject",
+        "mcp": "reject"
+      }
+    },
+    {
+      "name": "database-name-empty",
+      "reason": "数据库名称为空",
+      "patch": {
+        "runtime": {
+          "database": {
+            "name": ""
+          }
+        }
+      },
+      "expect": {
+        "rust": "ok",
+        "mcp": "reject"
+      },
+      "divergence": "Rust 不校验数据库名称是否为空；MCP 要求非空。"
+    },
+    {
+      "name": "artifact-source-is-bundle-json",
+      "reason": "产物来源不能是描述符自身",
+      "patch": {
+        "artifacts": [
+          {
+            "key": "compose",
+            "label": "编排文件",
+            "source": "app/docker-compose.yml",
+            "root": "deploy",
+            "path": "docker-compose.yml",
+            "type": "file"
+          },
+          {
+            "key": "manifest",
+            "label": "描述符",
+            "source": "bundle.json",
+            "root": "install",
+            "path": "bundle.json",
+            "type": "file"
+          }
+        ],
+        "files": [
+          {
+            "path": "app/docker-compose.yml",
+            "size": 128,
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          },
+          {
+            "path": "bundle.json",
+            "size": 64,
+            "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+          }
+        ]
+      },
+      "expect": {
+        "rust": "reject",
+        "mcp": "reject"
+      }
+    },
+    {
+      "name": "artifact-duplicate-deploy-target",
+      "reason": "两个产物部署到同一位置",
+      "patch": {
+        "artifacts": [
+          {
+            "key": "compose",
+            "label": "编排文件",
+            "source": "app/docker-compose.yml",
+            "root": "deploy",
+            "path": "docker-compose.yml",
+            "type": "file"
+          },
+          {
+            "key": "compose-copy",
+            "label": "编排副本",
+            "source": "app/docker-compose.yml",
+            "root": "deploy",
+            "path": "docker-compose.yml",
+            "type": "file"
+          }
+        ]
+      },
+      "expect": {
+        "rust": "reject",
+        "mcp": "reject"
+      }
+    },
+    {
+      "name": "artifact-path-traversal",
+      "reason": "产物部署路径包含上级目录",
+      "patch": {
+        "artifacts": [
+          {
+            "key": "compose",
+            "label": "编排文件",
+            "source": "app/docker-compose.yml",
+            "root": "deploy",
+            "path": "../docker-compose.yml",
+            "type": "file"
+          }
+        ]
+      },
+      "expect": {
+        "rust": "reject",
+        "mcp": "reject"
+      }
+    },
+    {
+      "name": "artifact-type-unknown",
+      "reason": "产物类型不在 file 或 dir 之内",
+      "patch": {
+        "artifacts": [
+          {
+            "key": "compose",
+            "label": "编排文件",
+            "source": "app/docker-compose.yml",
+            "root": "deploy",
+            "path": "docker-compose.yml",
+            "type": "symlink"
+          }
+        ]
+      },
+      "expect": {
+        "rust": "reject",
+        "mcp": "reject"
+      }
+    },
+    {
+      "name": "file-digest-invalid",
+      "reason": "文件摘要不是 64 位十六进制",
+      "patch": {
+        "files": [
+          {
+            "path": "app/docker-compose.yml",
+            "size": 128,
+            "sha256": "not-a-digest"
+          }
+        ]
+      },
+      "expect": {
+        "rust": "reject",
+        "mcp": "reject"
+      }
+    },
+    {
+      "name": "file-unowned",
+      "reason": "文件清单中存在不属于任何产物的文件",
+      "patch": {
+        "files": [
+          {
+            "path": "app/docker-compose.yml",
+            "size": 128,
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          },
+          {
+            "path": "app/readme.txt",
+            "size": 8,
+            "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+          }
+        ]
+      },
+      "expect": {
+        "rust": "reject",
+        "mcp": "reject"
+      }
+    },
+    {
+      "name": "compose-missing-from-files",
+      "reason": "文件清单未包含 Compose 清单",
+      "patch": {
+        "files": [
+          {
+            "path": "app/other.yml",
+            "size": 128,
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          }
+        ]
+      },
+      "expect": {
+        "rust": "reject",
+        "mcp": "reject"
+      }
+    },
+    {
+      "name": "component-unknown-artifact",
+      "reason": "组件引用了未声明的产物",
+      "patch": {
+        "components": [
+          {
+            "key": "config",
+            "label": "配置",
+            "artifacts": [
+              "missing"
+            ],
+            "services": [
+              "api"
+            ]
+          }
+        ]
+      },
+      "expect": {
+        "rust": "reject",
+        "mcp": "reject"
+      }
+    },
+    {
+      "name": "component-key-image",
+      "reason": "组件标识不能占用 image",
+      "patch": {
+        "components": [
+          {
+            "key": "image",
+            "label": "配置",
+            "artifacts": [
+              "compose"
+            ],
+            "services": [
+              "api"
+            ]
+          }
+        ]
+      },
+      "expect": {
+        "rust": "reject",
+        "mcp": "reject"
+      }
+    },
+    {
+      "name": "image-role-invalid",
+      "reason": "镜像角色必须是 app 或 base",
+      "patch": {
+        "images": [
+          {
+            "name": "app",
+            "ref": "demo:1.0.0",
+            "role": "other"
+          }
+        ]
+      },
+      "expect": {
+        "rust": "reject",
+        "mcp": "reject"
+      }
+    },
+    {
+      "name": "image-ref-with-space",
+      "reason": "镜像引用不能包含空白",
+      "patch": {
+        "images": [
+          {
+            "name": "app",
+            "ref": "demo image:1.0.0",
+            "role": "app"
+          }
+        ]
+      },
+      "expect": {
+        "rust": "reject",
+        "mcp": "reject"
+      }
+    },
+    {
+      "name": "image-bundle-file-undeclared",
+      "reason": "镜像包未出现在文件清单中",
+      "patch": {
+        "images": [
+          {
+            "name": "app",
+            "ref": "demo:1.0.0",
+            "role": "app",
+            "bundleFile": "app/image.tar"
+          }
+        ]
+      },
+      "expect": {
+        "rust": "reject",
+        "mcp": "reject"
+      }
+    },
+    {
+      "name": "plan-step-unknown-field",
+      "reason": "部署步骤包含未知字段",
+      "patch": {
+        "plan": {
+          "steps": [
+            {
+              "key": "deploy",
+              "title": "部署",
+              "detail": "多余字段"
+            }
+          ]
+        }
+      },
+      "expect": {
+        "rust": "reject",
+        "mcp": "reject"
+      }
+    }
+  ]
+}

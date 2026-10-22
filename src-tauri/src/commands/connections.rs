@@ -1,10 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
 use super::remote_ssh::{setup_remote_ssh_key_blocking, test_ssh_connection_blocking, SshTestResult};
 
@@ -114,12 +112,7 @@ pub struct ConnectionInventory {
 type SecretStore = BTreeMap<String, String>;
 
 fn config_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app
-        .path()
-        .app_config_dir()
-        .map_err(|e| format!("读取应用配置目录失败：{e}"))?;
-    fs::create_dir_all(&dir).map_err(|e| format!("创建应用配置目录失败：{e}"))?;
-    Ok(dir)
+    crate::core::config::app_config_dir(app)
 }
 
 fn connections_path(dir: &Path) -> PathBuf {
@@ -130,37 +123,10 @@ fn secrets_path(dir: &Path) -> PathBuf {
     dir.join(SECRETS_FILE)
 }
 
-fn write_private_file(path: &Path, content: &str) -> Result<(), String> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .mode(0o600)
-            .open(path)
-            .map_err(|e| format!("写入本地连接配置失败：{e}"))?;
-        file.write_all(content.as_bytes())
-            .map_err(|e| format!("写入本地连接配置失败：{e}"))?;
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
-    }
-    #[cfg(not(unix))]
-    {
-        fs::write(path, content).map_err(|e| format!("写入本地连接配置失败：{e}"))?;
-    }
-    Ok(())
-}
-
 fn load_store(dir: &Path) -> Result<ConnectionsFile, String> {
     let path = connections_path(dir);
-    let mut store: ConnectionsFile = if path.exists() {
-        let content = fs::read_to_string(&path).map_err(|e| format!("读取连接配置失败：{e}"))?;
-        serde_json::from_str(&content).map_err(|e| format!("解析连接配置失败：{e}"))?
-    } else {
-        ConnectionsFile::default()
-    };
+    let mut store = crate::core::json_store::load::<ConnectionsFile>(&path, "连接配置")?
+        .unwrap_or_default();
 
     let mut changed = false;
     for host in &mut store.hosts {
@@ -219,24 +185,26 @@ fn default_local_host(store: &ConnectionsFile) -> ManagedHost {
 }
 
 fn store_connections(dir: &Path, store: &ConnectionsFile) -> Result<(), String> {
-    let content =
-        serde_json::to_string_pretty(store).map_err(|e| format!("保存连接配置失败：{e}"))?;
-    write_private_file(&connections_path(dir), &content)
+    crate::core::json_store::save(
+        &connections_path(dir),
+        store,
+        "连接配置",
+        crate::core::atomic_file::FilePermission::OwnerOnly,
+    )
 }
 
 fn read_secrets(dir: &Path) -> Result<SecretStore, String> {
     let path = secrets_path(dir);
-    if !path.exists() {
-        return Ok(SecretStore::default());
-    }
-    let content = fs::read_to_string(&path).map_err(|e| format!("读取本地凭证失败：{e}"))?;
-    serde_json::from_str(&content).map_err(|e| format!("解析本地凭证失败：{e}"))
+    Ok(crate::core::json_store::load::<SecretStore>(&path, "本地凭证")?.unwrap_or_default())
 }
 
 fn write_secrets(dir: &Path, secrets: &SecretStore) -> Result<(), String> {
-    let content =
-        serde_json::to_string_pretty(secrets).map_err(|e| format!("保存本地凭证失败：{e}"))?;
-    write_private_file(&secrets_path(dir), &content)
+    crate::core::json_store::save(
+        &secrets_path(dir),
+        secrets,
+        "本地凭证",
+        crate::core::atomic_file::FilePermission::OwnerOnly,
+    )
 }
 
 fn inventory_at(dir: &Path) -> Result<ConnectionInventory, String> {
@@ -592,6 +560,7 @@ pub(crate) fn setup_managed_host_access_blocking(app: AppHandle, id: String) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     fn temp_dir(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -601,6 +570,26 @@ mod tests {
         ));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn corrupt_store_is_reported_and_backed_up() {
+        let dir = temp_dir("corrupt-store");
+        fs::write(dir.join(CONNECTIONS_FILE), "{\"hosts\": [").unwrap();
+
+        let error = load_store(&dir).unwrap_err();
+        assert!(error.contains("连接配置已损坏"), "unexpected message: {error}");
+        assert!(!dir.join(CONNECTIONS_FILE).exists());
+        let backup_exists = fs::read_dir(&dir).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".corrupt-")
+        });
+        assert!(backup_exists, "损坏的连接配置应保留备份");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     fn credential(name: &str) -> SshCredentialInput {

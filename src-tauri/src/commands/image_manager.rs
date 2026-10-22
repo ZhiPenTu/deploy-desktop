@@ -67,7 +67,11 @@ pub struct ImageManagerProgress {
 }
 
 #[tauri::command]
-pub fn scan_local_image_bundle(dir: String) -> Result<ImageBundleScan, String> {
+pub async fn scan_local_image_bundle(dir: String) -> Result<ImageBundleScan, String> {
+    crate::commands::blocking::run(move || scan_local_image_bundle_blocking(dir)).await
+}
+
+pub(crate) fn scan_local_image_bundle_blocking(dir: String) -> Result<ImageBundleScan, String> {
     let raw = dir.trim();
     if raw.is_empty() {
         return Err("请填写本地镜像包目录".to_string());
@@ -170,7 +174,21 @@ pub async fn import_remote_image_bundle(
 }
 
 #[tauri::command]
-pub fn remove_remote_image_files(
+pub async fn remove_remote_image_files(
+    host: String,
+    port: u16,
+    user: String,
+    key_path: Option<String>,
+    remote_bundle_dir: String,
+    files: Vec<String>,
+) -> Result<String, String> {
+    crate::commands::blocking::run(move || {
+        remove_remote_image_files_blocking(host, port, user, key_path, remote_bundle_dir, files)
+    })
+    .await
+}
+
+pub(crate) fn remove_remote_image_files_blocking(
     host: String,
     port: u16,
     user: String,

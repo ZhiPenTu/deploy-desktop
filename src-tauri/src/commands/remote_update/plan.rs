@@ -404,21 +404,14 @@ fn collect_plan_images(bundle: &crate::commands::bundle::Bundle, local: &[String
     if entries.is_empty() {
         let compose_path = bundle.root.join(bundle.effective_compose());
         if let Ok(text) = fs::read_to_string(&compose_path) {
-            for line in text.lines() {
-                let trimmed = line.trim_start();
-                let Some(rest) = trimmed.strip_prefix("image:") else {
-                    continue;
-                };
-                let reference = rest.trim().trim_matches('"').trim_matches('\'').to_string();
-                if !reference.is_empty() {
-                    entries.push((
-                        reference,
-                        "app".to_string(),
-                        "compose".to_string(),
-                        true,
-                        String::new(),
-                    ));
-                }
+            for reference in crate::core::compose::scan_image_references(&text) {
+                entries.push((
+                    reference,
+                    "app".to_string(),
+                    "compose".to_string(),
+                    true,
+                    String::new(),
+                ));
             }
         }
     }

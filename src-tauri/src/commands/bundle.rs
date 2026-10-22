@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
+
+use crate::core::path_guard::{self, RelativeIssue};
 
 pub const API_VERSION: &str = "deploy.desktop/bundle/v2";
 pub const KIND: &str = "DeploymentBundle";
@@ -743,32 +745,20 @@ fn collect_files(root: &Path, dir: &Path, out: &mut BTreeMap<String, u64>) -> Re
 
 pub fn safe_relative(value: &str, label: &str) -> Result<String, String> {
     let text = value.trim();
-    if text.is_empty() {
-        return Err(format!("{label}为空，请重新构建制品"));
+    match path_guard::check_relative(text) {
+        Ok(()) => Ok(text.to_string()),
+        Err(RelativeIssue::Empty) => Err(format!("{label}为空，请重新构建制品")),
+        Err(RelativeIssue::Backslash) => Err(format!("{label}必须使用 / 分隔：{text}")),
+        Err(RelativeIssue::Absolute) => Err(format!("{label}不能是绝对路径：{text}")),
+        Err(RelativeIssue::NonPlain) => Err(format!("{label}包含不合法路径：{text}")),
     }
-    if text.contains('\\') {
-        return Err(format!("{label}必须使用 / 分隔：{text}"));
-    }
-    let candidate = Path::new(text);
-    if candidate.is_absolute() {
-        return Err(format!("{label}不能是绝对路径：{text}"));
-    }
-    let mut has_normal = false;
-    for part in candidate.components() {
-        match part {
-            Component::Normal(_) => has_normal = true,
-            _ => return Err(format!("{label}包含不合法路径：{text}")),
-        }
-    }
-    if !has_normal {
-        return Err(format!("{label}包含不合法路径：{text}"));
-    }
-    Ok(text.to_string())
 }
 
 pub fn ensure_within(base: &Path, target: &Path, label: &str) -> Result<(), String> {
-    if !target.starts_with(base) {
-        return Err(format!("产物 {label} 的部署路径超出部署目录，请重新构建制品"));
+    if !path_guard::is_within(base, target) {
+        return Err(format!(
+            "产物 {label} 的部署路径超出部署目录，请重新构建制品"
+        ));
     }
     Ok(())
 }
@@ -789,24 +779,11 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 fn compare_versions(left: &str, right: &str) -> i32 {
-    let parse = |value: &str| -> Vec<u32> {
-        value
-            .trim()
-            .trim_start_matches('v')
-            .split(['.', '-', '+'])
-            .map(|part| part.parse::<u32>().unwrap_or(0))
-            .collect()
-    };
-    let left = parse(left);
-    let right = parse(right);
-    for index in 0..left.len().max(right.len()) {
-        let a = *left.get(index).unwrap_or(&0);
-        let b = *right.get(index).unwrap_or(&0);
-        if a != b {
-            return if a < b { -1 } else { 1 };
-        }
+    match crate::core::version::compare(left, right) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
     }
-    0
 }
 
 pub fn write_deployed_record(install_dir: &Path, record: &DeployedRecord) -> Result<(), String> {
@@ -1242,5 +1219,65 @@ mod tests {
         assert_eq!(record.artifacts.len(), 3);
         assert_eq!(record.artifacts[0].root, "deploy");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 与 MCP 侧 `mcp-server/test/bundle-fixture.test.mjs` 共用同一份描述符用例。
+    /// 用例只断言「接受 / 拒绝」，两侧错误文案不同不影响结论；
+    /// 结论不同处已在 fixture 的 `divergence` 字段记录原因。
+    fn merge_json(base: &mut Value, patch: &Value) {
+        match (base, patch) {
+            (Value::Object(base_map), Value::Object(patch_map)) => {
+                for (key, value) in patch_map {
+                    match base_map.get_mut(key) {
+                        Some(slot) if value.is_object() => merge_json(slot, value),
+                        _ => {
+                            base_map.insert(key.clone(), value.clone());
+                        }
+                    }
+                }
+            }
+            (slot, value) => *slot = value.clone(),
+        }
+    }
+
+    #[test]
+    fn descriptor_fixture_matches_rust_validation() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/bundles/cases.json");
+        let text = fs::read_to_string(&path).expect("读取描述符用例表失败");
+        let fixture: Value = serde_json::from_str(&text).expect("描述符用例表不是有效 JSON");
+        let base = fixture["base"].clone();
+        let cases = fixture["cases"].as_array().expect("用例表缺少 cases");
+        assert!(!cases.is_empty(), "用例表为空");
+
+        for case in cases {
+            let name = case["name"].as_str().expect("用例缺少 name");
+            let mut descriptor = base.clone();
+            merge_json(&mut descriptor, &case["patch"]);
+            let root = temp_dir(&format!("fixture-{name}"));
+            write_manifest(&root, &descriptor);
+            let result = Bundle::load(&root);
+            match case["expect"]["rust"].as_str() {
+                Some("ok") => assert!(
+                    result.is_ok(),
+                    "用例 {name} 应被接受，实际拒绝：{:?}",
+                    result.err()
+                ),
+                Some("reject") => assert!(result.is_err(), "用例 {name} 应被拒绝，实际接受"),
+                other => panic!("用例 {name} 的 rust 期望无效：{other:?}"),
+            }
+            fs::remove_dir_all(root).unwrap();
+        }
+
+        for case in cases {
+            if case["expect"]["rust"] == case["expect"]["mcp"] {
+                continue;
+            }
+            assert!(
+                case["divergence"].as_str().is_some(),
+                "用例 {} 两侧结论不同，但未记录 divergence",
+                case["name"]
+            );
+        }
     }
 }

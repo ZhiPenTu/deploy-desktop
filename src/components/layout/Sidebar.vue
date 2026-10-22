@@ -40,17 +40,8 @@
 </template>
 
 <script setup>
-import {
-  Promotion,
-  Files,
-  Box,
-  Connection,
-  Setting,
-  Key,
-  Monitor,
-  FolderOpened
-} from '@element-plus/icons-vue';
 import appIcon from '../../assets/app-icon.png';
+import { navGroups as buildNavGroups } from '../../config/pages.js';
 
 const appVersion = __APP_VERSION__;
 
@@ -63,41 +54,7 @@ defineProps({
 
 defineEmits(['update:tab']);
 
-const navGroups = [
-  {
-    label: '项目',
-    items: [
-      { key: 'projects', icon: FolderOpened, title: '项目管理' }
-    ]
-  },
-  {
-    label: '连接',
-    items: [
-      { key: 'credentials', icon: Key, title: '凭证管理' },
-      { key: 'hosts', icon: Monitor, title: '主机管理' }
-    ]
-  },
-  {
-    label: '部署',
-    items: [
-      { key: 'wizard', icon: Promotion, title: '部署向导' }
-    ]
-  },
-  {
-    label: '资源',
-    items: [
-      { key: 'artifacts', icon: Box, title: '制品中心' },
-      { key: 'images', icon: Files, title: '镜像与离线包' }
-    ]
-  },
-  {
-    label: '高级',
-    items: [
-      { key: 'mcp', icon: Connection, title: 'MCP 服务' },
-      { key: 'settings', icon: Setting, title: '设置' }
-    ]
-  }
-];
+const navGroups = buildNavGroups();
 </script>
 
 <style scoped>

@@ -5,6 +5,7 @@ use std::process::Command;
 use tauri::Emitter;
 
 use super::remote_ssh::find_binary;
+use crate::core::compose::SEARCH_CANDIDATES;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageLoadProgress {
@@ -32,13 +33,6 @@ pub struct ComposeActionResult {
     pub output: String,
     pub error: Option<String>,
 }
-
-const COMPOSE_CANDIDATES: [&str; 4] = [
-    "docker-compose.lan.yml",
-    "docker-compose.yml",
-    "deploy/docker-compose.lan.yml",
-    "deploy/docker-compose.yml",
-];
 
 /// 当前项目交付包声明的 Compose 清单，返回相对部署目录的路径。
 ///
@@ -72,7 +66,7 @@ pub fn resolve_compose_file(root: &Path) -> Option<std::path::PathBuf> {
             return Some(nested);
         }
     }
-    COMPOSE_CANDIDATES
+    SEARCH_CANDIDATES
         .iter()
         .map(|name| root.join(name))
         .find(|path| path.is_file())
@@ -82,7 +76,7 @@ pub fn resolve_compose_file(root: &Path) -> Option<std::path::PathBuf> {
 /// INSTALL is shell-quoted by the caller; all candidate names are fixed here.
 pub(crate) fn compose_location_script() -> String {
     let mut script = String::from("COMPOSE_FILE=\"\"\nDEPLOY=\"$INSTALL/deploy\"\n");
-    for (index, name) in COMPOSE_CANDIDATES.iter().enumerate() {
+    for (index, name) in SEARCH_CANDIDATES.iter().enumerate() {
         let branch = if index == 0 { "if" } else { "elif" };
         script.push_str(&format!(
             "{branch} [ -f \"$INSTALL/{name}\" ]; then\n  COMPOSE_FILE=\"$INSTALL/{name}\"\n"
@@ -319,7 +313,18 @@ pub(crate) fn get_containers_status_blocking() -> Result<Vec<ContainerStatusItem
 }
 
 #[tauri::command]
-pub fn docker_compose_action(
+pub async fn docker_compose_action(
+    deploy_dir: String,
+    action: String, // "up", "stop", "restart", "down"
+    service: Option<String>,
+) -> Result<ComposeActionResult, String> {
+    crate::commands::blocking::run(move || {
+        docker_compose_action_blocking(deploy_dir, action, service)
+    })
+    .await
+}
+
+pub(crate) fn docker_compose_action_blocking(
     deploy_dir: String,
     action: String, // "up", "stop", "restart", "down"
     service: Option<String>,

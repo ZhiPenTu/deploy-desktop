@@ -1,7 +1,9 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { DeployError } from './errors.mjs';
-import { appConfigDir } from './projects.mjs';
+import { appConfigDir } from './paths.mjs';
+import { formatJson, readJsonFile, writePrivateFile } from './fs-atomic.mjs';
+import { withFileLock } from './file-lock.mjs';
 import { isObject } from './util.mjs';
 
 export const ARTIFACT_SOURCES_FILE = 'artifact-sources.json';
@@ -36,9 +38,8 @@ export function artifactCacheRoot() {
 
 async function readJson(file, label) {
   try {
-    return JSON.parse(await fs.readFile(file, 'utf8'));
+    return await readJsonFile(file);
   } catch (error) {
-    if (error.code === 'ENOENT') return null;
     throw new DeployError(`读取${label}失败：${file}`, {
       code: 'ARTIFACT_CONFIG_READ_FAILED',
       details: { path: file, error: error.message }
@@ -46,15 +47,9 @@ async function readJson(file, label) {
   }
 }
 
+/** 不加锁的写入；调用方必须在 `withFileLock` 内执行，避免嵌套加锁死锁。 */
 async function writePrivateJson(file, value) {
-  const dir = path.dirname(file);
-  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
-  if (process.platform !== 'win32') await fs.chmod(dir, 0o700).catch(() => {});
-  const temp = `${file}.${process.pid}.${Date.now()}.tmp`;
-  await fs.writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
-  if (process.platform !== 'win32') await fs.chmod(temp, 0o600).catch(() => {});
-  await fs.rename(temp, file);
-  if (process.platform !== 'win32') await fs.chmod(file, 0o600).catch(() => {});
+  await writePrivateFile(file, formatJson(value));
 }
 
 function normalizeSource(source) {
@@ -89,17 +84,24 @@ export async function loadArtifactSources() {
 
 export async function saveArtifactSources(sources) {
   const file = artifactSourcePath();
-  await writePrivateJson(file, { sources: sources.map(normalizeSource) });
+  await withFileLock(file, () => writePrivateJson(file, { sources: sources.map(normalizeSource) }));
   return file;
 }
 
+/**
+ * 制品源由桌面端与 MCP 服务共同修改，读改写放在同一把跨进程锁内完成，
+ * 避免一端把另一端刚保存的源覆盖掉。
+ */
 export function mutateArtifactSources(mutator) {
   const run = sourceQueue.then(async () => {
-    const sources = await loadArtifactSources();
-    const next = structuredClone(sources);
-    const result = await mutator(next);
-    const file = await saveArtifactSources(next);
-    return { sources: next, path: file, result };
+    const file = artifactSourcePath();
+    return withFileLock(file, async () => {
+      const sources = await loadArtifactSources();
+      const next = structuredClone(sources);
+      const result = await mutator(next);
+      await writePrivateJson(file, { sources: next.map(normalizeSource) });
+      return { sources: next, path: file, result };
+    });
   });
   sourceQueue = run.catch(() => {});
   return run;
@@ -267,10 +269,13 @@ export async function readArtifactToken(target) {
 
 export function mutateArtifactTokens(mutator) {
   const run = tokenQueue.then(async () => {
-    const tokens = await loadTokenFile();
-    const result = await mutator(tokens);
-    await writePrivateJson(artifactTokenPath(), tokens);
-    return result;
+    const file = artifactTokenPath();
+    return withFileLock(file, async () => {
+      const tokens = await loadTokenFile();
+      const result = await mutator(tokens);
+      await writePrivateJson(file, tokens);
+      return result;
+    });
   });
   tokenQueue = run.catch(() => {});
   return run;
@@ -320,10 +325,13 @@ export async function loadReleaseCache(source) {
 
 export function mutateReleaseCache(mutator) {
   const run = cacheQueue.then(async () => {
-    const file = await loadReleaseCacheFile();
-    const result = await mutator(file);
-    await writePrivateJson(artifactReleaseCachePath(), file);
-    return result;
+    const path = artifactReleaseCachePath();
+    return withFileLock(path, async () => {
+      const file = await loadReleaseCacheFile();
+      const result = await mutator(file);
+      await writePrivateJson(path, file);
+      return result;
+    });
   });
   cacheQueue = run.catch(() => {});
   return run;

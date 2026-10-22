@@ -1,11 +1,10 @@
 //! 本机增量更新。预检只读取文件与 Docker，执行阶段不删除数据卷。
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -14,6 +13,7 @@ use tauri::Emitter;
 use super::bundle::{ArtifactRoot, Bundle, IMAGE_COMPONENT};
 use super::remote_ssh::find_binary;
 use super::remote_update::RemoteUpdateProgress;
+use crate::core::{backup, compose, path_guard};
 
 #[derive(Debug, Serialize)]
 pub struct LocalUpdateResult {
@@ -304,11 +304,7 @@ fn run_update(
 
 fn existing_directory(raw: &str, label: &str) -> Result<PathBuf, String> {
     let path = Path::new(raw.trim());
-    if !path.is_absolute()
-        || path
-            .components()
-            .any(|part| matches!(part, Component::ParentDir))
-    {
+    if !path.is_absolute() || path_guard::has_parent_dir(path) {
         return Err(format!("{label}必须使用不含上级跳转的绝对路径"));
     }
     let canonical = fs::canonicalize(path).map_err(|_| format!("{label}不存在或无法访问"))?;
@@ -358,12 +354,7 @@ fn validate_tree(path: &Path) -> Result<(), String> {
 }
 
 fn validate_destination(root: &Path, path: &Path) -> Result<(), String> {
-    if !path.starts_with(root)
-        || path == root
-        || path
-            .components()
-            .any(|part| matches!(part, Component::ParentDir))
-    {
+    if !path_guard::is_strictly_within(root, path) || path_guard::has_parent_dir(path) {
         return Err("更新目标超出部署目录，已中止操作".to_string());
     }
     reject_symlinks(path)?;
@@ -377,26 +368,22 @@ fn preferred_compose(dir: &Path, variant: Option<&Path>) -> Result<PathBuf, Stri
     if let Some(path) = variant.map(|name| dir.join(name)).filter(|path| path.is_file()) {
         return Ok(path);
     }
-    ["docker-compose.lan.yml", "docker-compose.yml"]
+    compose::ROOT_CANDIDATES
         .iter()
         .map(|name| dir.join(name))
         .find(|path| path.is_file())
         .ok_or_else(|| "未找到 Compose 清单，请检查交付包和部署目录".to_string())
 }
 
-fn service_names(compose: &Path) -> Result<BTreeSet<String>, String> {
-    let text = fs::read_to_string(compose).map_err(|_| "无法读取 Compose 清单".to_string())?;
-    let value: serde_yaml::Value = serde_yaml::from_str(&text)
-        .map_err(|_| "Compose 清单格式错误，请检查交付包".to_string())?;
-    let services = value
-        .get("services")
-        .and_then(serde_yaml::Value::as_mapping)
-        .ok_or_else(|| "Compose 清单未声明服务".to_string())?;
-    let names: BTreeSet<String> = services
-        .keys()
-        .filter_map(serde_yaml::Value::as_str)
-        .map(str::to_string)
-        .collect();
+fn service_names(compose_file: &Path) -> Result<BTreeSet<String>, String> {
+    let text = fs::read_to_string(compose_file).map_err(|_| "无法读取 Compose 清单".to_string())?;
+    let names: BTreeSet<String> = match compose::service_names(&text) {
+        Ok(names) => names.into_iter().collect(),
+        Err(compose::Error::Yaml(_)) => {
+            return Err("Compose 清单格式错误，请检查交付包".to_string())
+        }
+        Err(compose::Error::MissingServices) => return Err("Compose 清单未声明服务".to_string()),
+    };
     if names.is_empty() {
         return Err("Compose 清单未声明服务".to_string());
     }
@@ -963,40 +950,19 @@ fn copy_tree(source: &Path, target: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn unique_suffix() -> String {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    format!(
-        "{}-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos(),
-        COUNTER.fetch_add(1, Ordering::Relaxed)
-    )
-}
-
 fn create_backup(plan: &UpdatePlan) -> Result<PathBuf, String> {
     let parent = plan.root.join("backup");
     validate_destination(&plan.root, &parent)?;
     fs::create_dir_all(&parent).map_err(|_| "创建备份目录失败，请检查权限".to_string())?;
-    let backup = parent.join(format!("update-{}", unique_suffix()));
-    fs::create_dir(&backup).map_err(|_| "创建备份目录失败".to_string())?;
+    let backup_dir = parent.join(format!("update-{}", backup::unique_suffix()));
+    fs::create_dir(&backup_dir).map_err(|_| "创建备份目录失败".to_string())?;
     for item in &plan.replacements {
         let existing = plan.root.join(&item.relative);
         if existing.exists() {
-            copy_tree(&existing, &backup.join(&item.relative))?;
+            copy_tree(&existing, &backup_dir.join(&item.relative))?;
         }
     }
-    Ok(backup)
-}
-
-fn remove_path(path: &Path) -> std::io::Result<()> {
-    if path.is_dir() {
-        fs::remove_dir_all(path)
-    } else {
-        fs::remove_file(path)
-    }
+    Ok(backup_dir)
 }
 
 fn replace_path(source: &Path, target: &Path) -> Result<(), String> {
@@ -1004,30 +970,28 @@ fn replace_path(source: &Path, target: &Path) -> Result<(), String> {
         .parent()
         .ok_or_else(|| "更新目标目录无效".to_string())?;
     fs::create_dir_all(parent).map_err(|_| "创建更新目录失败，请检查权限".to_string())?;
-    let suffix = unique_suffix();
+    let suffix = backup::unique_suffix();
     let staging = parent.join(format!(".deploy-update-new-{suffix}"));
     let previous = parent.join(format!(".deploy-update-old-{suffix}"));
     if let Err(error) = copy_tree(source, &staging) {
-        let _ = remove_path(&staging);
+        let _ = backup::remove_path(&staging);
         return Err(error);
     }
-    let had_previous = target.exists();
-    if had_previous && fs::rename(target, &previous).is_err() {
-        let _ = remove_path(&staging);
-        return Err("替换原部署文件失败，请检查目录权限".to_string());
-    }
-    if fs::rename(&staging, target).is_err() {
-        if had_previous {
-            let _ = fs::rename(&previous, target);
+    match backup::swap_staged(&staging, target, &previous) {
+        Ok(had_previous) => backup::discard_previous(&previous, had_previous)
+            .map_err(|_| "更新文件已写入，但无法清理临时旧文件，请检查目录权限".to_string()),
+        Err(failure) => {
+            let _ = backup::remove_path(&staging);
+            match failure.stage {
+                backup::SwapStage::MoveAside => {
+                    Err("替换原部署文件失败，请检查目录权限".to_string())
+                }
+                backup::SwapStage::Install => {
+                    Err("写入更新失败，已尝试恢复原文件，请检查部署目录".to_string())
+                }
+            }
         }
-        let _ = remove_path(&staging);
-        return Err("写入更新失败，已尝试恢复原文件，请检查部署目录".to_string());
     }
-    if had_previous {
-        remove_path(&previous)
-            .map_err(|_| "更新文件已写入，但无法清理临时旧文件，请检查目录权限".to_string())?;
-    }
-    Ok(())
 }
 
 fn wait_for_services(plan: &UpdatePlan, compose: &Path, services: &[String]) -> Result<(), String> {
@@ -1062,7 +1026,8 @@ mod tests {
     impl Fixture {
         fn new() -> Self {
             let path =
-                std::env::temp_dir().join(format!("deploy-local-update-test-{}", unique_suffix()));
+                std::env::temp_dir()
+                .join(format!("deploy-local-update-test-{}", backup::unique_suffix()));
             fs::create_dir_all(&path).unwrap();
             Self(path)
         }

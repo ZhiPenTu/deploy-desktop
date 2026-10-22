@@ -401,6 +401,13 @@ import {
 } from '../../../api/tauri.js';
 import { reloadProjectState } from '../../connections/state.js';
 import { errorText } from '../../../shared/errors.js';
+import {
+  isBundleDirInUse,
+  localStatusText,
+  releaseKey,
+  shortPath,
+  versionText
+} from '../domain/releases.js';
 
 const props = defineProps({
   connection: {
@@ -476,35 +483,12 @@ const remoteTarget = computed(() => {
   };
 });
 
-function versionText(item) {
-  const version = String(item?.version || '').trim();
-  if (!version || version === 'manual') return '未标注版本';
-  return version;
-}
-
-function releaseKey(item) {
-  return `${item.runId || 0}-${item.artifactName || ''}-${item.version || ''}`;
-}
-
 function isLatest(item) {
   return Boolean(item) && latestRelease.value === item;
 }
 
 function isInUse(row) {
-  const current = String(props.connection.bundleDir || '').trim();
-  const dir = String(row.lastBundleDir || '').trim();
-  if (!current || !dir) return false;
-  return current === dir || current.startsWith(`${dir}/`);
-}
-
-function localStatusText(row) {
-  return row.localDir ? '已下载' : '未下载';
-}
-
-function shortPath(dir) {
-  const parts = String(dir || '').split('/').filter(Boolean);
-  if (parts.length <= 2) return dir;
-  return `.../${parts.slice(-2).join('/')}`;
+  return isBundleDirInUse(props.connection.bundleDir, row.lastBundleDir);
 }
 
 function formatSize(bytes) {

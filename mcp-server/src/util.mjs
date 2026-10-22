@@ -44,13 +44,24 @@ export function parseBoolean(value) {
   return false;
 }
 
+// 与桌面端 core/version.rs 共用 fixtures/versions.json，两侧规则必须完全一致。
+function versionSegments(value) {
+  const text = String(value ?? '').trim();
+  const body = text.replace(/^[vV]/, '');
+  if (!body) return [0];
+  return body.split(/[.+-]/).map((part) => {
+    const segment = part.trim();
+    return /^\d+$/.test(segment) ? Number.parseInt(segment, 10) : 0;
+  });
+}
+
 export function compareVersions(left, right) {
-  const a = String(left || '0').replace(/^v/i, '').split(/[.+-]/).map((part) => Number.parseInt(part, 10) || 0);
-  const b = String(right || '0').replace(/^v/i, '').split(/[.+-]/).map((part) => Number.parseInt(part, 10) || 0);
+  const a = versionSegments(left);
+  const b = versionSegments(right);
   const length = Math.max(a.length, b.length);
   for (let index = 0; index < length; index += 1) {
-    const x = a[index] || 0;
-    const y = b[index] || 0;
+    const x = a[index] ?? 0;
+    const y = b[index] ?? 0;
     if (x !== y) return x < y ? -1 : 1;
   }
   return 0;

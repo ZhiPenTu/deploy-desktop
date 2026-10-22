@@ -219,6 +219,7 @@ import {
   pullManifestImagesRemote
 } from '../../../api/tauri.js';
 import { errorText } from '../../../shared/errors.js';
+import { formatSize } from '../../../shared/format.js';
 
 const props = defineProps({
   connection: {
@@ -284,20 +285,6 @@ const progressMessage = computed(() => {
 const canPull = computed(
   () => Boolean(summary.value) && selectedNames.value.length > 0 && !pulling.value && !loading.value
 );
-
-const formatSize = (bytes) => {
-  const value = Number(bytes) || 0;
-  if (value >= 1024 * 1024 * 1024) {
-    return `${(value / 1024 / 1024 / 1024).toFixed(2)} GB`;
-  }
-  if (value >= 1024 * 1024) {
-    return `${(value / 1024 / 1024).toFixed(1)} MB`;
-  }
-  if (value >= 1024) {
-    return `${(value / 1024).toFixed(0)} KB`;
-  }
-  return `${value} B`;
-};
 
 const handleSelectionChange = (rows) => {
   selectedNames.value = rows.map((row) => row.name);

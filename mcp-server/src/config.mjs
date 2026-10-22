@@ -1,9 +1,11 @@
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DeployError } from './errors.mjs';
+import { mcpConfigDir } from './paths.mjs';
+import { formatJson, writePrivateFile } from './fs-atomic.mjs';
+import { withFileLock } from './file-lock.mjs';
 import { expandHome, isObject } from './util.mjs';
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
@@ -20,7 +22,7 @@ export const DEFAULT_CONFIG = Object.freeze({
 });
 
 export function configDir() {
-  return expandHome(process.env.DEPLOY_DESKTOP_CONFIG_DIR || path.join(os.homedir(), '.deploy-desktop'));
+  return mcpConfigDir();
 }
 
 export async function appVersion() {
@@ -36,25 +38,6 @@ export function configPath() {
   return expandHome(process.env.DEPLOY_DESKTOP_CONFIG_FILE || path.join(configDir(), 'mcp.json'));
 }
 
-async function ensurePrivateDir(dir) {
-  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
-  if (process.platform !== 'win32') {
-    await fs.chmod(dir, 0o700).catch(() => {});
-  }
-}
-
-async function writePrivateFile(target, content) {
-  await ensurePrivateDir(path.dirname(target));
-  const temp = `${target}.${process.pid}.${Date.now()}.tmp`;
-  await fs.writeFile(temp, content, { mode: 0o600 });
-  if (process.platform !== 'win32') {
-    await fs.chmod(temp, 0o600).catch(() => {});
-  }
-  await fs.rename(temp, target);
-  if (process.platform !== 'win32') {
-    await fs.chmod(target, 0o600).catch(() => {});
-  }
-}
 
 function normalizeConfig(raw) {
   const config = {
@@ -87,16 +70,19 @@ export async function loadConfig() {
 
 export async function saveConfig(config) {
   const file = configPath();
-  await writePrivateFile(file, `${JSON.stringify(normalizeConfig(config), null, 2)}\n`);
+  await withFileLock(file, () => writePrivateFile(file, formatJson(normalizeConfig(config))));
   return file;
 }
 
 export async function mutateConfig(mutator) {
-  const { config, path: file } = await loadConfig();
-  const next = structuredClone(config);
-  const result = await mutator(next);
-  await saveConfig(next);
-  return { config: next, path: file, result };
+  const file = configPath();
+  return withFileLock(file, async () => {
+    const { config } = await loadConfig();
+    const next = structuredClone(config);
+    const result = await mutator(next);
+    await writePrivateFile(file, formatJson(normalizeConfig(next)));
+    return { config: next, path: file, result };
+  });
 }
 
 export function validateRegistry(registry) {

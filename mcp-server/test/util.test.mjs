@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
 import test from 'node:test';
 import os from 'node:os';
 import path from 'node:path';
@@ -36,6 +37,24 @@ test('formatBytes 使用可读单位', () => {
 test('parseBoolean 支持常见真值', () => {
   for (const value of [true, '1', 'true', 'YES', 'on']) assert.equal(parseBoolean(value), true);
   for (const value of [false, '0', 'false', 'off', null]) assert.equal(parseBoolean(value), false);
+});
+
+test('compareVersions 与桌面端共用 fixtures/versions.json', async () => {
+  const raw = await fs.readFile(new URL('../../fixtures/versions.json', import.meta.url), 'utf8');
+  const { cases } = JSON.parse(raw);
+  assert.ok(cases.length > 0);
+  for (const item of cases) {
+    assert.equal(
+      compareVersions(item.left, item.right),
+      item.expected,
+      `${item.left} ? ${item.right}`
+    );
+    assert.equal(
+      compareVersions(item.right, item.left),
+      item.expected === 0 ? 0 : -item.expected,
+      `${item.right} ? ${item.left}`
+    );
+  }
 });
 
 test('compareVersions 比较语义版本', () => {

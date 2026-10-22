@@ -1,0 +1,90 @@
+{
+  "note": "版本号比较的共享用例：桌面端 core/version.rs 与 mcp-server/src/util.mjs 必须给出一致结果。规则为去掉首尾空白与可选 v/V 前缀后，按 . - + 拆分，每段再去掉首尾空白；整段都是数字才按数值比较，否则按 0 处理，缺失段也按 0。已知限制：预发布标识与构建元数据的数字段同样参与比较，因此 1.0.0-beta.2 与 1.0.0+build.7 都判为高于 1.0.0。",
+  "cases": [
+    {
+      "left": "1.0.0",
+      "right": "1.0.0",
+      "expected": 0
+    },
+    {
+      "left": "1.0.0",
+      "right": "1.0.1",
+      "expected": -1
+    },
+    {
+      "left": "1.2.0",
+      "right": "1.10.0",
+      "expected": -1
+    },
+    {
+      "left": "2.0",
+      "right": "1.9.9",
+      "expected": 1
+    },
+    {
+      "left": "v1.4.2",
+      "right": "1.4.2",
+      "expected": 0
+    },
+    {
+      "left": "V1.4.2",
+      "right": "1.4.3",
+      "expected": -1
+    },
+    {
+      "left": "1.0.0-beta.2",
+      "right": "1.0.0",
+      "expected": 1
+    },
+    {
+      "left": "1.0.0+build.7",
+      "right": "1.0.0",
+      "expected": 1
+    },
+    {
+      "left": "0.0.0",
+      "right": "0.0.0",
+      "expected": 0
+    },
+    {
+      "left": "1.0.0.1",
+      "right": "1.0.0",
+      "expected": 1
+    },
+    {
+      "left": "1.0.0",
+      "right": "1.0.0.1",
+      "expected": -1
+    },
+    {
+      "left": " 1.2.3 ",
+      "right": "1.2.3",
+      "expected": 0
+    },
+    {
+      "left": "",
+      "right": "0.0.1",
+      "expected": -1
+    },
+    {
+      "left": "v",
+      "right": "0",
+      "expected": 0
+    },
+    {
+      "left": "1. 2",
+      "right": "1.2",
+      "expected": 0
+    },
+    {
+      "left": "12abc",
+      "right": "12",
+      "expected": -1
+    },
+    {
+      "left": "1.0.0",
+      "right": "1.0.0.0",
+      "expected": 0
+    }
+  ]
+}

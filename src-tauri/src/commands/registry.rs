@@ -135,7 +135,20 @@ pub struct RegistryProgress {
 }
 
 #[tauri::command]
-pub fn load_image_manifest(app: AppHandle, source: String, registry_source_id: Option<String>) -> Result<ManifestSummary, String> {
+pub async fn load_image_manifest(
+    app: AppHandle,
+    source: String,
+    registry_source_id: Option<String>,
+) -> Result<ManifestSummary, String> {
+    crate::commands::blocking::run(move || load_image_manifest_blocking(app, source, registry_source_id))
+        .await
+}
+
+pub(crate) fn load_image_manifest_blocking(
+    app: AppHandle,
+    source: String,
+    registry_source_id: Option<String>,
+) -> Result<ManifestSummary, String> {
     let access = source_access(&app, registry_source_id.as_deref())?;
     resolve_with_source(load_and_resolve(&source)?, access.as_ref())
 }
@@ -480,22 +493,7 @@ fn is_valid_digest(value: &str) -> bool {
 }
 
 fn version_lt(current: &str, required: &str) -> bool {
-    let left: Vec<u64> = current
-        .split('.')
-        .map(|part| part.parse::<u64>().unwrap_or(0))
-        .collect();
-    let right: Vec<u64> = required
-        .split('.')
-        .map(|part| part.parse::<u64>().unwrap_or(0))
-        .collect();
-    for index in 0..left.len().max(right.len()) {
-        let a = *left.get(index).unwrap_or(&0);
-        let b = *right.get(index).unwrap_or(&0);
-        if a != b {
-            return a < b;
-        }
-    }
-    false
+    crate::core::version::compare(current, required) == std::cmp::Ordering::Less
 }
 
 fn select_images<'a>(

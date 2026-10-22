@@ -310,12 +310,7 @@ fn local_compose_snapshot(install: &Path) -> Result<TargetSnapshot, String> {
         checked: true,
         ..TargetSnapshot::default()
     };
-    for name in [
-        "docker-compose.lan.yml",
-        "docker-compose.yml",
-        "deploy/docker-compose.lan.yml",
-        "deploy/docker-compose.yml",
-    ] {
+    for name in crate::core::compose::SEARCH_CANDIDATES {
         let path = install.join(name);
         match fs::metadata(&path) {
             Ok(metadata) if metadata.is_file() => {

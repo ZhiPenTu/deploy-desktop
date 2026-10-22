@@ -63,9 +63,9 @@ test('runtimeLogDir 读取应用里设置的日志目录', async () => {
   const configDir = await makeTempDir('deploy-mcp-config-');
   const customDir = await makeTempDir('deploy-mcp-custom-logs-');
   const previousLogDir = process.env.DEPLOY_DESKTOP_LOG_DIR;
-  const previousConfigDir = process.env.DEPLOY_DESKTOP_CONFIG_DIR;
+  const previousConfigDir = process.env.DEPLOY_DESKTOP_APP_CONFIG_DIR;
   delete process.env.DEPLOY_DESKTOP_LOG_DIR;
-  process.env.DEPLOY_DESKTOP_CONFIG_DIR = configDir;
+  process.env.DEPLOY_DESKTOP_APP_CONFIG_DIR = configDir;
   try {
     await fs.writeFile(
       path.join(configDir, 'log-settings.json'),
@@ -74,8 +74,8 @@ test('runtimeLogDir 读取应用里设置的日志目录', async () => {
     assert.equal(await runtimeLogDir(), customDir);
   } finally {
     if (previousLogDir !== undefined) process.env.DEPLOY_DESKTOP_LOG_DIR = previousLogDir;
-    if (previousConfigDir === undefined) delete process.env.DEPLOY_DESKTOP_CONFIG_DIR;
-    else process.env.DEPLOY_DESKTOP_CONFIG_DIR = previousConfigDir;
+    if (previousConfigDir === undefined) delete process.env.DEPLOY_DESKTOP_APP_CONFIG_DIR;
+    else process.env.DEPLOY_DESKTOP_APP_CONFIG_DIR = previousConfigDir;
     await fs.rm(configDir, { recursive: true, force: true });
     await fs.rm(customDir, { recursive: true, force: true });
   }
@@ -84,9 +84,9 @@ test('runtimeLogDir 读取应用里设置的日志目录', async () => {
 test('runtimeLogDir 在设置无效时回落到默认目录', async () => {
   const configDir = await makeTempDir('deploy-mcp-config-');
   const previousLogDir = process.env.DEPLOY_DESKTOP_LOG_DIR;
-  const previousConfigDir = process.env.DEPLOY_DESKTOP_CONFIG_DIR;
+  const previousConfigDir = process.env.DEPLOY_DESKTOP_APP_CONFIG_DIR;
   delete process.env.DEPLOY_DESKTOP_LOG_DIR;
-  process.env.DEPLOY_DESKTOP_CONFIG_DIR = configDir;
+  process.env.DEPLOY_DESKTOP_APP_CONFIG_DIR = configDir;
   try {
     await fs.writeFile(path.join(configDir, 'log-settings.json'), JSON.stringify({ dir: 'relative/dir' }));
     const dir = await runtimeLogDir();
@@ -94,8 +94,8 @@ test('runtimeLogDir 在设置无效时回落到默认目录', async () => {
     assert.notEqual(dir, 'relative/dir');
   } finally {
     if (previousLogDir !== undefined) process.env.DEPLOY_DESKTOP_LOG_DIR = previousLogDir;
-    if (previousConfigDir === undefined) delete process.env.DEPLOY_DESKTOP_CONFIG_DIR;
-    else process.env.DEPLOY_DESKTOP_CONFIG_DIR = previousConfigDir;
+    if (previousConfigDir === undefined) delete process.env.DEPLOY_DESKTOP_APP_CONFIG_DIR;
+    else process.env.DEPLOY_DESKTOP_APP_CONFIG_DIR = previousConfigDir;
     await fs.rm(configDir, { recursive: true, force: true });
   }
 });

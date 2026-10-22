@@ -1,8 +1,10 @@
 import fs from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import { DeployError } from './errors.mjs';
+import { appConfigDir, defaultLogDir } from './paths.mjs';
 import { expandHome } from './util.mjs';
+
+export { appConfigDir, defaultLogDir };
 
 export const LOG_FILE = 'runtime.log';
 export const BACKUP_FILE = 'runtime.1.log';
@@ -11,34 +13,6 @@ export const MAX_TOTAL_BYTES = 10 * 1024 * 1024;
 const LEVEL_PATTERN = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}(?:\.\d+)?) (INFO|WARN|ERROR|DEBUG|TRACE) (.*)$/;
 
 export const SETTINGS_FILE = 'log-settings.json';
-
-export function appConfigDir() {
-  const override = process.env.DEPLOY_DESKTOP_CONFIG_DIR;
-  if (override) return expandHome(override);
-  const home = os.homedir();
-  if (process.platform === 'darwin') {
-    return path.join(home, 'Library', 'Application Support', 'com.deploydesktop.app');
-  }
-  if (process.platform === 'win32') {
-    const roaming = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
-    return path.join(roaming, 'com.deploydesktop.app');
-  }
-  const configHome = process.env.XDG_CONFIG_HOME || path.join(home, '.config');
-  return path.join(configHome, 'com.deploydesktop.app');
-}
-
-export function defaultLogDir() {
-  const home = os.homedir();
-  if (process.platform === 'darwin') {
-    return path.join(home, 'Library', 'Logs', 'com.deploydesktop.app');
-  }
-  if (process.platform === 'win32') {
-    const localAppData = process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
-    return path.join(localAppData, 'com.deploydesktop.app', 'logs');
-  }
-  const dataHome = process.env.XDG_DATA_HOME || path.join(home, '.local', 'share');
-  return path.join(dataHome, 'com.deploydesktop.app', 'logs');
-}
 
 export async function configuredLogDir() {
   try {

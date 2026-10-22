@@ -66,14 +66,16 @@ env = { DEPLOY_DESKTOP_ROOT = "/absolute/path/to/deploy-desktop" }
 | 变量 | 说明 | 默认值 |
 | --- | --- | --- |
 | `DEPLOY_DESKTOP_ROOT` | 仓库根目录，用于读取 `package.json` 与示例清单 | `mcp-server/..` |
-| `DEPLOY_DESKTOP_APP_CONFIG_DIR` | 桌面端应用配置目录，用于读取 `projects.json` 与 `connections.json` | 按平台推导 |
-| `DEPLOY_DESKTOP_CONFIG_DIR` | MCP 配置目录 | `~/.deploy-desktop` |
+| `DEPLOY_DESKTOP_APP_CONFIG_DIR` | 桌面端应用配置目录，用于读写 `projects.json`、`connections.json`、制品源、令牌、版本缓存与 `log-settings.json` | 按平台推导 |
+| `DEPLOY_DESKTOP_CONFIG_DIR` | MCP 配置目录，只放 MCP 自身的 `mcp.json` | `~/.deploy-desktop` |
 | `DEPLOY_DESKTOP_CONFIG_FILE` | MCP 配置文件路径 | `<CONFIG_DIR>/mcp.json` |
 | `DEPLOY_DESKTOP_SSH_KEY` | 默认 SSH 私钥路径 | 自动查找 `~/.ssh/id_ed25519` 等 |
 | `DEPLOY_REGISTRY_PASSWORD` | 仓库密码兜底来源 | 空 |
 | `DEPLOY_MCP_DEBUG` | 设为 `1` 时向 stderr 输出启动信息 | 空 |
 
 桌面端应用配置目录：macOS `~/Library/Application Support/com.deploydesktop.app`，Windows `%APPDATA%\com.deploydesktop.app`，Linux `~/.config/com.deploydesktop.app`；也可用 `DEPLOY_DESKTOP_APP_CONFIG_DIR` 覆盖。
+
+桌面端与本服务会改写同一批配置文件。两侧都用相邻的 `<文件>.lock` 串行化读改写：抢到锁的一方才读取、修改、写入，另一端短暂等待后重试；异常退出遗留超过 30 秒的锁会被回收。
 
 服务按 `projects.json` 的 `activeProjectId` 取当前项目，再从项目的 `lastBundleDir` 读取交付包描述符。拓扑（服务、数据库、产物映射、镜像）全部来自该描述符，不再读取 `profile.json`。没有当前项目或没有缓存交付包时，相关工具返回明确错误，提示先在桌面端创建项目并绑定交付包。
 

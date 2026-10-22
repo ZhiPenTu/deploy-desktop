@@ -197,7 +197,7 @@
               <template #default="{ row }">{{ formatSize(row.sizeBytes) }}</template>
             </el-table-column>
             <el-table-column label="修改时间" width="180">
-              <template #default="{ row }">{{ formatTime(row.modifiedMs) }}</template>
+              <template #default="{ row }">{{ formatTimestamp(row.modifiedMs) }}</template>
             </el-table-column>
           </el-table>
 
@@ -311,6 +311,7 @@ import {
   scanOfflinePackages
 } from '../../../api/tauri.js';
 import { errorText } from '../../../shared/errors.js';
+import { formatSize, formatTimestamp } from '../../../shared/format.js';
 
 const props = defineProps({
   connection: {
@@ -421,32 +422,6 @@ const progressMessage = computed(() => {
   const last = progress.value[progress.value.length - 1];
   return `${last.current} / ${last.total} · ${last.reference}`;
 });
-
-const formatSize = (bytes) => {
-  const value = Number(bytes) || 0;
-  if (value >= 1024 * 1024 * 1024) {
-    return `${(value / 1024 / 1024 / 1024).toFixed(2)} GB`;
-  }
-  if (value >= 1024 * 1024) {
-    return `${(value / 1024 / 1024).toFixed(1)} MB`;
-  }
-  if (value >= 1024) {
-    return `${(value / 1024).toFixed(0)} KB`;
-  }
-  return `${value} B`;
-};
-
-const formatTime = (ms) => {
-  if (!ms) {
-    return '-';
-  }
-  const date = new Date(Number(ms));
-  if (Number.isNaN(date.getTime())) {
-    return '-';
-  }
-  const pad = (value) => String(value).padStart(2, '0');
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
-};
 
 const shortId = (id) => {
   const value = String(id || '').replace(/^sha256:/, '');

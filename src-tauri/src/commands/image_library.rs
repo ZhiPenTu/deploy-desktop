@@ -112,9 +112,12 @@ pub fn save_image_library_settings(
         offline_dir: dir.display().to_string(),
     };
     let path = settings_path(&app)?;
-    let content =
-        serde_json::to_string_pretty(&settings).map_err(|e| format!("保存离线包目录失败：{e}"))?;
-    fs::write(&path, content).map_err(|e| format!("保存离线包目录失败：{e}"))?;
+    crate::core::json_store::save(
+        &path,
+        &settings,
+        "离线包目录",
+        crate::core::atomic_file::FilePermission::Default,
+    )?;
 
     Ok(ImageLibrarySettings {
         offline_dir: dir.display().to_string(),
@@ -485,12 +488,23 @@ pub async fn export_local_docker_images(
 }
 
 #[tauri::command]
-pub fn scan_offline_packages(app: AppHandle) -> Result<OfflinePackageScan, String> {
+pub async fn scan_offline_packages(app: AppHandle) -> Result<OfflinePackageScan, String> {
+    crate::commands::blocking::run(move || scan_offline_packages_blocking(app)).await
+}
+
+pub(crate) fn scan_offline_packages_blocking(app: AppHandle) -> Result<OfflinePackageScan, String> {
     scan_offline_dir(&effective_offline_dir(&app))
 }
 
 #[tauri::command]
-pub fn remove_offline_packages(
+pub async fn remove_offline_packages(
+    app: AppHandle,
+    files: Vec<String>,
+) -> Result<Vec<OperationResult>, String> {
+    crate::commands::blocking::run(move || remove_offline_packages_blocking(app, files)).await
+}
+
+pub(crate) fn remove_offline_packages_blocking(
     app: AppHandle,
     files: Vec<String>,
 ) -> Result<Vec<OperationResult>, String> {
@@ -570,22 +584,20 @@ fn resolve_default_offline_dir(base: &Path) -> PathBuf {
 }
 
 fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app
-        .path()
-        .app_config_dir()
-        .map_err(|e| format!("读取应用配置目录失败：{e}"))?;
-    fs::create_dir_all(&dir).map_err(|e| format!("创建应用配置目录失败：{e}"))?;
-    Ok(dir.join(SETTINGS_FILE))
+    Ok(crate::core::config::app_config_dir(app)?.join(SETTINGS_FILE))
 }
 
 fn read_settings(app: &AppHandle) -> ImageLibrarySettingsFile {
     let Ok(path) = settings_path(app) else {
         return ImageLibrarySettingsFile::default();
     };
-    let Ok(content) = fs::read_to_string(path) else {
-        return ImageLibrarySettingsFile::default();
-    };
-    serde_json::from_str(&content).unwrap_or_default()
+    match crate::core::json_store::load::<ImageLibrarySettingsFile>(&path, "离线包目录设置") {
+        Ok(settings) => settings.unwrap_or_default(),
+        Err(error) => {
+            log::warn!("{error}");
+            ImageLibrarySettingsFile::default()
+        }
+    }
 }
 
 pub(super) fn effective_offline_dir(app: &AppHandle) -> PathBuf {
@@ -1150,18 +1162,14 @@ fn remove_manifest_entries(dir: &Path, names: &HashSet<String>) {
 }
 
 fn write_manifest(dir: &Path, root: &Value) -> Result<(), String> {
-    let path = dir.join(MANIFEST_FILE);
-    let temp = dir.join(".images.json.tmp");
     let content =
         serde_json::to_string_pretty(root).map_err(|e| format!("生成镜像清单失败：{e}"))?;
-    fs::write(&temp, content).map_err(|e| format!("写入镜像清单失败：{e}"))?;
-    match fs::rename(&temp, &path) {
-        Ok(()) => Ok(()),
-        Err(_) => {
-            let _ = fs::remove_file(&path);
-            fs::rename(&temp, &path).map_err(|e| format!("更新镜像清单失败：{e}"))
-        }
-    }
+    crate::core::atomic_file::write_text_atomic(
+        &dir.join(MANIFEST_FILE),
+        &content,
+        crate::core::atomic_file::FilePermission::Default,
+    )
+    .map_err(|e| format!("保存镜像清单失败：{e}"))
 }
 
 fn scan_offline_dir(dir: &Path) -> Result<OfflinePackageScan, String> {

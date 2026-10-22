@@ -1,11 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
 use super::image_library::{login_docker, TempDockerConfig};
 
@@ -70,12 +68,7 @@ impl RegistrySecret {
 }
 
 fn config_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app
-        .path()
-        .app_config_dir()
-        .map_err(|_| "无法读取镜像源配置目录".to_string())?;
-    fs::create_dir_all(&dir).map_err(|_| "无法创建镜像源配置目录，请检查目录权限".to_string())?;
-    Ok(dir)
+    crate::core::config::app_config_dir(app)
 }
 
 fn read_sources(dir: &Path) -> Result<Vec<RegistrySource>, String> {
@@ -108,33 +101,16 @@ fn read_json<T: serde::de::DeserializeOwned + Default>(
     path: &Path,
     label: &str,
 ) -> Result<T, String> {
-    match fs::read_to_string(path) {
-        Ok(content) => {
-            serde_json::from_str(&content).map_err(|_| format!("{label}已损坏，请恢复本机配置备份"))
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
-        Err(_) => Err(format!("无法读取{label}，请检查目录权限")),
-    }
+    Ok(crate::core::json_store::load::<T>(path, label)?.unwrap_or_default())
 }
 
 fn write_private_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
-    let content = serde_json::to_vec_pretty(value).map_err(|_| "无法保存镜像源配置".to_string())?;
-    let temporary = path.with_extension("json.tmp");
-    let mut options = fs::OpenOptions::new();
-    options.create(true).truncate(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(&temporary)
-        .map_err(|_| "无法保存镜像源配置，请检查目录权限".to_string())?;
-    file.write_all(&content)
-        .and_then(|_| file.sync_all())
-        .map_err(|_| "写入镜像源配置失败，请检查磁盘空间".to_string())?;
-    drop(file);
-    fs::rename(&temporary, path).map_err(|_| "更新镜像源配置失败，请检查目录权限".to_string())
+    crate::core::json_store::save(
+        path,
+        value,
+        "镜像源配置",
+        crate::core::atomic_file::FilePermission::OwnerOnly,
+    )
 }
 
 pub(super) fn normalize_address(raw: &str) -> Result<String, String> {
@@ -420,6 +396,7 @@ pub async fn test_registry_source(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     fn input() -> RegistrySourceInput {
         RegistrySourceInput {

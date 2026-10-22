@@ -1,4 +1,6 @@
 use super::plan::{image_present, image_tags_for_target};
+use crate::core::compose;
+use crate::core::path_guard;
 use serde::Serialize;
 use std::fs::{self};
 use std::path::{Path, PathBuf};
@@ -234,11 +236,7 @@ pub(in crate::commands) fn resolve_bundle_file(root: &Path, file: &str) -> Resul
         return Err("未指定要读取的配置文件".to_string());
     }
     let candidate = Path::new(relative);
-    if candidate.is_absolute()
-        || candidate
-            .components()
-            .any(|part| matches!(part, std::path::Component::ParentDir))
-    {
+    if candidate.is_absolute() || path_guard::has_parent_dir(candidate) {
         return Err(format!("配置文件路径不合法：{relative}"));
     }
     let target = root.join(candidate);
@@ -256,66 +254,24 @@ pub(in crate::commands) fn resolve_bundle_file(root: &Path, file: &str) -> Resul
 pub(in crate::commands) fn compose_service_views(
     content: &str,
 ) -> Result<Vec<ComposeServiceView>, String> {
-    let document: serde_yaml::Value =
-        serde_yaml::from_str(content).map_err(|error| format!("YAML 解析失败：{error}"))?;
-    let Some(services) = document
-        .get("services")
-        .and_then(|value| value.as_mapping())
-    else {
-        return Ok(Vec::new());
+    // 复核只需要服务名与镜像，清单没有 `services` 时按空列表继续，与预览行为一致。
+    let services = match compose::parse_services(content) {
+        Ok(services) => services,
+        Err(compose::Error::Yaml(detail)) => return Err(format!("YAML 解析失败：{detail}")),
+        Err(compose::Error::MissingServices) => return Ok(Vec::new()),
     };
-
-    let mut views = Vec::new();
-    for (key, body) in services {
-        let Some(name) = key.as_str() else {
-            continue;
-        };
-        views.push(ComposeServiceView {
-            name: name.to_string(),
-            image: yaml_text(body.get("image")),
-            container_name: yaml_text(body.get("container_name")),
-            restart: yaml_text(body.get("restart")),
-            ports: yaml_list(body.get("ports")),
-            depends_on: compose_depends_on(body.get("depends_on")),
-            profiles: yaml_list(body.get("profiles")),
-        });
-    }
-    Ok(views)
-}
-
-fn yaml_text(value: Option<&serde_yaml::Value>) -> String {
-    match value {
-        Some(serde_yaml::Value::String(text)) => text.trim().to_string(),
-        Some(serde_yaml::Value::Number(number)) => number.to_string(),
-        Some(serde_yaml::Value::Bool(flag)) => flag.to_string(),
-        _ => String::new(),
-    }
-}
-
-fn yaml_list(value: Option<&serde_yaml::Value>) -> Vec<String> {
-    let Some(serde_yaml::Value::Sequence(items)) = value else {
-        return Vec::new();
-    };
-    items
-        .iter()
-        .map(|item| yaml_text(Some(item)))
-        .filter(|text| !text.is_empty())
-        .collect()
-}
-
-fn compose_depends_on(value: Option<&serde_yaml::Value>) -> Vec<String> {
-    match value {
-        Some(serde_yaml::Value::Mapping(map)) => map
-            .keys()
-            .filter_map(|key| key.as_str().map(|name| name.to_string()))
-            .collect(),
-        Some(serde_yaml::Value::Sequence(items)) => items
-            .iter()
-            .map(|item| yaml_text(Some(item)))
-            .filter(|text| !text.is_empty())
-            .collect(),
-        _ => Vec::new(),
-    }
+    Ok(services
+        .into_iter()
+        .map(|service| ComposeServiceView {
+            name: service.name,
+            image: service.image,
+            container_name: service.container_name,
+            restart: service.restart,
+            ports: service.ports,
+            depends_on: service.depends_on,
+            profiles: service.profiles,
+        })
+        .collect())
 }
 
 pub(in crate::commands) fn normalize_image_ref(reference: &str) -> String {

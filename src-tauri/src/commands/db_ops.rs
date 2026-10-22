@@ -23,7 +23,11 @@ pub struct DbImportResult {
 }
 
 #[tauri::command]
-pub fn check_oceanbase_status() -> Result<OceanBaseHealth, String> {
+pub async fn check_oceanbase_status() -> Result<OceanBaseHealth, String> {
+    crate::commands::blocking::run(check_oceanbase_status_blocking).await
+}
+
+pub(crate) fn check_oceanbase_status_blocking() -> Result<OceanBaseHealth, String> {
     let (profile, database) = super::profile::require_database()?;
     let container = profile.container_name(&database.service_key);
     let client = database.client.as_str();
@@ -100,7 +104,11 @@ pub fn check_oceanbase_status() -> Result<OceanBaseHealth, String> {
 }
 
 #[tauri::command]
-pub fn import_oceanbase_sql(sql_file_path: String) -> Result<DbImportResult, String> {
+pub async fn import_oceanbase_sql(sql_file_path: String) -> Result<DbImportResult, String> {
+    crate::commands::blocking::run(move || import_oceanbase_sql_blocking(sql_file_path)).await
+}
+
+pub(crate) fn import_oceanbase_sql_blocking(sql_file_path: String) -> Result<DbImportResult, String> {
     let (profile, database) = super::profile::require_database()?;
     let container = profile.container_name(&database.service_key);
     let client = database.client.as_str();

@@ -58,7 +58,7 @@
             </div>
             <div class="info-row">
               <span class="k">更新于</span>
-              <span class="v">{{ formatTime(row.updatedAt) }}</span>
+              <span class="v">{{ formatShortTimestamp(row.updatedAt) }}</span>
             </div>
           </div>
 
@@ -114,6 +114,7 @@ import CredentialEditor from '../components/CredentialEditor.vue';
 import { connectionInventory, refreshConnectionInventory } from '../state.js';
 import { deleteSshCredential } from '../../../api/tauri.js';
 import { errorText } from '../../../shared/errors.js';
+import { formatShortTimestamp } from '../../../shared/format.js';
 
 defineEmits(['go-hosts']);
 
@@ -123,16 +124,6 @@ const credentials = computed(() => connectionInventory.credentials);
 
 function hostCount(credentialId) {
   return connectionInventory.hosts.filter((host) => host.credentialId === credentialId).length;
-}
-
-function formatTime(value) {
-  if (!value) return '未记录';
-  return new Intl.DateTimeFormat('zh-CN', {
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit'
-  }).format(new Date(value));
 }
 
 async function load() {

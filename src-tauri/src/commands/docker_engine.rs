@@ -19,7 +19,15 @@ pub struct DockerInstallResult {
 }
 
 #[tauri::command]
-pub fn install_offline_docker_engine(bundle_dir: String) -> Result<DockerInstallResult, String> {
+pub async fn install_offline_docker_engine(
+    bundle_dir: String,
+) -> Result<DockerInstallResult, String> {
+    crate::commands::blocking::run(move || install_offline_docker_engine_blocking(bundle_dir)).await
+}
+
+pub(crate) fn install_offline_docker_engine_blocking(
+    bundle_dir: String,
+) -> Result<DockerInstallResult, String> {
     let mut steps = Vec::new();
     let os = std::env::consts::OS;
 
