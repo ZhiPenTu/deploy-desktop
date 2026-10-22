@@ -161,8 +161,10 @@ export function explainSshFailure(raw, hostConfig) {
     hint = '连接超时：请检查网络连通性与目标机防火墙。';
   } else if (lower.includes('host key verification failed')) {
     hint = '目标主机指纹与 known_hosts 不一致，请先清理旧指纹后重试。';
-  } else if (lower.includes('no such file') || lower.includes('not found')) {
+  } else if (lower.includes('command not found: ssh') || lower.includes('ssh: command not found')) {
     hint = '系统未找到 ssh 命令，请确认 OpenSSH 客户端已安装。';
+  } else if (lower.includes('no such file or directory')) {
+    hint = '目标机上不存在命令需要的文件或目录，请确认部署目录与实际安装目录一致。';
   }
   if (!text && !hint) return 'SSH 连接失败，未返回错误信息。';
   return hint ? `${hint}${text ? `\n原始错误: ${text}` : ''}` : `SSH 命令失败: ${text}`;

@@ -708,8 +708,12 @@ pub(crate) fn explain_ssh_failure(stderr: &str, key: Option<&str>) -> String {
         "连接超时：请检查网络连通性，以及目标机防火墙是否放行 SSH 端口。"
     } else if lower.contains("host key verification failed") {
         "目标主机指纹与本地 known_hosts 记录不一致。请执行 ssh-keygen -R <目标主机> 后重试。"
-    } else if lower.contains("no such file") || lower.contains("command not found") {
+    } else if lower.contains("command not found: ssh") || lower.contains("ssh: command not found") {
         "系统未找到 ssh 命令，请确认 OpenSSH 客户端已安装。"
+    } else if lower.contains("no such file or directory") {
+        "目标机上不存在命令需要的文件或目录。请确认部署目录与实际安装目录一致，或先完成首次部署。"
+    } else if lower.contains("command not found") {
+        "目标机缺少执行部署所需的命令，请先确认目标机已安装 Docker 与 Compose。"
     } else {
         ""
     };
@@ -883,6 +887,109 @@ fn find_deploy_script() -> Option<String> {
         .map(|candidate| candidate.to_string_lossy().to_string())
 }
 
+/// 部署目录不存在时返回的标记，便于把这类错误与其他远程命令失败区分开。
+const DEPLOY_DIR_MISSING: &str = "DEPLOY_DIR_MISSING";
+
+/// 远程错误是否发生在 SSH 连接层：只有这类错误才用连接类提示解释。
+fn is_ssh_layer_failure(lower: &str) -> bool {
+    let auth_failure = lower.contains("permission denied")
+        && (lower.contains("publickey")
+            || lower.contains("password")
+            || lower.contains("keyboard-interactive"));
+    auth_failure
+        || lower.contains("no route to host")
+        || lower.contains("connection refused")
+        || lower.contains("timed out")
+        || lower.contains("host key verification failed")
+        || lower.contains("network is unreachable")
+        || lower.contains("connection closed by")
+        || lower.contains("connection reset by")
+}
+
+/// 目标机上实际运行服务所在的 Compose 目录；同一前缀对应多个目录时不作推断。
+fn detect_remote_compose_dir(
+    host: &str,
+    port: u16,
+    user: &str,
+    key: Option<&str>,
+    container_prefix: &str,
+) -> Option<String> {
+    let prefix = container_prefix.trim();
+    if prefix.is_empty() {
+        return None;
+    }
+    let script = format!(
+        "docker ps --filter name={filter} --format '{{{{.Label \"com.docker.compose.project.working_dir\"}}}}' 2>/dev/null | sed '/^$/d' | sort -u | head -n 2\n",
+        filter = shell_quote(prefix)
+    );
+    let output = run_ssh_script(host, port, user, key, &script).ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut dirs = stdout.lines().map(str::trim).filter(|line| !line.is_empty());
+    let first = dirs.next()?.to_string();
+    if dirs.next().is_some() {
+        return None;
+    }
+    Some(first)
+}
+
+fn missing_deploy_dir_message(
+    host: &str,
+    port: u16,
+    user: &str,
+    key: Option<&str>,
+    deploy_dir: &str,
+) -> String {
+    let prefix = super::profile::deployment_profile().container_prefix;
+    let detected = detect_remote_compose_dir(host, port, user, key, &prefix);
+    let Some(detected) = detected.filter(|dir| dir != deploy_dir) else {
+        return format!(
+            "目标机不存在部署目录 {deploy_dir}，请确认项目中的部署目录是否为实际安装目录。"
+        );
+    };
+    // 部署目录由安装目录与包内清单位置拼接而成，能反推时直接给出应填写的安装目录。
+    let relative = crate::commands::projects::active_bundle()
+        .map(|bundle| bundle.deploy_source_rel())
+        .unwrap_or_default();
+    let install_hint = if relative.is_empty() {
+        detected.clone()
+    } else {
+        detected
+            .strip_suffix(&format!("/{relative}"))
+            .unwrap_or(&detected)
+            .to_string()
+    };
+    format!(
+        "目标机不存在部署目录 {deploy_dir}。检测到运行中的服务位于 {detected}，请在「项目管理」中把部署目录改为 {install_hint} 后重试。"
+    )
+}
+
+fn compose_action_error(
+    host: &str,
+    port: u16,
+    user: &str,
+    key: Option<&str>,
+    deploy_dir: &str,
+    stderr: &str,
+    stdout: &str,
+) -> String {
+    let raw = stderr.trim();
+    if raw.contains(DEPLOY_DIR_MISSING) {
+        return missing_deploy_dir_message(host, port, user, key, deploy_dir);
+    }
+    if is_ssh_layer_failure(&raw.to_lowercase()) {
+        return explain_ssh_failure(raw, key);
+    }
+    let detail = if raw.is_empty() { stdout.trim() } else { raw };
+    if detail.is_empty() {
+        "Compose 操作未返回错误信息，请检查目标机的容器状态后重试。".to_string()
+    } else {
+        format!("Compose 操作未成功：{detail}")
+    }
+}
+
 fn remote_compose_action(
     host: &str,
     port: u16,
@@ -892,6 +999,11 @@ fn remote_compose_action(
     action: &str,
     service: Option<String>,
 ) -> Result<ComposeActionResult, String> {
+    let target_service = service
+        .as_deref()
+        .filter(|value| !value.trim().is_empty() && *value != "all")
+        .unwrap_or("全部")
+        .to_string();
     let service_arg = service
         .filter(|value| !value.trim().is_empty() && value != "all")
         .map(|value| format!(" {}", shell_quote(&value)))
@@ -931,9 +1043,18 @@ fn remote_compose_action(
         .map(|name| shell_quote(name))
         .collect::<Vec<_>>()
         .join(" ");
+    log::info!(
+        target: "compose",
+        "远程 Compose 操作：动作={action} 目标={user}@{host}:{port} 目录={deploy_dir} 服务={target_service}"
+    );
     let script = format!(
         r#"set -e
-cd {deploy}
+DEPLOY={deploy}
+if [ ! -d "$DEPLOY" ]; then
+  echo "{missing}" >&2
+  exit 21
+fi
+cd "$DEPLOY"
 COMPOSE_FILE=""
 for candidate in {list}; do
   if [ -f "$candidate" ]; then
@@ -959,6 +1080,7 @@ else
 fi
 "#,
         deploy = shell_quote(deploy_dir),
+        missing = DEPLOY_DIR_MISSING,
         list = list,
         action = action_arg
     );
@@ -967,14 +1089,28 @@ fi
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     let combined = format!("{stdout}\n{stderr}").trim().to_string();
+    let success = output.status.success();
+    let error = if success {
+        None
+    } else {
+        Some(compose_action_error(
+            host, port, user, key, deploy_dir, &stderr, &stdout,
+        ))
+    };
+    match &error {
+        Some(message) => log::error!(
+            target: "compose",
+            "远程 Compose 操作失败：动作={action} 目录={deploy_dir} {message}"
+        ),
+        None => log::info!(
+            target: "compose",
+            "远程 Compose 操作完成：动作={action} 目录={deploy_dir}"
+        ),
+    }
     Ok(ComposeActionResult {
-        success: output.status.success(),
+        success,
         output: combined,
-        error: if output.status.success() {
-            None
-        } else {
-            Some(explain_ssh_failure(&stderr, key))
-        },
+        error,
     })
 }
 
@@ -1489,4 +1625,52 @@ done
         ),
         error: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_missing_directory_is_not_reported_as_missing_ssh() {
+        let message = explain_ssh_failure(
+            "bash: line 2: cd: /opt/deploy/deploy: No such file or directory",
+            Some("/tmp/key"),
+        );
+        assert!(message.contains("不存在"));
+        assert!(message.contains("原始错误"));
+        assert!(!message.contains("OpenSSH"));
+    }
+
+    #[test]
+    fn missing_ssh_binary_still_mentions_openssh() {
+        let message = explain_ssh_failure("bash: line 1: ssh: command not found", None);
+        assert!(message.contains("OpenSSH"));
+    }
+
+    #[test]
+    fn permission_denied_points_at_key_authorization() {
+        let message = explain_ssh_failure(
+            "root@192.0.2.10: Permission denied (publickey).",
+            Some("/tmp/key"),
+        );
+        assert!(message.contains("认证被拒绝"));
+        assert!(!message.contains("OpenSSH"));
+    }
+
+    #[test]
+    fn only_connection_errors_count_as_ssh_layer_failures() {
+        assert!(is_ssh_layer_failure(
+            "ssh: connect to host 192.0.2.10 port 22: connection refused"
+        ));
+        assert!(is_ssh_layer_failure(
+            "root@192.0.2.10: permission denied (publickey)."
+        ));
+        assert!(!is_ssh_layer_failure(
+            "bash: line 2: cd: /opt/deploy/deploy: no such file or directory"
+        ));
+        assert!(!is_ssh_layer_failure(
+            "docker: permission denied while trying to connect to the docker daemon socket"
+        ));
+    }
 }
