@@ -186,7 +186,6 @@
                 <div class="version-title">
                   <span class="version-number">{{ versionText(row) }}</span>
                   <el-tag v-if="isLatest(row)" size="small" type="primary" effect="plain">最新</el-tag>
-                  <el-tag v-if="isCurrentBundle(row)" size="small" type="success" effect="plain">当前部署</el-tag>
                 </div>
               </div>
             </template>
@@ -218,20 +217,10 @@
           <el-table-column label="构建时间" width="145">
             <template #default="{ row }">{{ formatTime(row.builtAt) }}</template>
           </el-table-column>
-          <el-table-column label="操作" width="240">
+          <el-table-column label="操作" width="200">
             <template #default="{ row }">
               <el-button link @click="showReleaseDetail(row)">详情</el-button>
-              <el-button
-                v-if="row.localDir"
-                link
-                type="primary"
-                :loading="loadingVersionKey === releaseKey(row)"
-                :disabled="isCurrentBundle(row)"
-                @click="useExisting(row)"
-              >
-                {{ isCurrentBundle(row) ? '使用中' : '使用' }}
-              </el-button>
-              <el-button v-else-if="row.downloadUrl" link type="primary" @click="openRelease(row)">下载</el-button>
+              <el-button v-if="!row.localDir && row.downloadUrl" link type="primary" @click="openRelease(row)">下载</el-button>
               <el-button v-if="row.localDir && row.downloadUrl" link @click="openRelease(row)">重新下载</el-button>
               <el-button v-if="row.runUrl" link @click="openRunUrl(row)">运行详情</el-button>
             </template>
