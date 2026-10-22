@@ -13,7 +13,7 @@
         <div><dt>能力分类</dt><dd>{{ mcpCategories.length }}<span>类</span></dd></div>
         <div><dt>只读查询</dt><dd>{{ readOnlyCount }}<span>项</span></dd></div>
       </dl>
-      <p class="config-note">MCP 的主机、镜像仓库与更新源单独保存，使用前请在 MCP 客户端中核对目标与配置。</p>
+      <p class="config-note">主机、镜像仓库与更新源由 MCP 单独保存；项目与制品源使用桌面端配置，使用前请核对目标与配置。</p>
     </section>
 
     <div class="capability-workspace">
@@ -99,12 +99,13 @@
 
 <script setup>
 import { computed, ref, watch } from 'vue';
-import { Box, Connection, Document, Download, Files, Grid, Monitor, Operation, Search, Setting } from '@element-plus/icons-vue';
+import { Box, Connection, Document, Download, Files, FolderOpened, Grid, Monitor, Operation, Search, Setting, Tickets } from '@element-plus/icons-vue';
 import { mcpCategories } from '../catalog.js';
 
 const categoryIcons = {
-  profile: Setting, hosts: Monitor, registries: Box, manifests: Document,
-  images: Files, bundles: Download, operations: Operation, updates: Connection
+  profile: Setting, projects: FolderOpened, hosts: Monitor, registries: Box,
+  manifests: Document, images: Files, bundles: Download, artifacts: Tickets,
+  operations: Operation, updates: Connection
 };
 const allTools = mcpCategories.flatMap((category) => category.tools);
 const readOnlyCount = allTools.filter((tool) => tool.access === 'read').length;

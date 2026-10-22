@@ -121,23 +121,37 @@ env = { DEPLOY_DESKTOP_ROOT = "/absolute/path/to/deploy-desktop" }
 
 ## 工具覆盖
 
-共 38 个工具，按能力分组：
+共 51 个工具，按能力分组：
 
 桌面应用的「高级 / MCP 服务」页面按以下分类展示全部能力，可按名称、用途和操作类型筛选。该页面用于查看能力，服务仍由 MCP 客户端启动与调用，连接状态请在客户端中查看。MCP 的主机、镜像仓库与更新源配置独立保存。
 
 | 分类 | 工具 |
 | --- | --- |
 | 部署配置 | `deploy_profile_get`（当前项目与交付包拓扑，只读） |
+| 项目管理 | `deploy_project_list`、`deploy_project_create`、`deploy_project_update`、`deploy_project_remove`、`deploy_project_activate`、`deploy_project_bind_bundle` |
 | SSH 主机 | `deploy_host_list`、`deploy_host_save`、`deploy_host_remove`、`deploy_ssh_test`、`deploy_ssh_setup_key`、`deploy_env_check` |
 | 镜像仓库 | `deploy_registry_list`、`deploy_registry_save`、`deploy_registry_remove`、`deploy_registry_probe`、`deploy_registry_tags`、`deploy_registry_digest`、`deploy_registry_login`、`deploy_registry_logout` |
 | 镜像清单 | `deploy_manifest_load`、`deploy_manifest_validate`、`deploy_manifest_write` |
 | 镜像操作 | `deploy_image_pull`、`deploy_image_save`、`deploy_image_load`、`deploy_image_list`、`deploy_image_remove` |
 | 离线包 | `deploy_bundle_scan`、`deploy_bundle_upload`、`deploy_bundle_import`、`deploy_bundle_deploy`、`deploy_bundle_remove` |
+| 制品中心 | `deploy_artifact_source_list`、`deploy_artifact_source_save`、`deploy_artifact_source_remove`、`deploy_artifact_releases`、`deploy_artifact_download` |
 | 部署运维 | `deploy_compose`、`deploy_inspect`、`deploy_remote_run`、`deploy_logs`、`deploy_db_check`、`deploy_db_import`、`deploy_docker_install` |
 | 更新 | `deploy_update_remote`、`deploy_update_settings`、`deploy_app_update_check` |
 | 日志 | `deploy_runtime_logs_read`、`deploy_runtime_logs_summary`（本机运行日志，只读） |
 
 大多数工具接受 `target: "local" | "remote"`；远程模式使用 `host`（已保存的主机配置名或 IP/域名）以及可选的 `port`、`user`、`keyPath`。
+
+项目管理与制品源直接读写桌面端的应用配置目录，与桌面界面共享同一份数据：
+
+| 文件或目录 | 内容 |
+| --- | --- |
+| `projects.json` | 项目、当前项目与交付包绑定 |
+| `artifact-sources.json` | 云效流水线源与直接下载源，不含令牌 |
+| `artifact-tokens.json` | 云效令牌，权限 `0600`，接口只返回 `hasToken` |
+| `artifact-releases-cache.json` | 版本缓存，不保存构建物下载地址 |
+| `bundles/<sourceId>/<version>/` | 下载并校验后的交付包 |
+
+`deploy_project_create` / `deploy_project_update` 的 `host` 使用桌面端「连接」中的主机 ID、名称或地址；MCP 自己的 `deploy_host_save` 只保存 `mcp.json` 中的 SSH 连接，不参与项目的主机绑定。
 
 ## 常用流程
 
@@ -150,7 +164,22 @@ deploy_ssh_test       { host: "lan-01" }
 deploy_env_check      { target: "remote", host: "lan-01" }
 ```
 
-### 2. 拉取镜像并导出离线包
+### 2. 项目与制品源
+
+```text
+deploy_project_list      {}
+deploy_artifact_source_save { name: "main-flow", type: "yunxiaoFlow", orgId: "your-org", pipelineId: "123456", artifactName: "deploy-bundle", token: "YOUR_TOKEN" }
+deploy_project_create    { name: "生产环境", host: "lan-01", installDir: "/opt/deploy", source: "main-flow", activate: true }
+deploy_artifact_releases { source: "main-flow", page: 1 }
+deploy_artifact_download { source: "main-flow", version: "1.2.3" }
+deploy_project_bind_bundle { project: "生产环境", bundleDir: "<下载结果中的 dir>", version: "1.2.3" }
+```
+
+直接下载源使用 `type: "url"`，并填写 `version` 与 HTTPS `downloadUrl`。令牌只在本次保存时传入，不会出现在工具返回结果中；更新其他字段时留空 `token` 即可保留原令牌，`clearToken: true` 会清除令牌。
+
+下载会限制为 HTTPS；云效构建物只允许从 `aliyuncs.com` / `aliyun.com` 域名下载。保存前会校验 MD5（源提供时）、交付包版本、`bundle.json` 文件清单与大小，并拒绝越界路径、链接和特殊文件。`deploy_artifact_releases` 的 `cachedOnly: true` 只读取本机版本缓存与已下载交付包。
+
+### 3. 拉取镜像并导出离线包
 
 ```text
 deploy_manifest_validate { source: "./examples/manifest.example.yaml" }
@@ -158,7 +187,7 @@ deploy_image_pull        { target: "local", source: "./examples/manifest.example
 deploy_bundle_scan       { dir: "/data/bundle" }
 ```
 
-### 3. 上传并部署到目标机
+### 4. 上传并部署到目标机
 
 ```text
 deploy_bundle_upload { host: "lan-01", localDir: "/data/bundle", remoteBundleDir: "/opt/deploy/bundle" }
@@ -168,7 +197,7 @@ deploy_inspect       { target: "remote", host: "lan-01" }
 
 `deploy_bundle_deploy` 会依次完成镜像上传（可选）、`docker load`、`docker compose up -d`、可选 SQL 导入，并返回部署状态。首次部署或整机重建推荐使用它。
 
-### 4. 增量更新
+### 5. 增量更新
 
 ```text
 deploy_update_remote { host: "lan-01", bundleDir: "/data/update", components: ["backend", "frontend"], dryRun: true }
@@ -177,7 +206,7 @@ deploy_update_remote { host: "lan-01", bundleDir: "/data/update", components: ["
 
 更新包目录需要包含 `app/` 与 `deploy/` 产物。组件可选 `backend`、`gateway`、`frontend`、`config`。
 
-### 5. 应用更新检查
+### 6. 应用更新检查
 
 ```text
 deploy_app_update_check  {}
@@ -185,7 +214,7 @@ deploy_app_update_check  {}
 
 默认读取 `https://github.com/ZhiPenTu/deploy-desktop/releases/latest/download/latest.json`，无需配置。该工具只比较版本并返回当前平台下载信息，不会下载或替换正在运行的桌面应用。只有需要改用内网镜像等特殊场景时，才使用 `deploy_update_settings` 覆盖默认地址。
 
-### 6. 排查运行日志
+### 7. 排查运行日志
 
 ```text
 deploy_runtime_logs_summary {}
@@ -200,7 +229,8 @@ deploy_runtime_logs_read    { keyword: "版本=13-79adcb33" }
 - 仓库密码不落盘；配置文件权限为 `0600`，目录权限为 `0700`。
 - 镜像清单必须使用 `sha256` digest，拒绝仅 tag 的引用。
 - 远程命令使用 `ssh -o BatchMode=yes`，依赖密钥登录；不会保存 SSH 私钥。
-- 下列操作要求 `confirm=true`：删除主机/仓库/镜像/离线包、一键部署、`compose down`、远程构建部署、数据库导入、离线安装 Docker、实际执行远程更新、保存自定义更新源。
+- 云效令牌保存在应用配置目录的 `artifact-tokens.json`，权限 `0600`；工具返回与版本缓存都不会包含令牌。
+- 下列操作要求 `confirm=true`：删除主机/仓库/镜像/离线包/项目/制品源、一键部署、`compose down`、远程构建部署、数据库导入、离线安装 Docker、实际执行远程更新、保存自定义更新源。
 - `deploy_remote_run` 调用仓库根目录的 `deploy-lan.sh`；本仓库默认不包含该脚本，缺失时会返回明确错误。没有脚本时请使用 `deploy_bundle_deploy` 或 `deploy_update_remote`。
 - `deploy_app_update_check` 不执行安装；应用更新仍由桌面端完成签名校验与替换。
 

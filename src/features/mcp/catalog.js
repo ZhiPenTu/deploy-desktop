@@ -8,6 +8,17 @@ export const mcpCategories = [
     ]
   },
   {
+    id: 'projects', title: '项目管理', description: '管理项目的目标主机、部署目录与交付包绑定',
+    tools: [
+      { id: 'deploy_project_list', title: '查看项目', description: '查看已保存的项目、当前项目以及每个项目的绑定信息。', access: 'read' },
+      { id: 'deploy_project_create', title: '新建项目', description: '创建项目并指定目标主机、部署目录与可选制品源。', access: 'write' },
+      { id: 'deploy_project_update', title: '编辑项目', description: '调整项目的名称、主机、部署目录或制品源。', access: 'write' },
+      { id: 'deploy_project_remove', title: '删除项目', description: '移除项目记录；已下载的交付包与目标机文件保留。', access: 'write', confirmation: '需确认' },
+      { id: 'deploy_project_activate', title: '切换当前项目', description: '把指定项目设为后续部署与运维使用的当前项目。', access: 'write' },
+      { id: 'deploy_project_bind_bundle', title: '绑定交付包', description: '把已下载的交付包绑定到项目，并核对版本与产品。', access: 'write' }
+    ]
+  },
+  {
     id: 'hosts', title: 'SSH 主机', description: '管理连接目标，检查主机与运行环境',
     tools: [
       { id: 'deploy_host_list', title: '查看主机配置', description: '查看 MCP 已保存的 SSH 主机与连接设置。', access: 'read' },
@@ -57,6 +68,16 @@ export const mcpCategories = [
       { id: 'deploy_bundle_import', title: '导入目标机镜像', description: '将目标机已有的离线镜像包导入 Docker。', access: 'write' },
       { id: 'deploy_bundle_deploy', title: '一键离线部署', description: '上传并导入镜像、启动服务，可选择同时导入数据库。', access: 'write', confirmation: '需确认' },
       { id: 'deploy_bundle_remove', title: '删除目标机镜像包', description: '清理目标机上的指定包文件，已导入的 Docker 镜像保留。', access: 'write', confirmation: '需确认' }
+    ]
+  },
+  {
+    id: 'artifacts', title: '制品中心', description: '管理制品源与版本，下载并校验交付包',
+    tools: [
+      { id: 'deploy_artifact_source_list', title: '查看制品源', description: '查看云效流水线与直接下载源，令牌内容不会显示。', access: 'read' },
+      { id: 'deploy_artifact_source_save', title: '保存制品源', description: '新增或更新制品源；令牌只保存到本机受保护配置。', access: 'write' },
+      { id: 'deploy_artifact_source_remove', title: '删除制品源', description: '移除制品源、令牌与版本缓存；已下载交付包保留。', access: 'write', confirmation: '需确认' },
+      { id: 'deploy_artifact_releases', title: '查看制品版本', description: '读取可用版本与运行信息，可只查看本机已缓存版本。', access: 'read' },
+      { id: 'deploy_artifact_download', title: '下载交付包', description: '下载并校验交付包，保存到本机制品缓存。', access: 'write' }
     ]
   },
   {

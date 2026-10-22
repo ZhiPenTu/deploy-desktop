@@ -71,6 +71,7 @@ pub struct ActiveProjectContext {
 }
 
 static STORE: OnceLock<Mutex<ProjectStore>> = OnceLock::new();
+static STORE_STAMP: OnceLock<Mutex<Option<(SystemTime, u64)>>> = OnceLock::new();
 static CONFIG_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 struct BundleCache {
@@ -95,6 +96,7 @@ pub fn init_projects(app: &tauri::AppHandle) {
         .unwrap_or_default()
         .unwrap_or_default();
     let _ = STORE.set(Mutex::new(store));
+    let _ = STORE_STAMP.set(Mutex::new(dir.as_deref().and_then(store_stamp)));
     invalidate_bundle_cache();
 }
 
@@ -116,6 +118,57 @@ fn load_store(dir: &Path) -> Option<ProjectStore> {
     serde_json::from_str(&text).ok()
 }
 
+fn file_stamp(path: &Path) -> Option<(SystemTime, u64)> {
+    let meta = fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
+}
+
+fn store_stamp(dir: &Path) -> Option<(SystemTime, u64)> {
+    file_stamp(&dir.join(PROJECTS_FILE))
+}
+
+fn stamp_slot() -> &'static Mutex<Option<(SystemTime, u64)>> {
+    STORE_STAMP.get_or_init(|| Mutex::new(None))
+}
+
+fn remember_stamp(stamp: Option<(SystemTime, u64)>) {
+    if let Ok(mut guard) = stamp_slot().lock() {
+        *guard = stamp;
+    }
+}
+
+/// 项目配置可能被 MCP 服务或用户手动修改，每次读取前比对文件时间与大小，
+/// 发现变化就重新载入，避免界面用旧快照覆盖外部修改。
+fn reload_if_changed() {
+    let Ok(path) = store_path() else { return };
+    let Some(stamp) = file_stamp(&path) else {
+        return;
+    };
+    let changed = stamp_slot()
+        .lock()
+        .map(|guard| *guard != Some(stamp))
+        .unwrap_or(false);
+    if !changed {
+        return;
+    }
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(_) => {
+            remember_stamp(Some(stamp));
+            return;
+        }
+    };
+    let Ok(loaded) = serde_json::from_str::<ProjectStore>(text.as_str()) else {
+        remember_stamp(Some(stamp));
+        return;
+    };
+    if let Ok(mut current) = store().lock() {
+        *current = loaded;
+    }
+    remember_stamp(Some(stamp));
+    invalidate_bundle_cache();
+}
+
 fn persist(current: &ProjectStore) -> Result<(), String> {
     let path = store_path()?;
     let text = serde_json::to_string_pretty(current)
@@ -123,10 +176,12 @@ fn persist(current: &ProjectStore) -> Result<(), String> {
     let temp = path.with_extension("json.tmp");
     fs::write(&temp, text).map_err(|_| "无法写入项目配置".to_string())?;
     fs::rename(&temp, &path).map_err(|_| "无法保存项目配置".to_string())?;
+    remember_stamp(file_stamp(&path));
     Ok(())
 }
 
 pub fn snapshot() -> ProjectStore {
+    reload_if_changed();
     store()
         .lock()
         .map(|guard| guard.clone())

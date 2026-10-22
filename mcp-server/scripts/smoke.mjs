@@ -80,12 +80,26 @@ async function main() {
   await client.connect(transport);
   try {
     const tools = await client.listTools();
-    assert.equal(tools.tools.length, 38);
+    assert.equal(tools.tools.length, 51);
     console.log(`tools: ${tools.tools.length}`);
 
     const profile = parse(await client.callTool({ name: 'deploy_profile_get', arguments: {} }));
     assert.equal(profile.profile.containerPrefix, 'smoke');
     console.log(`profile: ${profile.profile.containerPrefix} (${profile.profile.containers.length} containers)`);
+
+    const projects = parse(await client.callTool({ name: 'deploy_project_list', arguments: {} }));
+    assert.equal(projects.projects.length, 1);
+    assert.equal(projects.activeProjectId, 'proj-smoke');
+    console.log(`projects: ${projects.projects.length}`);
+
+    const source = parse(await client.callTool({
+      name: 'deploy_artifact_source_save',
+      arguments: { name: 'smoke-source', type: 'url', version: '1.0.0', downloadUrl: 'https://example.com/bundle.tgz' }
+    }));
+    assert.equal(source.source.hasToken, false);
+    const sources = parse(await client.callTool({ name: 'deploy_artifact_source_list', arguments: {} }));
+    assert.equal(sources.sources.length, 1);
+    console.log(`artifact sources: ${sources.sources.length}`);
 
     const registry = parse(await client.callTool({
       name: 'deploy_registry_save',
