@@ -27,9 +27,12 @@ src/
   shared/
     async/                      请求有效期与异步监听释放
     composables/                Vue 生命周期适配
+    errors.js                   面向使用者的错误文案
 ```
 
 页面和功能模块只从 `api/tauri.js` 引入桌面能力。`commands/` 不依赖 Vue 或页面状态；`desktop.js` 是唯一直接引入 `@tauri-apps/*` 的位置。浏览器下保持空配置列表，其余桌面操作明确拒绝执行。
+
+页面展示异常时统一使用 `shared/errors.js` 的 `errorText`，只显示异常消息本身，缺失时给出可操作的中文提示，不要直接拼接异常对象。
 
 `domain/` 中的规则不访问磁盘、网络或桌面运行时。`services/` 负责副作用调用并检查执行结果；组件负责确认弹窗、加载状态和结果展示。新增功能优先放入所属功能目录；只有跨功能复用且不依赖具体业务的逻辑进入 `shared/`。
 
@@ -77,7 +80,9 @@ macOS 使用覆盖式原生标题栏并隐藏重复的窗口标题，保留系�
 ```bash
 npm run check:boundaries
 npm run check:ui-text
+npm run check:commands
 npm run test:api
+npm run test:e2e
 npm run build
 cargo test --manifest-path src-tauri/Cargo.toml
 cargo check --manifest-path src-tauri/Cargo.toml
@@ -85,6 +90,8 @@ npm run test:mcp
 npm --prefix mcp-server run smoke
 ```
 
-`check:boundaries` 检查前端的越界导入、缺失引用、循环依赖及 Vue 模板中未定义的绑定，并作为构建前置检查。前端测试覆盖浏览器禁用、桌面参数映射、执行目标快照、失败结果、路径校验、请求乱序和异步监听释放；MCP 测试验证工具注册、确认边界、错误包装及进度失败隔离。
+`check:boundaries` 检查前端的越界导入、缺失引用、循环依赖及 Vue 模板中未定义的绑定，`check:commands` 核对前端调用的 Tauri 命令均已在 `src-tauri/src/lib.rs` 注册、监听的进度事件均有 Rust 发射点，两者都作为构建前置检查。前端测试覆盖浏览器禁用、桌面参数映射、执行目标快照、失败结果、路径校验、请求乱序和异步监听释放；MCP 测试验证工具注册、确认边界、错误包装及进度失败隔离。
+
+`test:e2e` 使用 Playwright 对生产构建的浏览器渲染做端到端检查：导航与面包屑、空状态、表单校验、桌面能力被禁用时的提示，以及页面文本中是否混入开发说明。它运行在 Chromium 中，不覆盖真实桌面壳、Docker、SSH 与目标环境，这些仍需在桌面应用中验证。
 
 界面回归至少覆盖：取消确认不执行、失败不显示成功、执行中目标不可编辑、执行中不能导航、失败后可重试、旧请求不能覆盖新选择。浏览器测试替身不等同于真实桌面、Docker、SSH 或生产部署验证。

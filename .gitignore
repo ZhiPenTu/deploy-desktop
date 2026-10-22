@@ -22,3 +22,8 @@ Thumbs.db
 release/
 artifacts/
 !src/features/artifacts/
+
+# Playwright
+test-results/
+playwright-report/
+blob-report/

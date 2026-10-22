@@ -20,10 +20,20 @@ npm run tauri dev
 ```bash
 npm run check:ui-text
 npm run check:boundaries
+npm run check:commands
 npm run test:api
 npm run build
+npm run test:e2e
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
+
+首次运行界面测试前安装浏览器：
+
+```bash
+npm run test:e2e:install
+```
+
+`test:e2e` 会用生产构建启动预览服务，在 Chromium 中检查导航、空状态、表单校验、桌面能力禁用提示以及页面中是否混入开发说明。它验证的是浏览器渲染结果，不等于桌面应用、Docker、SSH 或目标环境部署验证。
 
 涉及 Rust 代码时额外执行：
 
@@ -80,6 +90,7 @@ bash scripts/dev-app.sh --release --offline --launch
 功能目录、前端调用层、Rust 部署模块与 MCP 注册边界见 [架构说明](docs/architecture.md)。`npm run build` 会先检查文案和模块依赖边界。
 
 - 界面文案使用简体中文，不添加 emoji、颜文字或装饰性符号。
+- 展示异常统一使用 `src/shared/errors.js` 的 `errorText`，不直接拼接异常对象，避免出现 `Error:` 前缀。
 - 前端只通过 `src/api/tauri.js` 调用 Tauri 命令。
 - 服务、数据库、端口、镜像与产物路径统一由交付包的 `bundle.json` 声明，不在前端或 Rust 中重复硬编码；项目只保存主机、部署目录与制品源。
 - 镜像引用必须使用 `sha256` digest。
