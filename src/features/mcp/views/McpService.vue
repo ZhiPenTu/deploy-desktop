@@ -4,8 +4,8 @@
       <div class="service-intro">
         <span class="icon-tile"><el-icon><Connection /></el-icon></span>
         <div>
-          <h2>让 AI 客户端协助部署与运维</h2>
-          <p>服务由 MCP 客户端启动并调用，连接状态请在客户端中查看。</p>
+          <h2>让 AI 助理协助部署与运维</h2>
+          <p>服务由 AI 助理启动并调用，连接状态请在 AI 助理中查看。</p>
         </div>
       </div>
       <dl class="overview-stats">
@@ -16,84 +16,92 @@
       <p class="config-note">主机、镜像仓库与更新源由 MCP 单独保存；项目与制品源使用桌面端配置，使用前请核对目标与配置。</p>
     </section>
 
-    <div class="capability-workspace">
-      <nav class="card-surface category-nav" aria-label="MCP 能力分类">
-        <h3 class="nav-heading">能力分类</h3>
-        <button
-          v-for="category in categoryOptions"
-          :key="category.id"
-          type="button"
-          class="category-button"
-          :class="{ active: activeCategory === category.id }"
-          :aria-pressed="activeCategory === category.id"
-          @click="activeCategory = category.id"
-        >
-          <el-icon><component :is="category.id === 'all' ? Grid : categoryIcons[category.id]" /></el-icon>
-          <span>{{ category.title }}</span>
-          <span class="category-count">{{ category.count }}</span>
-        </button>
-      </nav>
+    <el-tabs v-model="activeSection" class="mcp-tabs">
+      <el-tab-pane label="配置指南" name="guide">
+        <McpSetupGuide />
+      </el-tab-pane>
 
-      <div class="card-surface capability-panel">
-        <div class="capability-toolbar">
-          <el-input
-            v-model="query"
-            class="capability-search"
-            placeholder="搜索能力名称或用途"
-            aria-label="搜索 MCP 能力"
-            :prefix-icon="Search"
-            clearable
-          />
-          <el-select v-model="accessFilter" class="access-filter" aria-label="筛选操作类型">
-            <el-option label="全部操作" value="all" />
-            <el-option label="只读查询" value="read" />
-            <el-option label="更改操作" value="write" />
-            <el-option label="含确认步骤" value="confirm" />
-          </el-select>
-          <span class="result-count" role="status" aria-live="polite">{{ visibleToolCount }} 项能力</span>
-          <el-button v-if="hasFilters" link type="primary" @click="resetFilters">重置筛选</el-button>
-        </div>
-
-        <div ref="resultsPanel" class="capability-results" role="region" aria-label="MCP 能力列表" tabindex="0">
-          <div v-if="visibleCategories.length" class="capability-groups">
-            <section
-              v-for="category in visibleCategories"
+      <el-tab-pane label="能力目录" name="catalog">
+        <div class="capability-workspace">
+          <nav class="card-surface category-nav" aria-label="MCP 能力分类">
+            <h3 class="nav-heading">能力分类</h3>
+            <button
+              v-for="category in categoryOptions"
               :key="category.id"
-              class="capability-category"
-              :aria-labelledby="`mcp-category-${category.id}`"
+              type="button"
+              class="category-button"
+              :class="{ active: activeCategory === category.id }"
+              :aria-pressed="activeCategory === category.id"
+              @click="activeCategory = category.id"
             >
-              <div class="category-heading">
-                <span class="icon-tile neutral"><el-icon><component :is="categoryIcons[category.id]" /></el-icon></span>
-                <div class="category-copy">
-                  <h3 :id="`mcp-category-${category.id}`">{{ category.title }}</h3>
-                  <p>{{ category.description }}</p>
-                </div>
-                <el-tag type="info" effect="plain" size="small" disable-transitions>{{ category.tools.length }} 项</el-tag>
-              </div>
-              <ul class="capability-list">
-                <li v-for="tool in category.tools" :key="tool.id" class="capability-item">
-                  <div class="tool-copy">
-                    <h4>{{ tool.title }}</h4>
-                    <div class="tool-description">
-                      <p>{{ tool.description }}</p>
-                      <p v-if="tool.requirement" class="requirement-note">{{ tool.requirement }}</p>
+              <el-icon><component :is="category.id === 'all' ? Grid : categoryIcons[category.id]" /></el-icon>
+              <span>{{ category.title }}</span>
+              <span class="category-count">{{ category.count }}</span>
+            </button>
+          </nav>
+
+          <div class="card-surface capability-panel">
+            <div class="capability-toolbar">
+              <el-input
+                v-model="query"
+                class="capability-search"
+                placeholder="搜索能力名称或用途"
+                aria-label="搜索 MCP 能力"
+                :prefix-icon="Search"
+                clearable
+              />
+              <el-select v-model="accessFilter" class="access-filter" aria-label="筛选操作类型">
+                <el-option label="全部操作" value="all" />
+                <el-option label="只读查询" value="read" />
+                <el-option label="更改操作" value="write" />
+                <el-option label="含确认步骤" value="confirm" />
+              </el-select>
+              <span class="result-count" role="status" aria-live="polite">{{ visibleToolCount }} 项能力</span>
+              <el-button v-if="hasFilters" link type="primary" @click="resetFilters">重置筛选</el-button>
+            </div>
+
+            <div ref="resultsPanel" class="capability-results" role="region" aria-label="MCP 能力列表" tabindex="0">
+              <div v-if="visibleCategories.length" class="capability-groups">
+                <section
+                  v-for="category in visibleCategories"
+                  :key="category.id"
+                  class="capability-category"
+                  :aria-labelledby="`mcp-category-${category.id}`"
+                >
+                  <div class="category-heading">
+                    <span class="icon-tile neutral"><el-icon><component :is="categoryIcons[category.id]" /></el-icon></span>
+                    <div class="category-copy">
+                      <h3 :id="`mcp-category-${category.id}`">{{ category.title }}</h3>
+                      <p>{{ category.description }}</p>
                     </div>
+                    <el-tag type="info" effect="plain" size="small" disable-transitions>{{ category.tools.length }} 项</el-tag>
                   </div>
-                  <el-tag :type="tool.confirmation ? 'warning' : 'info'" effect="plain" size="small" disable-transitions>
-                    {{ tool.confirmation || (tool.access === 'read' ? '只读' : '更改操作') }}
-                  </el-tag>
-                </li>
-              </ul>
-            </section>
-          </div>
-          <div v-else class="empty-results">
-            <el-empty description="没有匹配的 MCP 能力，请调整关键词或筛选条件。">
-              <el-button type="primary" plain @click="resetFilters">重置筛选</el-button>
-            </el-empty>
+                  <ul class="capability-list">
+                    <li v-for="tool in category.tools" :key="tool.id" class="capability-item">
+                      <div class="tool-copy">
+                        <h4>{{ tool.title }}</h4>
+                        <div class="tool-description">
+                          <p>{{ tool.description }}</p>
+                          <p v-if="tool.requirement" class="requirement-note">{{ tool.requirement }}</p>
+                        </div>
+                      </div>
+                      <el-tag :type="tool.confirmation ? 'warning' : 'info'" effect="plain" size="small" disable-transitions>
+                        {{ tool.confirmation || (tool.access === 'read' ? '只读' : '更改操作') }}
+                      </el-tag>
+                    </li>
+                  </ul>
+                </section>
+              </div>
+              <div v-else class="empty-results">
+                <el-empty description="没有匹配的 MCP 能力，请调整关键词或筛选条件。">
+                  <el-button type="primary" plain @click="resetFilters">重置筛选</el-button>
+                </el-empty>
+              </div>
+            </div>
           </div>
         </div>
-      </div>
-    </div>
+      </el-tab-pane>
+    </el-tabs>
   </div>
 </template>
 
@@ -101,6 +109,7 @@
 import { computed, ref, watch } from 'vue';
 import { Box, Connection, Document, Download, Files, FolderOpened, Grid, Monitor, Operation, Search, Setting, Tickets } from '@element-plus/icons-vue';
 import { filterMcpCategories, mcpCategories, mcpTools } from '../catalog.js';
+import McpSetupGuide from '../components/McpSetupGuide.vue';
 
 const categoryIcons = {
   profile: Setting, projects: FolderOpened, hosts: Monitor, registries: Box,
@@ -113,6 +122,7 @@ const categoryOptions = [
   ...mcpCategories.map((category) => ({ id: category.id, title: category.title, count: category.tools.length }))
 ];
 const activeCategory = ref('all');
+const activeSection = ref('guide');
 const query = ref('');
 const accessFilter = ref('all');
 const resultsPanel = ref(null);
@@ -212,6 +222,28 @@ function resetFilters() {
   margin: 0;
   padding-top: 12px;
   border-top: 1px solid var(--border-color);
+}
+
+.mcp-tabs {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.mcp-tabs :deep(.el-tabs__header) {
+  flex: none;
+  margin: 0 0 16px;
+}
+
+.mcp-tabs :deep(.el-tabs__content) {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.mcp-tabs :deep(.el-tab-pane) {
+  height: 100%;
 }
 
 .capability-workspace {
@@ -427,6 +459,17 @@ function resetFilters() {
   }
   .mcp-view {
     overflow-y: auto;
+  }
+
+  .mcp-tabs {
+    flex: none;
+    min-height: auto;
+  }
+
+  .mcp-tabs :deep(.el-tabs__content),
+  .mcp-tabs :deep(.el-tab-pane) {
+    height: auto;
+    overflow: visible;
   }
 
   .capability-workspace {

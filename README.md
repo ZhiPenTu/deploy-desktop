@@ -61,6 +61,8 @@ env = { DEPLOY_DESKTOP_ROOT = "/absolute/path/to/deploy-desktop" }
 
 MCP 提供主机、仓库、清单、镜像、离线包和部署运维工具，使用独立的本地配置，仓库密码不写入配置文件。工具列表、确认参数和使用限制见 [MCP 文档](mcp-server/README.md)。其中 `deploy_remote_run` 依赖外部项目的 `deploy-lan.sh`，本仓库不包含该脚本。
 
+桌面应用打开「高级 / MCP 服务」后，可在「配置指南」中按步骤完成接入，并复制 Codex、Claude Desktop、Claude Code 或 Cursor 的配置片段。该方式使用源码工作副本中的 `mcp-server` 目录；发布安装包暂不包含该目录。
+
 ## 开发
 
 前端为 Vue 3 + Vite + Element Plus，桌面端为 Tauri 2 / Rust。
