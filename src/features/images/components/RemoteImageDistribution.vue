@@ -1,7 +1,7 @@
 <template>
   <div class="remote-distribution">
     <el-alert
-      title="把离线包上传到目标机后再导入 Docker"
+      :title="targetLabel ? `把离线包上传到 ${targetLabel} 后再导入 Docker` : '把离线包上传到目标机后再导入 Docker'"
       description="先在本机镜像列表导出离线包，再回到这里上传。导入过程不会修改或删除目标机上的离线包文件。"
       type="info"
       :closable="false"
@@ -9,21 +9,24 @@
       class="remote-alert"
     />
 
+    <RemoteBundlePanel
+      v-model:host-id="selectedHostId"
+      v-model:dir-path="remoteDirPath"
+      :hosts="hosts"
+      :remote="remote"
+      :error="remoteError"
+      :rows="remoteRows"
+      :inspecting="inspecting"
+      :disabled="busy"
+      @inspect="inspectRemote()"
+      @selection-change="handleRemoteSelection"
+    />
+
     <RemoteOfflineSourceCard
       :dir="offlineDir"
       :count-text="offlineCountText"
       :loading="loadingLocal"
       @refresh="loadLocal"
-    />
-
-    <RemoteBundlePanel
-      v-model:dir-path="remoteDirPath"
-      :remote="remote"
-      :error="remoteError"
-      :rows="remoteRows"
-      :inspecting="inspecting"
-      @inspect="inspectRemote()"
-      @selection-change="handleRemoteSelection"
     />
 
     <div class="card-surface remote-card">
@@ -69,7 +72,7 @@
 
 <script setup>
 import { useDesktopProgress } from '../../../shared/composables/useDesktopProgress.js';
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import {
   importRemoteImageBundle,
@@ -81,26 +84,47 @@ import {
 } from '../../../api/tauri.js';
 import { errorText } from '../../../shared/errors.js';
 import { formatSize } from '../../../shared/format.js';
+import { connectionValuesForHost } from '../../connections/state.js';
 import RemoteBundlePanel from './RemoteBundlePanel.vue';
 import RemoteOfflineSourceCard from './RemoteOfflineSourceCard.vue';
 import RemoteProgressCard from './RemoteProgressCard.vue';
 import RemoteResultCard from './RemoteResultCard.vue';
 
 const props = defineProps({
+  hosts: {
+    type: Array,
+    default: () => []
+  },
+  initialHostId: {
+    type: String,
+    default: ''
+  },
   connection: {
     type: Object,
     required: true
   }
 });
 
+const selectedHostId = ref(
+  props.hosts.some((host) => host.id === props.initialHostId) ? props.initialHostId : ''
+);
+const activeConnection = computed(() => ({
+  ...props.connection,
+  ...connectionValuesForHost(selectedHostId.value)
+}));
+const targetLabel = computed(() => {
+  const host = props.hosts.find((item) => item.id === selectedHostId.value);
+  return host ? `${host.name} · ${host.address}` : '';
+});
+const defaultBundleDir = computed(
+  () => `${String(props.connection.deployDir || '/opt/deploy').replace(/\/+$/, '')}/bundle`
+);
+
 const offlineScan = ref(null);
 const loadingLocal = ref(false);
 const remote = ref(null);
 const remoteError = ref('');
-const remoteDirPath = ref(
-  String(props.connection.remoteBundleDir || '').trim() ||
-    `${String(props.connection.deployDir || '/opt/deploy').replace(/\/+$/, '')}/bundle`
-);
+const remoteDirPath = ref(defaultBundleDir.value);
 const selectedRemoteFiles = ref([]);
 const progress = ref([]);
 const resultLog = ref('');
@@ -129,8 +153,9 @@ const busy = computed(() => loadingLocal.value || inspecting.value || uploading.
 const remoteImagesDir = computed(() =>
   `${String(remoteDirPath.value || '').replace(/\/+$/, '')}/images`
 );
+const hasHost = computed(() => Boolean(activeConnection.value.remoteHost));
 const canUpload = computed(
-  () => offlineFiles.value.length > 0 && !busy.value
+  () => hasHost.value && offlineFiles.value.length > 0 && !busy.value
 );
 const canImport = computed(
   () =>
@@ -139,6 +164,19 @@ const canImport = computed(
     !busy.value
 );
 const canDelete = computed(() => selectedRemoteFiles.value.length > 0);
+
+watch(selectedHostId, async (id) => {
+  remote.value = null;
+  remoteError.value = '';
+  selectedRemoteFiles.value = [];
+  resultLog.value = '';
+  resultTitle.value = '';
+  progress.value = [];
+  remoteDirPath.value = defaultBundleDir.value;
+  if (id) {
+    await inspectRemote({ silent: true });
+  }
+});
 
 const remoteRows = computed(() => {
   if (!remote.value) {
@@ -232,12 +270,12 @@ const loadLocal = async () => {
 };
 
 const inspectRemote = async ({ silent = false } = {}) => {
-  const host = String(props.connection.remoteHost || '').trim();
+  const host = String(activeConnection.value.remoteHost || '').trim();
   if (!host) {
     remote.value = null;
     remoteError.value = '';
     if (!silent) {
-      ElMessage.warning('请先在部署向导中填写目标主机');
+      ElMessage.warning('请先选择分发主机');
     }
     return;
   }
@@ -246,9 +284,9 @@ const inspectRemote = async ({ silent = false } = {}) => {
   try {
     remote.value = await inspectRemoteImageBundle(
       host,
-      props.connection.remotePort,
-      props.connection.remoteUser,
-      props.connection.remoteKey || null,
+      activeConnection.value.remotePort,
+      activeConnection.value.remoteUser,
+      activeConnection.value.remoteKey || null,
       remoteDirPath.value
     );
     selectedRemoteFiles.value = [];
@@ -292,10 +330,10 @@ const handleUpload = async (overwrite) => {
   progress.value = [];
   try {
     const messages = await uploadRemoteImageBundle(
-      props.connection.remoteHost,
-      props.connection.remotePort,
-      props.connection.remoteUser,
-      props.connection.remoteKey || null,
+      activeConnection.value.remoteHost,
+      activeConnection.value.remotePort,
+      activeConnection.value.remoteUser,
+      activeConnection.value.remoteKey || null,
       offlineDir.value,
       remoteDirPath.value,
       files,
@@ -320,10 +358,10 @@ const applyImport = async (files) => {
   progress.value = [];
   try {
     const loaded = await importRemoteImageBundle(
-      props.connection.remoteHost,
-      props.connection.remotePort,
-      props.connection.remoteUser,
-      props.connection.remoteKey || null,
+      activeConnection.value.remoteHost,
+      activeConnection.value.remotePort,
+      activeConnection.value.remoteUser,
+      activeConnection.value.remoteKey || null,
       remoteDirPath.value,
       files
     );
@@ -367,10 +405,10 @@ const handleDelete = async () => {
   }
   try {
     resultLog.value = await removeRemoteImageFiles(
-      props.connection.remoteHost,
-      props.connection.remotePort,
-      props.connection.remoteUser,
-      props.connection.remoteKey || null,
+      activeConnection.value.remoteHost,
+      activeConnection.value.remotePort,
+      activeConnection.value.remoteUser,
+      activeConnection.value.remoteKey || null,
       remoteDirPath.value,
       files
     );

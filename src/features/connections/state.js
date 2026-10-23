@@ -62,10 +62,14 @@ function assignHost(connectionState, values) {
   Object.assign(connectionState, values);
 }
 
-function applyHost(hostId) {
+/**
+ * 某台已保存主机对应的 SSH 参数。分发等页面可临时选择主机，
+ * 无需改动当前项目，也不会影响其他页面使用的连接状态。
+ */
+export function connectionValuesForHost(hostId) {
   const host = hostById(hostId);
   if (!host) {
-    assignHost(connection, {
+    return {
       activeHostId: '',
       mode: 'local',
       remoteHost: '',
@@ -74,11 +78,10 @@ function applyHost(hostId) {
       remoteKey: '',
       remoteCredentialId: '',
       remotePassword: ''
-    });
-    return;
+    };
   }
   if (isLocalHost(host)) {
-    assignHost(connection, {
+    return {
       activeHostId: host.id,
       mode: 'local',
       remoteHost: '',
@@ -87,11 +90,10 @@ function applyHost(hostId) {
       remoteKey: '',
       remoteCredentialId: '',
       remotePassword: ''
-    });
-    return;
+    };
   }
   const credential = credentialById(host.credentialId);
-  assignHost(connection, {
+  return {
     activeHostId: host.id,
     mode: 'remote',
     remoteHost: host.address,
@@ -100,7 +102,11 @@ function applyHost(hostId) {
     remoteKey: credential?.privateKeyPath || '',
     remoteCredentialId: host.credentialId,
     remotePassword: ''
-  });
+  };
+}
+
+function applyHost(hostId) {
+  assignHost(connection, connectionValuesForHost(hostId));
 }
 
 /** 按当前项目刷新连接：主机、部署目录与交付包目录。 */

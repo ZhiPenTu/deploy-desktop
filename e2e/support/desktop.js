@@ -91,6 +91,7 @@ export async function useDesktopBackend(
     });
 
     window.isTauri = true;
+    window.__deployTestCalls = [];
     window.__TAURI_INTERNALS__ = {
       transformCallback(callback) {
         const id = nextCallbackId++;
@@ -104,6 +105,7 @@ export async function useDesktopBackend(
         return path;
       },
       async invoke(command, args = {}) {
+        window.__deployTestCalls.push({ command, args });
         switch (command) {
           case 'list_connection_inventory':
             return inventory();

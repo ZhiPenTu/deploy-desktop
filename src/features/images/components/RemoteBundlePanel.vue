@@ -1,13 +1,32 @@
 <template>
   <div class="card-surface remote-card">
     <div class="card-title-bar">
-      <h3>目标机镜像包</h3>
+      <div>
+        <h3>分发目标</h3>
+        <p class="card-subtitle">选择分发主机，检测该主机上的镜像包与 Docker 状态</p>
+      </div>
       <span v-if="remote" class="hint">
         {{ remote.exists ? `${remote.files.length} 个文件 · ${formatSize(remote.total_bytes)}` : '镜像目录未就绪' }}
       </span>
     </div>
 
     <el-form label-width="110px">
+      <el-form-item label="分发主机">
+        <el-select
+          v-model="hostId"
+          class="host-select"
+          placeholder="请选择分发主机"
+          :disabled="disabled"
+        >
+          <el-option
+            v-for="host in hosts"
+            :key="host.id"
+            :value="host.id"
+            :label="`${host.name} · ${host.address}`"
+          />
+        </el-select>
+        <div class="field-hint">上传、导入与删除只作用于所选主机，不影响项目与部署向导使用的目标主机。</div>
+      </el-form-item>
       <el-form-item label="目标机目录">
         <div class="dir-input-row">
           <el-input v-model="dirPath" placeholder="/home/deploy/bundle" />
@@ -94,6 +113,10 @@ import { Box, Refresh } from '@element-plus/icons-vue';
 import { formatSize, formatTimestamp } from '../../../shared/format.js';
 
 const props = defineProps({
+  hosts: {
+    type: Array,
+    default: () => []
+  },
   remote: {
     type: Object,
     default: null
@@ -109,16 +132,22 @@ const props = defineProps({
   inspecting: {
     type: Boolean,
     default: false
+  },
+  disabled: {
+    type: Boolean,
+    default: false
   }
 });
 
 defineEmits(['inspect', 'selection-change']);
 
 const dirPath = defineModel('dirPath', { type: String, default: '' });
+const hostId = defineModel('hostId', { type: String, default: '' });
 
 const isRowSelectable = (row) => row.present && row.known;
 
 const emptyHint = computed(() => {
+  if (!hostId.value) return '请先选择分发主机，再检测目标机镜像包';
   if (!props.remote) return '点击“检测目标机”读取镜像包与 Docker 镜像状态';
   return props.remote.exists ? '目标机镜像目录为空' : '目标机镜像目录未就绪，请先上传离线包';
 });
@@ -165,6 +194,11 @@ const emptyHint = computed(() => {
   display: flex;
   gap: 10px;
   width: 100%;
+}
+
+.host-select {
+  width: 320px;
+  max-width: 100%;
 }
 
 .summary-row {

@@ -6,10 +6,6 @@
         <p class="page-subtitle">管理本机 Docker 镜像，按需导出离线包并分发到目标机</p>
       </div>
       <div class="header-actions">
-        <el-tag v-if="isRemote" type="primary" effect="plain">
-          远程 {{ connection.remoteHost }}
-        </el-tag>
-        <el-tag v-else type="info" effect="plain">本地部署</el-tag>
         <el-button :loading="refreshing" @click="refreshAll">
           <el-icon><Refresh /></el-icon>
           <span>刷新</span>
@@ -57,8 +53,12 @@
         />
       </el-tab-pane>
 
-      <el-tab-pane v-if="isRemote" label="远程分发" name="remote">
-        <RemoteImageDistribution :connection="connection" />
+      <el-tab-pane v-if="remoteHosts.length" label="远程分发" name="remote">
+        <RemoteImageDistribution
+          :hosts="remoteHosts"
+          :initial-host-id="projectHostId"
+          :connection="connection"
+        />
       </el-tab-pane>
     </el-tabs>
 
@@ -122,6 +122,7 @@ import {
 } from '../../../api/tauri.js';
 import { errorText } from '../../../shared/errors.js';
 import { formatImageId } from '../../../shared/format.js';
+import { connectionInventory } from '../../connections/state.js';
 
 const props = defineProps({
   connection: {
@@ -132,7 +133,13 @@ const props = defineProps({
 
 const emit = defineEmits(['go-settings']);
 
-const isRemote = computed(() => props.connection.mode === 'remote');
+const remoteHosts = computed(() =>
+  (connectionInventory.hosts || []).filter((host) => host.kind !== 'local')
+);
+const projectHostId = computed(() => {
+  const id = props.connection.mode === 'remote' ? props.connection.activeHostId : '';
+  return remoteHosts.value.some((host) => host.id === id) ? id : '';
+});
 const activeTab = ref('images');
 const dockerImages = ref([]);
 const offlineScan = ref(null);
