@@ -470,14 +470,14 @@ pub(super) fn readiness_script(services: &[String]) -> String {
         .collect::<Vec<_>>()
         .join(" ");
     let mut script = format!(
-        "echo \"==> 等待 {} 个服务就绪（最长约 180 秒）\"\nWAIT_SERVICES={service_list}\n",
+        "echo \"==> 等待 {} 个服务就绪（最长约 180 秒）\"\nWAIT_SERVICES=({service_list})\n",
         services.len()
     );
     script.push_str(
         r#"unready=""
 for i in $(seq 1 90); do
   unready=""
-  for service in $WAIT_SERVICES; do
+  for service in "${WAIT_SERVICES[@]}"; do
     ids=$(compose ps -a -q "$service" 2>/dev/null || true)
     if [ -z "$ids" ]; then
       echo "服务 $service 未创建，请检查交付包的服务声明与当前部署清单是否一致" >&2
