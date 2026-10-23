@@ -13,7 +13,7 @@ use tauri::Emitter;
 use super::bundle::{ArtifactRoot, Bundle, IMAGE_COMPONENT};
 use super::remote_ssh::find_binary;
 use super::remote_update::RemoteUpdateProgress;
-use crate::core::{backup, compose, path_guard};
+use crate::core::{backup, compose, path_guard, process};
 
 #[derive(Debug, Serialize)]
 pub struct LocalUpdateResult {
@@ -581,10 +581,20 @@ fn build_plan(
 }
 
 fn docker_output(args: &[&str], purpose: &str) -> Result<String, String> {
-    let output = Command::new(find_binary("docker"))
-        .args(args)
-        .output()
-        .map_err(|_| "无法运行 Docker，请确认已安装并启动 Docker".to_string())?;
+    let mut command = Command::new(find_binary("docker"));
+    command.args(args);
+    let output = process::run(
+        command,
+        process::Input::Bytes(vec![]),
+        process::Options {
+            timeout: Duration::from_secs(if args.first() == Some(&"load") {
+                1800
+            } else {
+                600
+            }),
+            ..process::Options::default()
+        },
+    )?;
     if !output.status.success() {
         return Err(format!(
             "{purpose}失败，请检查 Docker 状态、部署配置与目录权限"
@@ -640,9 +650,11 @@ fn compose_command(plan: &UpdatePlan, compose: &Path, action: &[&str]) -> Result
 }
 
 fn compose_output(plan: &UpdatePlan, compose: &Path, action: &[&str]) -> Result<String, String> {
-    let output = compose_command(plan, compose, action)?
-        .output()
-        .map_err(|_| "无法运行 Docker Compose，请确认 Docker 已启动".to_string())?;
+    let output = process::run(
+        compose_command(plan, compose, action)?,
+        process::Input::Bytes(vec![]),
+        process::Options::default(),
+    )?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let detail = stderr

@@ -1,14 +1,12 @@
 use serde::{Deserialize, Serialize};
-use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::UNIX_EPOCH;
 
 use tauri::Emitter;
 
 use super::remote_ssh::{
-    explain_ssh_failure, resolve_existing_key, run_ssh_script, shell_quote, ssh_base_command,
+    explain_ssh_failure, resolve_existing_key, run_ssh_script, shell_quote,
 };
 
 const IMAGE_EXTENSIONS: [&str; 3] = ["tar", "tgz", "tar.gz"];
@@ -698,35 +696,18 @@ fn upload_one_image(
     let size = fs::metadata(local)
         .map(|meta| meta.len())
         .map_err(|e| format!("读取本地文件失败: {e}"))?;
-    let temp = format!("{remote_dir}/{name}.part");
-    let mut child = ssh_base_command(host, port, user, key)
-        .arg(format!("cat > {}", shell_quote(&temp)))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("启动镜像上传失败: {e}"))?;
-
-    let mut file = File::open(local).map_err(|e| format!("打开本地镜像包失败: {e}"))?;
-    let mut buffer = vec![0u8; 1024 * 1024];
-    let mut written = 0u64;
+    let window = window.clone();
+    let name = name.to_string();
+    let remote = format!("{remote_dir}/{name}");
     let mut last_percent = usize::MAX;
-    {
-        let stdin = child
-            .stdin
-            .as_mut()
-            .ok_or_else(|| "无法打开 SSH 标准输入".to_string())?;
-        loop {
-            let read = file
-                .read(&mut buffer)
-                .map_err(|e| format!("读取本地镜像包失败: {e}"))?;
-            if read == 0 {
-                break;
-            }
-            stdin
-                .write_all(&buffer[..read])
-                .map_err(|e| format!("写入远程镜像包失败: {e}"))?;
-            written += read as u64;
+    super::remote_update::upload_file_with_progress(
+        host,
+        port,
+        user,
+        key,
+        local,
+        &remote,
+        Some(Box::new(move |written| {
             let percent = if size > 0 {
                 ((written * 100) / size).min(100) as usize
             } else {
@@ -735,47 +716,18 @@ fn upload_one_image(
             if percent != last_percent {
                 last_percent = percent;
                 emit_progress(
-                    window,
+                    &window,
                     "upload",
                     index,
                     total,
-                    name,
+                    &name,
                     percent,
                     &format!("正在上传 {name}（{percent}%）"),
                     false,
                 );
             }
-        }
-    }
-    drop(child.stdin.take());
-
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("等待镜像上传完成失败: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let _ = run_ssh_script(host, port, user, key, &format!("rm -f {}", shell_quote(&temp)));
-        return Err(format!(
-            "上传镜像包 {name} 失败: {}",
-            explain_ssh_failure(&stderr, key)
-        ));
-    }
-
-    let final_path = format!("{remote_dir}/{name}");
-    let swap = format!(
-        "mv -f {} {}",
-        shell_quote(&temp),
-        shell_quote(&final_path)
-    );
-    let swap_output = run_ssh_script(host, port, user, key, &swap)?;
-    if !swap_output.status.success() {
-        let stderr = String::from_utf8_lossy(&swap_output.stderr).trim().to_string();
-        return Err(format!(
-            "替换远程镜像包 {name} 失败: {}",
-            explain_ssh_failure(&stderr, key)
-        ));
-    }
-    Ok(())
+        })),
+    )
 }
 
 fn import_images_blocking(

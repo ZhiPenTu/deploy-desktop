@@ -588,6 +588,7 @@ dependencies = [
  "chrono",
  "dirs",
  "keyring",
+ "libc",
  "log",
  "md-5",
  "reqwest 0.12.28",

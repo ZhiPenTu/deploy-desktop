@@ -29,7 +29,9 @@ pub use inspect::{
     inspect_remote_deployment,
 };
 
+mod scripts;
 mod transfer;
+pub(crate) use transfer::upload_file_with_progress;
 
 mod update;
 pub use update::{__cmd__update_remote_deployment, update_remote_deployment};

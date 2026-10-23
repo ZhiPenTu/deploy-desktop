@@ -3,8 +3,6 @@
 //! 这里负责判断目标机上 Docker、Compose 目录与部署脚本的实际情况，并把失败原因
 //! 翻译成用户能处理的信息；不猜测部署位置，找不到就明确报告缺少什么。
 
-use std::process::Command;
-
 use super::*;
 
 pub(crate) fn test_ssh_connection_blocking(
@@ -276,8 +274,7 @@ pub(crate) fn run_remote_deploy_action_blocking(
                 });
             };
 
-            let mut cmd = Command::new("bash");
-            cmd.arg(&script);
+            let mut cmd = crate::core::shell::file_command(&find_binary("bash"), &script);
             let lan_root = dir.strip_suffix("/deploy").unwrap_or(&dir);
             cmd.args([
                 "--host",
@@ -300,9 +297,11 @@ pub(crate) fn run_remote_deploy_action_blocking(
                 _ => "--all",
             });
 
-            let output = cmd
-                .output()
-                .map_err(|e| format!("调度 deploy-lan.sh 失败: {}", e))?;
+            let output = crate::core::process::run(cmd, crate::core::process::Input::Bytes(vec![]),
+                crate::core::process::Options {
+                    timeout: std::time::Duration::from_secs(3600),
+                    ..crate::core::process::Options::default()
+                })?;
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
             let combined = format!("{}\n{}", stdout, stderr).trim().to_string();

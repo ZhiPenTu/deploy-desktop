@@ -1,13 +1,12 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { DeployError } from './errors.mjs';
-import { run } from './exec.mjs';
+import { backupScript, applyScript } from './shell.mjs';
 import { inspectRemoteDeployment } from './deploy.mjs';
 import { Bundle, normalizeComponents as normalizeBundleComponents } from './bundle.mjs';
 import { verifyImagesRemote } from './image-lock.mjs';
-import { containerName, serviceKeysForComponent } from './profile.mjs';
 import { runRemote, uploadDir, uploadFile } from './ssh.mjs';
-import { compareVersions, expandHome, formatBytes, nowStamp, shellQuote } from './util.mjs';
+import { compareVersions, expandHome, shellQuote } from './util.mjs';
 
 export const DEFAULT_UPDATE_ENDPOINT = 'https://github.com/ZhiPenTu/deploy-desktop/releases/latest/download/latest.json';
 
@@ -58,16 +57,10 @@ export async function validateBundle(profile, bundleDirInput, components) {
   return { bundle, artifacts: resolved };
 }
 
-function requiredServiceKeys(profile, components) {
-  const keys = [];
-  for (const component of components) {
-    keys.push(...serviceKeysForComponent(profile, component));
-  }
-  return [...new Set(keys)];
-}
-
-function ensureRequiredContainers(profile, components, status) {
-  const required = requiredServiceKeys(profile, components);
+function ensureRequiredContainers(bundle, components, status) {
+  const required = [...new Set(bundle.descriptor.components
+    .filter((component) => components.includes(component.key))
+    .flatMap((component) => component.services))];
   const missing = required.filter((key) => {
     const container = status.containers.find((item) => item.serviceKey === key);
     return !container || container.state === 'not_created';
@@ -86,26 +79,10 @@ async function remoteFreeKb(hostConfig, dir) {
 }
 
 export function buildBackupScript(installDir, artifacts) {
-  const lines = artifacts.map((artifact) => {
-    const target = shellQuote(artifact.target);
-    const relative = shellQuote(path.posix.relative(installDir, artifact.target));
-    return `if [ -e ${target} ]; then
-  REL=${relative}
-  mkdir -p "$BACKUP/$(dirname "$REL")"
-  cp -a ${target} "$BACKUP/$REL"
-fi`;
-  }).join('\n');
-  return `set -e
-INSTALL=${shellQuote(installDir)}
-STAMP=$(date +%Y%m%d-%H%M%S)
-BACKUP="$INSTALL/backup/update-$STAMP"
-mkdir -p "$BACKUP"
-${lines}
-echo "BACKUP_DIR=$BACKUP"
-`;
+  return backupScript(installDir, artifacts.map((artifact) => artifact.target));
 }
 
-async function createRemoteBackup(profile, hostConfig, installDir, deployDir, artifacts) {
+async function createRemoteBackup(hostConfig, installDir, artifacts) {
   const script = buildBackupScript(installDir, artifacts);
   const result = await runRemote(hostConfig, script, { timeoutMs: 30 * 60 * 1000 });
   const line = result.stdout.split('\n').find((item) => item.startsWith('BACKUP_DIR='));
@@ -113,55 +90,19 @@ async function createRemoteBackup(profile, hostConfig, installDir, deployDir, ar
   return line.slice('BACKUP_DIR='.length).trim();
 }
 
-async function applyRemoteUpdate(profile, hostConfig, deployDir, components) {
-  const restartServices = [];
-  for (const component of components) {
-    if (component === 'config' || component === 'image') continue;
-    restartServices.push(...serviceKeysForComponent(profile, component));
-  }
-  const waitServices = components.includes('config')
-    ? profile.containers.map((container) => container.serviceKey)
-    : [...new Set(restartServices)];
-  const composeMain = profile.compose.fileRelative;
-  const composeVariant = profile.compose.variantRelative;
-  let script = `set -euo pipefail
-DEPLOY=${shellQuote(deployDir)}
-cd "$DEPLOY"
-COMPOSE_MAIN=${shellQuote(composeMain)}
-COMPOSE_VARIANT=${shellQuote(composeVariant)}
-if [ -n "$COMPOSE_VARIANT" ] && [ -f "$COMPOSE_VARIANT" ]; then COMPOSE_FILE="$COMPOSE_VARIANT"
-elif [ -f "$COMPOSE_MAIN" ]; then COMPOSE_FILE="$COMPOSE_MAIN"
-else echo "未找到 Compose 清单: $COMPOSE_MAIN" >&2; exit 3; fi
-compose() {
-  if docker compose version >/dev/null 2>&1; then docker compose -f "$COMPOSE_FILE" "$@"; else docker-compose -f "$COMPOSE_FILE" "$@"; fi
-}
-`;
-  if (components.includes('config')) {
-    script += 'echo "==> 应用部署配置"\ncompose up -d\n';
-  }
-  if (restartServices.length > 0) {
-    script += `echo "==> 重启服务: ${restartServices.join(' ')}"\ncompose restart ${restartServices.join(' ')}\n`;
-  }
-  if (waitServices.length > 0) {
-    script += 'echo "==> 等待服务健康检查"\n';
-    for (const service of waitServices) {
-      const container = containerName(profile, service);
-      script += `ready=no
-for i in $(seq 1 45); do
-  health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' ${shellQuote(container)} 2>/dev/null || echo missing)
-  state=$(docker inspect --format '{{.State.Status}}' ${shellQuote(container)} 2>/dev/null || echo missing)
-  if [ "$health" = "healthy" ] || { [ "$health" = "none" ] && [ "$state" = "running" ]; }; then ready=yes; break; fi
-  sleep 2
-done
-if [ "$ready" != "yes" ]; then
-  echo "服务 ${container} 未就绪 (health=$health, state=$state)" >&2
-  docker logs --tail 40 ${shellQuote(container)} 2>&1 || true
-  exit 4
-fi
-`;
-    }
-  }
-  script += 'echo "==> 当前容器状态"\ncompose ps\n';
+async function applyRemoteUpdate(hostConfig, deployDir, components, bundle) {
+  const selected = bundle.descriptor.components.filter((component) => components.includes(component.key));
+  const composeSources = [bundle.descriptor.runtime.compose, bundle.descriptor.runtime.variant].filter(Boolean);
+  const config = components.includes('image') || selected.some((component) => component.artifacts.some((key) =>
+    composeSources.includes(bundle.descriptor.artifacts.find((artifact) => artifact.key === key)?.source)));
+  const restart = [...new Set(selected.flatMap((component) => component.services))];
+  const wait = config ? bundle.descriptor.runtime.services.map((service) => service.key) : restart;
+  const source = bundle.descriptor.runtime.variant || bundle.descriptor.runtime.compose;
+  const artifact = bundle.artifactForSource(source);
+  const compose = artifact?.root === 'deploy' ? artifact.path : path.posix.basename(source);
+  const script = applyScript({ deployDir,
+    compose,
+    config, restart, wait });
   const result = await runRemote(hostConfig, script, { timeoutMs: 30 * 60 * 1000 });
   return `${result.stdout}\n${result.stderr}`.trim();
 }
@@ -179,7 +120,7 @@ export async function updateRemote(profile, hostConfig, options = {}) {
   const artifacts = bundle.resolveArtifacts(bundle.selectComponents(components), installDir, deployDir);
   progress(10, '检查目标机状态');
   const status = await inspectRemoteDeployment(profile, hostConfig, installDir);
-  ensureRequiredContainers(profile, components, status);
+  ensureRequiredContainers(bundle, components, status);
   progress(12, '校验基础镜像');
   const imageCheck = await verifyImagesRemote(hostConfig, bundle);
   if (imageCheck.problems.length > 0) {
@@ -216,26 +157,34 @@ export async function updateRemote(profile, hostConfig, options = {}) {
   let backupDir = null;
   if (options.backup) {
     progress(14, '创建备份');
-    backupDir = await createRemoteBackup(profile, hostConfig, installDir, deployDir, artifacts);
+    backupDir = await createRemoteBackup(hostConfig, installDir, artifacts);
     output += `备份目录: ${backupDir}\n`;
     progress(20, '备份完成');
   }
-  const total = artifacts.length;
-  for (const [index, artifact] of artifacts.entries()) {
-    const percent = 22 + Math.round(((index + 1) / Math.max(total, 1)) * 48);
-    const label = artifact.label || artifact.key;
-    progress(percent - 4, `上传${label}`);
-    if (artifact.kind === 'file') {
-      await uploadFile(hostConfig, artifact.source, artifact.target, { timeoutMs: 60 * 60 * 1000 });
-      output += `已上传: ${artifact.target}\n`;
-    } else {
-      await uploadDir(hostConfig, artifact.source, artifact.target);
-      output += `已替换: ${artifact.target}\n`;
+  try {
+    const total = artifacts.length;
+    for (const [index, artifact] of artifacts.entries()) {
+      const percent = 22 + Math.round(((index + 1) / Math.max(total, 1)) * 48);
+      const label = artifact.label || artifact.key;
+      progress(percent - 4, `上传${label}`);
+      if (artifact.kind === 'file') {
+        await uploadFile(hostConfig, artifact.source, artifact.target, { timeoutMs: 60 * 60 * 1000 });
+        output += `已上传: ${artifact.target}\n`;
+      } else {
+        await uploadDir(hostConfig, artifact.source, artifact.target);
+        output += `已替换: ${artifact.target}\n`;
+      }
+      progress(percent, `${label}已更新`);
     }
-    progress(percent, `${label}已更新`);
+    progress(78, '应用更新');
+    output += await applyRemoteUpdate(hostConfig, deployDir, components, bundle);
+  } catch (error) {
+    throw new DeployError(error.message || '更新未完成，请检查目标状态', {
+      code: error.code || 'UPDATE_FAILED',
+      hint: '请检查已更新组件与备份，确认目标状态后再重试。',
+      details: { ...error.details, backupDir, output }
+    });
   }
-  progress(78, '应用更新');
-  output += await applyRemoteUpdate(profile, hostConfig, deployDir, components);
   progress(94, '服务已重启');
   const finalStatus = await inspectRemoteDeployment(profile, hostConfig, installDir).catch(() => null);
   progress(100, '更新完成');

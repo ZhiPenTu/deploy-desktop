@@ -1,13 +1,12 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
-import { pipeline } from 'node:stream/promises';
 import { loadConfig, validateHost } from './config.mjs';
 import { DeployError } from './errors.mjs';
 import { commandExists, findBinary, requireBinary, run } from './exec.mjs';
 import { activeProject, loadConnections } from './projects.mjs';
 import { expandHome, shellQuote } from './util.mjs';
+import { BASH_STDIN, stdinProgram, bashCommand, transferScript } from './shell.mjs';
 
 const DEFAULT_KEY_CANDIDATES = ['id_ed25519', 'id_rsa', 'id_ecdsa'];
 
@@ -129,15 +128,18 @@ export function buildSshArgs(hostConfig, extra = []) {
 
 export async function runRemote(hostConfig, script, options = {}) {
   const ssh = requireBinary('ssh');
-  const result = await run(ssh, buildSshArgs(hostConfig, ['bash -s']), {
-    input: script,
+  const result = await run(ssh, buildSshArgs(hostConfig, [BASH_STDIN]), {
+    input: stdinProgram(script),
     timeoutMs: options.timeoutMs ?? 10 * 60 * 1000,
     maxOutputBytes: options.maxOutputBytes,
     onStdout: options.onStdout,
     onStderr: options.onStderr
   });
-  if (result.code !== 0 && options.throwOnError !== false) {
-    throw new DeployError(explainSshFailure(result.stderr || result.stdout, hostConfig), {
+  if ((result.code !== 0 || result.timedOut || result.stdoutTruncated || result.stderrTruncated) && options.throwOnError !== false) {
+    throw new DeployError(result.timedOut ? '远程执行超时，请检查目标状态后重试'
+      : result.stdoutTruncated || result.stderrTruncated ? '远程输出超过限制，请检查目标状态与日志'
+      : result.code === 255 ? explainSshFailure(result.stderr || result.stdout, hostConfig)
+      : '目标机命令执行失败，请查看执行详情并检查部署配置', {
       code: result.timedOut ? 'SSH_TIMEOUT' : 'SSH_COMMAND_FAILED',
       details: {
         host: hostConfig.host,
@@ -267,7 +269,7 @@ export async function setupSshKey(hostConfig, password = '') {
   ];
   const deployed = await run(sshpass, args, {
     env: { SSHPASS: password },
-    input: script,
+    input: stdinProgram(script),
     timeoutMs: 60000
   });
   if (deployed.code !== 0) {
@@ -293,129 +295,57 @@ export async function setupSshKey(hostConfig, password = '') {
   };
 }
 
-async function runStreaming(command, args, feed, options = {}) {
-  return new Promise((resolve, reject) => {
-    const started = Date.now();
-    const child = spawn(command, args, {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      windowsHide: true
-    });
-    const stderrParts = [];
-    let stderrBytes = 0;
-    let settled = false;
-    const timer = options.timeoutMs
-      ? setTimeout(() => {
-          try { child.kill('SIGTERM'); } catch { /* ignore */ }
-        }, options.timeoutMs)
-      : null;
-    child.stderr.on('data', (chunk) => {
-      stderrBytes += chunk.length;
-      if (stderrBytes <= 1024 * 1024) stderrParts.push(chunk);
-    });
-    child.on('error', (error) => {
-      if (settled) return;
-      settled = true;
-      if (timer) clearTimeout(timer);
-      reject(new DeployError(`启动命令失败: ${error.message}`, { code: 'SPAWN_FAILED' }));
-    });
-    child.on('close', (code, signal) => {
-      if (settled) return;
-      settled = true;
-      if (timer) clearTimeout(timer);
-      resolve({
-        code: code ?? 1,
-        signal,
-        stderr: Buffer.concat(stderrParts).toString('utf8'),
-        durationMs: Date.now() - started,
-        timedOut: false
+async function uploadStaged(hostConfig, target, kind, input, options) {
+  const timeoutMs = options.timeoutMs ?? 30 * 60 * 1000;
+  const prepared = await runRemote(hostConfig, transferScript('prepare', target), { timeoutMs: 30000 });
+  const stage = prepared.stdout.trim();
+  if (!stage.startsWith(`${target}.deploy-stage.`) || /[\r\n]/.test(stage)) {
+    throw new DeployError('无法确认暂存目录，已停止上传');
+  }
+  try {
+    const result = await run(requireBinary('ssh'), buildSshArgs(hostConfig, [
+      bashCommand(transferScript(`receive-${kind}`, target, stage))
+    ]), { ...input, timeoutMs });
+    if (result.code !== 0 || result.timedOut || result.stdoutTruncated || result.stderrTruncated) {
+      throw new DeployError(result.timedOut ? '上传超时，请检查目标状态后重试' : '上传未完成，原部署未修改', {
+        code: 'UPLOAD_FAILED', details: { exitCode: result.code, stderr: result.stderr }
       });
-    });
-    Promise.resolve()
-      .then(() => feed(child.stdin))
-      .catch((error) => {
-        try { child.kill('SIGKILL'); } catch { /* ignore */ }
-        reject(new DeployError(`上传数据流失败: ${error.message}`));
-      });
-  });
+    }
+    await runRemote(hostConfig, transferScript('commit', target, stage), { timeoutMs });
+    return result;
+  } finally {
+    // Never mask the original error. Cleanup refuses to remove a retained rollback copy.
+    await runRemote(hostConfig, transferScript('cleanup', target, stage), { timeoutMs: 30000 }).catch(() => {});
+  }
 }
 
 export async function uploadFile(hostConfig, localPath, remotePath, options = {}) {
   const stat = await fsp.stat(localPath);
-  const ssh = requireBinary('ssh');
-  const temp = `${remotePath}.tt-new`;
-  const script = `set -e
-rm -f ${shellQuote(temp)}
-cat > ${shellQuote(temp)}
-mv -f ${shellQuote(temp)} ${shellQuote(remotePath)}
-`;
+  if (!stat.isFile()) throw new DeployError('上传来源不是文件，请检查制品内容');
+  const stream = fs.createReadStream(localPath);
   let uploaded = 0;
-  const feed = async (stdin) => {
-    const stream = fs.createReadStream(localPath);
-    stream.on('data', (chunk) => {
-      uploaded += chunk.length;
-      options.onProgress?.(uploaded, stat.size);
-    });
-    await pipeline(stream, stdin);
-  };
-  const result = await runStreaming(ssh, buildSshArgs(hostConfig, [script]), feed, {
-    timeoutMs: options.timeoutMs ?? 30 * 60 * 1000
+  stream.on('data', (chunk) => {
+    uploaded += chunk.length;
+    try { options.onProgress?.(uploaded, stat.size); } catch { /* progress cannot corrupt the transfer */ }
   });
-  if (result.code !== 0) {
-    throw new DeployError(explainSshFailure(result.stderr, hostConfig), {
-      code: 'UPLOAD_FAILED',
-      details: { localPath, remotePath }
-    });
-  }
-  return { remotePath, sizeBytes: stat.size, durationMs: result.durationMs };
+  // Pause until the receiver owns the stream; attaching data listeners otherwise starts reading early.
+  stream.pause();
+  // Prevent an early open error from being unhandled while the staging command runs.
+  let sourceError;
+  stream.on('error', (error) => { sourceError = error; });
+  try {
+    if (sourceError) throw sourceError;
+    const result = await uploadStaged(hostConfig, remotePath, 'file', { input: stream }, options);
+    return { remotePath, sizeBytes: stat.size, durationMs: result.durationMs };
+  } finally { stream.destroy(); }
 }
 
 export async function uploadDir(hostConfig, localDir, remoteDir, options = {}) {
-  const tar = requireBinary('tar');
-  const ssh = requireBinary('ssh');
-  const temp = `${remoteDir}.tt-new`;
-  const script = `set -e
-rm -rf ${shellQuote(temp)}
-mkdir -p ${shellQuote(temp)}
-tar -xzf - -C ${shellQuote(temp)}
-rm -rf ${shellQuote(remoteDir)}
-mv ${shellQuote(temp)} ${shellQuote(remoteDir)}
-`;
-  const tarProcess = spawn(tar, ['-czf', '-', '-C', localDir, '.'], {
-    stdio: ['ignore', 'pipe', 'pipe'],
-    windowsHide: true
-  });
-  const tarErrors = [];
-  tarProcess.stderr.on('data', (chunk) => tarErrors.push(chunk));
-  const sshProcess = spawn(ssh, buildSshArgs(hostConfig, [script]), {
-    stdio: ['pipe', 'pipe', 'pipe'],
-    windowsHide: true
-  });
-  const sshErrors = [];
-  sshProcess.stderr.on('data', (chunk) => sshErrors.push(chunk));
-  const tarDone = new Promise((resolve, reject) => {
-    tarProcess.on('error', reject);
-    tarProcess.on('close', (code) => (code === 0 ? resolve() : reject(new Error(Buffer.concat(tarErrors).toString('utf8') || `tar 退出码 ${code}`))));
-  });
-  const sshDone = new Promise((resolve, reject) => {
-    sshProcess.on('error', reject);
-    sshProcess.on('close', (code) => resolve(code));
-  });
-  try {
-    await pipeline(tarProcess.stdout, sshProcess.stdin);
-    await tarDone;
-    const code = await sshDone;
-    if (code !== 0) {
-      throw new DeployError(explainSshFailure(Buffer.concat(sshErrors).toString('utf8'), hostConfig), {
-        code: 'UPLOAD_FAILED',
-        details: { localDir, remoteDir }
-      });
-    }
-  } catch (error) {
-    try { sshProcess.kill('SIGKILL'); } catch { /* ignore */ }
-    try { tarProcess.kill('SIGKILL'); } catch { /* ignore */ }
-    if (error instanceof DeployError) throw error;
-    throw new DeployError(`上传目录失败: ${error.message}`, { details: { localDir, remoteDir } });
-  }
+  const stat = await fsp.stat(localDir);
+  if (!stat.isDirectory()) throw new DeployError('上传来源不是目录，请检查制品内容');
+  await uploadStaged(hostConfig, remoteDir, 'dir', {
+    inputCommand: { command: requireBinary('tar'), args: ['-czf', '-', '-C', localDir, '.'] }
+  }, options);
   return { remoteDir };
 }
 

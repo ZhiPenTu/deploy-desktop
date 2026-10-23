@@ -103,21 +103,35 @@ pub(crate) fn run_ssh_script(
     key: Option<&str>,
     script: &str,
 ) -> Result<Output, String> {
-    let mut cmd = ssh_base_command(host, port, user, key);
-    cmd.arg("bash -s");
-    cmd.stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    run_ssh_script_with_timeout(
+        host,
+        port,
+        user,
+        key,
+        script,
+        std::time::Duration::from_secs(600),
+    )
+}
 
-    let mut child = cmd.spawn().map_err(|e| format!("启动 ssh 命令失败: {e}"))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(script.as_bytes())
-            .map_err(|e| format!("写入远程脚本失败: {e}"))?;
-    }
-    child
-        .wait_with_output()
-        .map_err(|e| format!("等待远程命令执行失败: {e}"))
+pub(crate) fn run_ssh_script_with_timeout(
+    host: &str,
+    port: u16,
+    user: &str,
+    key: Option<&str>,
+    script: &str,
+    timeout: std::time::Duration,
+) -> Result<Output, String> {
+    use crate::core::{process, shell};
+    let mut cmd = ssh_base_command(host, port, user, key);
+    cmd.arg(shell::BASH_STDIN);
+    process::run(
+        cmd,
+        process::Input::Bytes(shell::stdin_program(script)),
+        process::Options {
+            timeout,
+            ..process::Options::default()
+        },
+    )
 }
 
 pub(crate) fn explain_ssh_failure(stderr: &str, key: Option<&str>) -> String {
@@ -161,9 +175,7 @@ pub(crate) fn explain_ssh_failure(stderr: &str, key: Option<&str>) -> String {
     }
 }
 
-pub(crate) fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
+pub(crate) use crate::core::shell::quote as shell_quote;
 
 pub(crate) fn base64_encode(input: &str) -> Result<String, String> {
     let mut child = Command::new(find_binary("base64"))

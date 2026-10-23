@@ -393,12 +393,12 @@ fn declared_services_must_exist_in_the_effective_compose_file() {
 
 #[test]
 fn readiness_uses_compose_resolved_containers_instead_of_names() {
-    use super::update::readiness_script;
-
-    let script = readiness_script(&["web".to_string(), "api".to_string()]);
-    assert!(script.contains("WAIT_SERVICES=('web' 'api')"), "{script}");
+    let script = super::scripts::apply(
+        "/opt/demo/deploy", "compose.yml", false, &[], &["web".to_string(), "api".to_string()],
+    ).unwrap();
+    assert!(script.contains("'web' 'api'"), "{script}");
     assert!(script.contains("for service in \"${WAIT_SERVICES[@]}\"; do"), "{script}");
-    assert!(script.contains("compose ps -a -q \"$service\""), "{script}");
+    assert!(script.contains("compose ps -a -q -- \"$service\""), "{script}");
     assert!(!script.contains("demo-web"), "{script}");
     assert!(!script.contains("demo-api"), "{script}");
     assert!(script.contains("服务 $service 未创建"), "{script}");

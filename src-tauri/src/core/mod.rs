@@ -10,3 +10,5 @@ pub mod file_lock;
 pub mod json_store;
 pub mod path_guard;
 pub mod version;
+pub mod process;
+pub mod shell;

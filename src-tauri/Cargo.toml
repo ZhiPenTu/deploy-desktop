@@ -33,3 +33,6 @@ keyring = { version = "3", default-features = false, features = ["apple-native"]
 
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3", default-features = false, features = ["windows-native"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

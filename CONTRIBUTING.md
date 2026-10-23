@@ -41,6 +41,8 @@ npm run test:e2e:install
 cargo check --manifest-path src-tauri/Cargo.toml
 ```
 
+部署执行与 Bash 模板的边界、扩展方式和故障测试见 [部署执行与扩展](docs/deployment-execution.md)。
+
 涉及 MCP 时执行：
 
 ```bash

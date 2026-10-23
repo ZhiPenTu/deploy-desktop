@@ -8,6 +8,7 @@ import { DeployError } from './errors.mjs';
 import { commandExists, requireBinary, run } from './exec.mjs';
 import { containerName, loadProfile, resolveContainer, resolveServiceKey } from './profile.mjs';
 import { PROJECT_ROOT } from './config.mjs';
+import { runBashFile } from './shell.mjs';
 import { explainSshFailure, runRemote } from './ssh.mjs';
 import { clamp, expandHome, formatBytes, nowStamp, shellQuote } from './util.mjs';
 
@@ -819,10 +820,10 @@ export async function runRemoteDeploy(profile, hostConfig, options) {
   const deployDir = String(options.deployDir || hostConfig.deployDir || profile.deployDir).replace(/\/+$/, '');
   const deploySuffix = profile.deploySourceRel ? `/${profile.deploySourceRel}` : '/deploy';
   const lanRoot = deployDir.endsWith(deploySuffix) ? deployDir.slice(0, -deploySuffix.length) : deployDir;
-  const args = [script, '--host', hostConfig.host, '--user', hostConfig.user, '--port', String(hostConfig.port), '--dir', lanRoot];
+  const args = ['--host', hostConfig.host, '--user', hostConfig.user, '--port', String(hostConfig.port), '--dir', lanRoot];
   if (hostConfig.keyPath) args.push('--key', hostConfig.keyPath);
   args.push(modes[mode]);
-  const result = await run('bash', args, { timeoutMs: options.timeoutMs ?? 60 * 60 * 1000 });
+  const result = await runBashFile(script, args, { timeoutMs: options.timeoutMs ?? 60 * 60 * 1000 });
   return {
     success: result.code === 0,
     mode,
