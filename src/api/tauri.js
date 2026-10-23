@@ -87,6 +87,8 @@ export {
 } from './commands/monitoring.js';
 
 export {
+  checkDockerInstallation,
+  openDockerInstallation,
   checkAppUpdate,
   installAppUpdate
 } from './commands/settings.js';

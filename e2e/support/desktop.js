@@ -15,6 +15,7 @@ export async function useDesktopBackend(
     offlinePackages = [],
     projects = [],
     activeProjectId = '',
+    dockerInstallation = { os: 'linux', installed: true, version: 'Docker version 27.0.0' },
     localEnv = null,
     remoteEnv = null,
     dialogPath = '',
@@ -38,6 +39,7 @@ export async function useDesktopBackend(
     initialPackages,
     initialProjects,
     initialActiveProjectId,
+    initialDockerInstallation,
     initialLocalEnv,
     initialRemoteEnv,
     initialDialogPath,
@@ -60,6 +62,7 @@ export async function useDesktopBackend(
       packages: structuredClone(initialPackages),
       projects: structuredClone(initialProjects),
       activeProjectId: initialActiveProjectId || initialProjects[0]?.id || '',
+      dockerInstallation: structuredClone(initialDockerInstallation),
       localEnv: structuredClone(initialLocalEnv),
       remoteEnv: structuredClone(initialRemoteEnv),
       dialogPath: initialDialogPath,
@@ -107,6 +110,11 @@ export async function useDesktopBackend(
       async invoke(command, args = {}) {
         window.__deployTestCalls.push({ command, args });
         switch (command) {
+          case 'check_docker_installation':
+            if (!state.dockerInstallation) throw '无法读取 Docker 安装状态，请重新检测。';
+            return structuredClone(state.dockerInstallation);
+          case 'open_docker_installation':
+            return null;
           case 'list_connection_inventory':
             return inventory();
           case 'save_managed_host': {
@@ -255,6 +263,7 @@ export async function useDesktopBackend(
     initialPackages: offlinePackages,
     initialProjects: projects,
     initialActiveProjectId: activeProjectId,
+    initialDockerInstallation: dockerInstallation,
     initialLocalEnv: localEnv,
     initialRemoteEnv: remoteEnv,
     initialDialogPath: dialogPath,

@@ -12,6 +12,7 @@ use commands::{
     db_ops::*,
     docker_engine::*,
     docker_ops::*,
+    docker_setup::*,
     env::*,
     image_library::*,
     image_manager::*,
@@ -42,6 +43,8 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             check_local_env,
+            check_docker_installation,
+            open_docker_installation,
             install_offline_docker_engine,
             load_offline_images,
             get_containers_status,

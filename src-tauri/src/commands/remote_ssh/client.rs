@@ -8,6 +8,11 @@ use std::process::{Command, Output, Stdio};
 use super::*;
 
 pub(crate) fn find_binary(name: &str) -> String {
+    if name == "docker" {
+        return crate::commands::docker_setup::find_docker_binary()
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_else(|| name.to_string());
+    }
     let candidates = [
         format!("/usr/bin/{name}"),
         format!("/bin/{name}"),

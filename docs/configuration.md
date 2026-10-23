@@ -1,5 +1,19 @@
 # 部署配置与主机管理
 
+## 启动时检查 Docker
+
+Windows、Linux 和 macOS 桌面应用在启动后检查本机是否安装 Docker。检查只读取安装位置和命令版本，不依赖 Docker 服务是否启动，也不使用当前项目或远程主机的状态。
+
+未检测到时显示提示，可选择「稍后处理」继续使用应用，或点击「安装 Docker」在默认浏览器打开对应系统的 Docker 官方安装页面：
+
+- [Windows 安装 Docker Desktop](https://docs.docker.com/desktop/setup/install/windows-install/)
+- [macOS 安装 Docker Desktop](https://docs.docker.com/desktop/setup/install/mac-install/)
+- [Linux 安装 Docker Engine](https://docs.docker.com/engine/install/)
+
+按官方说明完成安装后，返回应用会重新检查，也可以点击「重新检测」。打开安装页面不代表安装完成；只有重新检测到 Docker 才会关闭缺失提示。检测异常和浏览器打开失败均保留重试入口，不会作为未安装或安装成功处理。安装操作由用户在官方页面完成，应用不自动下载或执行安装脚本。
+
+检测覆盖系统命令目录、用户 Docker 命令目录、Docker Desktop 的常见安装位置及 `PATH`，避免桌面应用尚未继承新命令路径时误报。浏览器预览不执行启动检查；部署前仍按所选目标检查 Docker 服务与 Compose 是否就绪。
+
 ## 项目
 
 一个项目对应一套部署目标：主机 + 部署目录 + 制品源。生产与测试各建一个项目；项目卡片提供「部署」「监控」「日志」三个入口，监控、日志诊断、环境检查与数据库都跟随所选项目。目标主机在项目的编辑弹窗中调整，主机管理页只维护主机本身。

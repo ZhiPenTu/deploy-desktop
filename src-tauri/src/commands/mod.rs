@@ -8,6 +8,7 @@ pub mod deployment_review;
 pub mod deployment_images;
 pub mod docker_engine;
 pub mod docker_ops;
+pub mod docker_setup;
 pub mod env;
 pub mod image_library;
 pub mod image_manager;

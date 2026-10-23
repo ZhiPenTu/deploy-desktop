@@ -87,6 +87,7 @@
         />
       </main>
     </div>
+    <DockerStartupDialog />
   </div>
 </template>
 
@@ -111,6 +112,7 @@ import Dashboard from './features/monitoring/views/Dashboard.vue';
 import ImageManager from './features/images/views/ImageManager.vue';
 import ArtifactCenter from './features/artifacts/views/ArtifactCenter.vue';
 import Settings from './features/settings/views/Settings.vue';
+import DockerStartupDialog from './features/settings/components/DockerStartupDialog.vue';
 import McpService from './features/mcp/views/McpService.vue';
 import LogViewer from './features/monitoring/views/LogViewer.vue';
 import { defaultPage, pageOf } from './config/pages.js';
