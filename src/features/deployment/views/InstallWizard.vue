@@ -94,6 +94,11 @@
       :bundle-dir="preparedBundle?.dir || ''"
       :is-remote="isRemote"
       :image-media-dir="imageMediaDir"
+      v-model:image-source="imageSource"
+      :image-phase="imagePhase"
+      :image-progress="imageProgress"
+      :image-diagnostics="imageDiagnostics"
+      :image-result="imageResult"
       :importing-images="importingImages"
       :review-tab="reviewTab"
       @recheck="loadReview"
@@ -200,6 +205,11 @@ const {
   checkingReview,
   reviewTab,
   imageMediaDir,
+  imageSource,
+  imagePhase,
+  imageProgress,
+  imageDiagnostics,
+  imageResult,
   importingImages,
   deploymentAction,
   selectedComponents,

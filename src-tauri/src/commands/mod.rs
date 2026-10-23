@@ -5,6 +5,7 @@ pub mod projects;
 pub mod connections;
 pub mod db_ops;
 pub mod deployment_review;
+pub mod deployment_images;
 pub mod docker_engine;
 pub mod docker_ops;
 pub mod env;

@@ -34,6 +34,7 @@ export {
   installOfflineDockerEngine,
   installRemoteDockerEngine,
   loadOfflineImages,
+  exportDeploymentImages,
   inspectBundlePlan,
   inspectBundleConfig,
   inspectDeploymentReview,

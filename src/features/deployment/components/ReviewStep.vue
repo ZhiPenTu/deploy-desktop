@@ -8,6 +8,12 @@
       <el-button :loading="checkingReview" :disabled="busy" @click="emit('recheck')"> 重新比对 </el-button>
     </div>
     <el-alert v-if="reviewError" :title="reviewError" type="error" :closable="false" show-icon />
+    <el-alert v-if="imageResult" :title="imageResult" type="success" :closable="false" show-icon />
+    <el-collapse v-if="imageDiagnostics" class="image-diagnostics">
+      <el-collapse-item title="查看镜像处理详情" name="images">
+        <pre>{{ imageDiagnostics }}</pre>
+      </el-collapse-item>
+    </el-collapse>
     <template v-if="review">
       <div class="status-row">
         <el-tag :type="review.hasDeployment ? 'primary' : 'info'">
@@ -18,7 +24,7 @@
       </div>
       <div class="section-heading compose-review-heading">
         <p class="field-hint">部署清单：{{ review.composeFile }}</p>
-        <el-button :disabled="checkingReview" @click="openConfigDiff()">查看配置对比</el-button>
+        <el-button :disabled="busy" @click="openConfigDiff()">查看配置对比</el-button>
       </div>
       <el-alert
         v-if="review.hasDeployment && review.composeChanged"
@@ -96,29 +102,47 @@
       </ul>
       <div v-if="review.missingImages?.length" class="image-preparation">
         <h4>准备缺失镜像</h4>
-        <p class="field-hint">
-          选择本机的离线介质目录（含 images/），将其中的镜像包导入{{
-            isRemote ? '目标主机' : '本机'
-          }}。导入后会重新比对。
+        <el-radio-group
+          v-if="isRemote"
+          :model-value="imageSource"
+          :disabled="busy"
+          aria-label="镜像来源"
+          @update:model-value="(value) => emit('update:image-source', value)"
+        >
+          <el-radio-button value="docker">本机 Docker</el-radio-button>
+          <el-radio-button value="offline">离线镜像包</el-radio-button>
+        </el-radio-group>
+        <p v-if="isRemote && imageSource === 'docker'" class="field-hint">
+          从本机 Docker 导出 {{ review.missingImages.length }} 个缺失镜像，传输到 {{ targetLabel }} 后解压并导入。请先在本机准备与目标主机架构一致的镜像。
+        </p>
+        <p v-else class="field-hint">
+          选择本机离线镜像包目录{{ isRemote ? '，仅传输缺失镜像对应的镜像包，随后在目标主机解压并导入。' : '（含 images/），将其中的镜像包导入本机。' }}导入后会重新比对。
         </p>
         <div class="input-row wrap">
-          <el-input
-            :model-value="imageMediaDir"
-            :disabled="busy"
-            :placeholder="bundleDir || '本机离线介质目录'"
-            aria-label="镜像介质目录"
-            @update:model-value="(value) => emit('update:image-media-dir', value)"
-          />
-          <el-button :disabled="busy" @click="emit('pick-image-directory')"> 选择目录 </el-button>
+          <template v-if="!isRemote || imageSource === 'offline'">
+            <el-input
+              :model-value="imageMediaDir"
+              :disabled="busy"
+              :placeholder="bundleDir || '本机离线介质目录'"
+              aria-label="镜像介质目录"
+              @update:model-value="(value) => emit('update:image-media-dir', value)"
+            />
+            <el-button :disabled="busy" @click="emit('pick-image-directory')"> 选择目录 </el-button>
+          </template>
           <el-button
             type="primary"
             :loading="importingImages"
             :disabled="busy"
             @click="emit('prepare-images')"
           >
-            导入镜像并比对
+            {{ isRemote ? '传输并导入缺失镜像' : '导入镜像并比对' }}
           </el-button>
         </div>
+      </div>
+      <div v-if="importingImages && imagePhase" class="image-progress" role="status">
+        <p>{{ imagePhase }}</p>
+        <el-progress v-if="imageProgress" :percentage="imageProgress.percent" />
+        <p v-if="imageProgress?.message" class="field-hint">{{ imageProgress.message }}</p>
       </div>
     </template>
     <div class="step-footer">
@@ -148,6 +172,11 @@ const props = defineProps({
   bundleDir: { type: String, default: '' },
   isRemote: { type: Boolean, default: false },
   imageMediaDir: { type: String, default: '' },
+  imageSource: { type: String, default: 'docker' },
+  imagePhase: { type: String, default: '' },
+  imageProgress: { type: Object, default: null },
+  imageDiagnostics: { type: String, default: '' },
+  imageResult: { type: String, default: '' },
   importingImages: { type: Boolean, default: false },
   reviewTab: { type: String, default: 'services' }
 });
@@ -156,6 +185,7 @@ const emit = defineEmits([
   'recheck',
   'update:review-tab',
   'update:image-media-dir',
+  'update:image-source',
   'pick-image-directory',
   'prepare-images',
   'previous',
@@ -263,6 +293,17 @@ h3 {
 }
 .image-preparation .input-row {
   margin-top: 14px;
+}
+.image-preparation .el-radio-group {
+  margin-top: 14px;
+}
+.image-progress {
+  margin-top: 16px;
+  font-size: 13px;
+}
+.image-diagnostics pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 code {
   font-size: 12px;

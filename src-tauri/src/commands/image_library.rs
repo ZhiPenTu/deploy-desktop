@@ -821,7 +821,7 @@ fn parse_docker_size(text: &str) -> u64 {
     (number * multiplier) as u64
 }
 
-fn export_images_blocking(
+pub(super) fn export_images_blocking(
     window: &tauri::Window,
     app: &AppHandle,
     references: Vec<String>,
@@ -881,12 +881,20 @@ fn export_images_blocking(
         let temp = dir.join(format!(".{file_name}.part"));
         let _ = fs::remove_file(&temp);
 
-        let output = Command::new("docker")
+        let mut command = Command::new(find_binary("docker"));
+        command
             .arg("save")
             .arg("--output")
             .arg(&temp)
-            .arg(&reference)
-            .output();
+            .arg(&reference);
+        let output = crate::core::process::run(
+            command,
+            crate::core::process::Input::Bytes(vec![]),
+            crate::core::process::Options {
+                timeout: std::time::Duration::from_secs(1800),
+                ..Default::default()
+            },
+        );
 
         match output {
             Ok(output) if output.status.success() => {
@@ -944,7 +952,7 @@ fn export_images_blocking(
                     path: target.display().to_string(),
                     size_bytes: 0,
                     success: false,
-                    message: docker_command_error(error),
+                    message: error,
                 });
             }
         }

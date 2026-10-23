@@ -12,6 +12,17 @@ export async function loadOfflineImages(bundleDir) {
   return await invokeDesktop("load_offline_images", { bundleDir });
 }
 
+export async function exportDeploymentImages(bundleDir, references, target) {
+  return await invokeDesktop('export_deployment_images', {
+    bundleDir,
+    references,
+    host: target?.host || '',
+    port: target?.port ?? 22,
+    user: target?.user || '',
+    keyPath: target?.keyPath || null
+  });
+}
+
 export async function inspectBundlePlan(bundleDir, target = null) {
   return await invokeRead('inspect_bundle_plan', {
     bundleDir,

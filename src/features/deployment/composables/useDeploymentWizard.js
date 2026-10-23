@@ -2,6 +2,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { ElMessageBox } from 'element-plus';
 import { selectLocalPath as open } from '../../../api/tauri.js';
 import { connectionInventory } from '../../connections/state.js';
+import { useDesktopProgress } from '../../../shared/composables/useDesktopProgress.js';
 import {
   dockerComposeAction,
   remoteDockerComposeAction,
@@ -9,10 +10,8 @@ import {
   inspectBundlePlan,
   inspectDeploymentReview,
   isDesktopApp,
-  scanLocalImageBundle,
-  loadOfflineImages,
-  uploadRemoteImageBundle,
-  importRemoteImageBundle
+  onImageLibraryProgress,
+  onImageManagerProgress
 } from '../../../api/tauri.js';
 import { validInstallDir, createDeploymentContext, contextTarget } from '../domain/context.js';
 import {
@@ -23,6 +22,7 @@ import {
 } from '../domain/components.js';
 import { safeText, failureText } from '../domain/errors.js';
 import { invokeIncremental } from '../services/operations.js';
+import { prepareImagePackages, importImagePackages } from '../services/imagePreparation.js';
 import { useEnvironmentCheck } from './useEnvironmentCheck.js';
 import { useExecutionFeedback } from './useExecutionFeedback.js';
 import { useHostAccess } from './useHostAccess.js';
@@ -69,6 +69,21 @@ export function useDeploymentWizard(config, emit) {
   const bundlePlan = ref(null),
     imageMediaDir = ref(''),
     importingImages = ref(false);
+  const imageSource = ref(isRemote.value ? 'docker' : 'offline');
+  const imagePhase = ref(''),
+    imageProgress = ref(null),
+    imageDiagnostics = ref(''),
+    imageResult = ref('');
+
+  watch(isRemote, (remote) => { imageSource.value = remote ? 'docker' : 'offline'; });
+  const receiveImageProgress = (event) => {
+    if (importingImages.value && event.phase !== 'done') {
+      imageProgress.value = { percent: Math.max(0, Math.min(100, Number(event.percent) || 0)),
+        message: safeText(event.message) };
+    }
+  };
+  useDesktopProgress(onImageLibraryProgress, receiveImageProgress);
+  useDesktopProgress(onImageManagerProgress, receiveImageProgress);
 
   const deploymentAction = ref('first'),
     selectedComponents = ref([]),
@@ -178,6 +193,8 @@ export function useDeploymentWizard(config, emit) {
     review.value = null;
     reviewError.value = '';
     bundlePlan.value = null;
+    imageResult.value = '';
+    imageDiagnostics.value = '';
     clearExecution();
   }
 
@@ -253,6 +270,8 @@ export function useDeploymentWizard(config, emit) {
     review.value = null;
     reviewError.value = '';
     clearExecution();
+    imageResult.value = '';
+    imageDiagnostics.value = '';
     try {
       desktopGuard();
       const [checked, plan] = await Promise.all([
@@ -275,7 +294,7 @@ export function useDeploymentWizard(config, emit) {
       const directory = await open({
         directory: true,
         multiple: false,
-        title: '选择含 images/ 的离线介质目录'
+        title: isRemote.value ? '选择离线镜像包目录' : '选择含 images/ 的离线介质目录'
       });
       if (typeof directory === 'string') imageMediaDir.value = directory;
     } catch (error) {
@@ -284,53 +303,61 @@ export function useDeploymentWizard(config, emit) {
   }
 
   async function prepareImages() {
-    const root = imageMediaDir.value.trim() || preparedBundle.value?.dir;
+    if (busy.value || !preparedBundle.value || !review.value?.missingImages?.length) return;
+    const current = revision;
+    const context = Object.freeze({
+      source: imageSource.value,
+      bundleDir: preparedBundle.value.dir,
+      imageDir: imageMediaDir.value.trim() || preparedBundle.value.dir,
+      installDir: config.installDir,
+      label: targetLabel.value,
+      target: target() ? Object.freeze({ ...target() }) : null,
+      references: Object.freeze([...new Set(review.value.missingImages)]),
+      remoteDir: `${config.installDir.replace(/\/+$/, '')}/bundle-images-${crypto.randomUUID()}`
+    });
     importingImages.value = true;
     reviewError.value = '';
+    imageDiagnostics.value = '';
+    imageResult.value = '';
+    imageProgress.value = null;
+    clearExecution();
+    const setImagePhase = (message) => {
+      if (disposed || current !== revision) throw new Error('部署目标已变化，请重新选择项目并比对');
+      imagePhase.value = message;
+      imageProgress.value = null;
+    };
     try {
       desktopGuard();
-      const scan = await scanLocalImageBundle(root);
-      const files = (scan.files || []).map((file) => file.name);
-      if (!files.length) throw new Error('镜像目录中没有离线包');
       try {
         await ElMessageBox.confirm(
-          `将向 ${targetLabel.value} 导入 ${files.length} 个镜像包。${
-            isRemote.value ? '镜像包会先上传到部署目录。' : ''
-          }此操作会占用磁盘空间。`,
+          `目标：${context.label}。将${context.source === 'docker' ? '从本机 Docker 导出' : '从离线目录读取'} ${context.references.length} 个缺失镜像${
+            context.target ? `，传输到 ${context.remoteDir}/images 后解压并导入 Docker` : '并导入本机 Docker'
+          }。镜像包会保留并占用磁盘空间，运行中的服务不会重启。是否继续？`,
           '确认导入镜像',
-          { type: 'warning', confirmButtonText: '导入', cancelButtonText: '取消' }
+          { type: 'warning', confirmButtonText: context.target ? '传输并导入' : '导入', cancelButtonText: '取消', closeOnClickModal: false }
         );
       } catch {
         return;
       }
-      if (isRemote.value) {
-        const remoteDir = `${config.installDir.replace(/\/+$/, '')}/bundle-images-${Date.now()}`;
-        await uploadRemoteImageBundle(
-          config.remoteHost,
-          config.remotePort,
-          config.remoteUser,
-          config.remoteKey || null,
-          root,
-          remoteDir,
-          files,
-          false
-        );
-        await importRemoteImageBundle(
-          config.remoteHost,
-          config.remotePort,
-          config.remoteUser,
-          config.remoteKey || null,
-          remoteDir,
-          files
-        );
-      } else {
-        await loadOfflineImages(root);
-      }
+      if (disposed || current !== revision) return;
+      const packages = await prepareImagePackages(context, setImagePhase);
+      await importImagePackages(context, packages, setImagePhase);
+      setImagePhase('正在重新核对目标主机镜像');
       await loadReview();
+      if (!review.value) throw new Error('镜像导入后未能确认目标状态，请重新比对');
+      if (review.value.images?.some((image) => image.status !== 'ready') ||
+          context.references.some((reference) => !review.value.images?.some((image) =>
+            image.imageRef === reference && image.status === 'ready'))) {
+        throw new Error('导入后仍有镜像缺失或未确认，请确认镜像包包含清单要求的完整镜像地址与摘要后重新比对');
+      }
+      imageResult.value = '缺失镜像已导入，目标主机镜像核对通过。';
     } catch (error) {
-      reviewError.value = failureText(error, '导入镜像');
+      reviewError.value = failureText(safeText(error?.message || error), '准备镜像');
+      imageDiagnostics.value = safeText(error?.message || error);
     } finally {
       importingImages.value = false;
+      imagePhase.value = '';
+      imageProgress.value = null;
     }
   }
 
@@ -488,5 +515,5 @@ export function useDeploymentWizard(config, emit) {
 
   const { progressStep, progressPercent, progressMessage, elapsedText } = executionFeedback;
 
-  return { steps, activeStep, selectedHost, isRemote, targetLabel, hostReady, testingSsh, settingKey, sshMessage, sshOk, envData, envError, checkingEnv, installingDocker, artifactPicker, candidate, preparedBundle, artifactBusy, review, reviewError, checkingReview, reviewTab, imageMediaDir, importingImages, deploymentAction, selectedComponents, backup, executing, preflighting, preflightPassed, phase, operationError, diagnostics, result, busy, environmentReady, componentOptions, canExecute, artifactChosen, artifactPrepared, testConnection, setupAccess, checkEnvironment, installDocker, nextStep, previousStep, loadReview, pickImageDirectory, prepareImages, runPreflight, executeDeployment, progressStep, progressPercent, progressMessage, elapsedText };
+  return { steps, activeStep, selectedHost, isRemote, targetLabel, hostReady, testingSsh, settingKey, sshMessage, sshOk, envData, envError, checkingEnv, installingDocker, artifactPicker, candidate, preparedBundle, artifactBusy, review, reviewError, checkingReview, reviewTab, imageMediaDir, imageSource, imagePhase, imageProgress, imageDiagnostics, imageResult, importingImages, deploymentAction, selectedComponents, backup, executing, preflighting, preflightPassed, phase, operationError, diagnostics, result, busy, environmentReady, componentOptions, canExecute, artifactChosen, artifactPrepared, testConnection, setupAccess, checkEnvironment, installDocker, nextStep, previousStep, loadReview, pickImageDirectory, prepareImages, runPreflight, executeDeployment, progressStep, progressPercent, progressMessage, elapsedText };
 }

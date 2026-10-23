@@ -330,7 +330,7 @@ fn local_compose_snapshot(install: &Path) -> Result<TargetSnapshot, String> {
     Ok(target)
 }
 
-fn check_local_endpoint() -> Result<(), String> {
+pub(super) fn check_local_endpoint() -> Result<(), String> {
     let context = Command::new(find_binary("docker"))
         .args([
             "context",
@@ -389,7 +389,7 @@ fn valid_image_id(reference: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn valid_image_reference(reference: &str) -> bool {
+pub(super) fn valid_image_reference(reference: &str) -> bool {
     if reference.is_empty()
         || reference.len() > 512
         || !reference.is_ascii()

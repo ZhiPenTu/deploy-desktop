@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { useDesktopBackend } from './support/desktop.js';
+import { remoteHost, sshCredential, useDesktopBackend } from './support/desktop.js';
 
 const localHost = {
   id: 'host-local',
@@ -238,6 +238,147 @@ async function openReviewStep(page) {
   await expect(page.locator('.prepare-panel .el-alert')).toContainText('交付包已准备就绪');
   await page.getByRole('button', { name: '下一步：清单比对' }).click();
 }
+
+async function setupImageTransfer(page, options = {}) {
+  const project = { ...localProject, id: 'remote-image-project', hostId: remoteHost.id };
+  await useDesktopBackend(page, {
+    hosts: [remoteHost], credentials: [sshCredential], projects: [project],
+    activeProjectId: project.id, remoteEnv: localEnv,
+    dialogPath: demoPreparedBundle.dir, preparedBundle: demoPreparedBundle,
+    bundlePlan: demoBundlePlan,
+    deploymentReview: { ...demoDeploymentReview, ready: false, canIncrementalUpdate: false }
+  });
+  await page.addInitScript(({ initialReview, options }) => {
+    const original = window.__TAURI_INTERNALS__.invoke;
+    let imported = false;
+    window.__TAURI_INTERNALS__.invoke = async (command, args = {}) => {
+      const handled = ['export_deployment_images', 'upload_remote_image_bundle',
+        'import_remote_image_bundle', 'scan_local_image_bundle'];
+      if (handled.includes(command)) {
+        window.__deployTestCalls.push({ command, args });
+        if (command === options.failCommand) throw '测试操作失败，请重新比对。';
+        if (command === 'export_deployment_images' && options.pauseExport) {
+          await new Promise((resolve) => { window.__finishImageExport = resolve; });
+        }
+        if (command === 'export_deployment_images') return [{
+          reference: 'demo/api:1.4.0', fileName: 'api.tar', path: '/offline/api.tar',
+          success: !options.exportFailed, message: '本机缺少镜像，请选择离线镜像包'
+        }];
+        if (command === 'scan_local_image_bundle') return { files: [{ name: 'api.tar.gz' }, { name: 'other.tar' }] };
+        if (command === 'import_remote_image_bundle') imported = true;
+        return ['完成'];
+      }
+      if (command === 'inspect_deployment_review' && (imported || options.offline)) {
+        window.__deployTestCalls.push({ command, args });
+        const ready = imported && !options.stillMissing;
+        return {
+          ...initialReview, ready, canIncrementalUpdate: ready,
+          missingImages: ready ? [] : ['demo/api:1.4.0'],
+          images: initialReview.images.map((image) => ({ ...image,
+            status: ready ? 'ready' : image.status,
+            localFile: image.imageRef === 'demo/api:1.4.0' ? 'api.tar.gz' : image.localFile
+          }))
+        };
+      }
+      return original(command, args);
+    };
+  }, { initialReview: demoDeploymentReview, options });
+  await openReviewStep(page);
+  await page.getByRole('tab', { name: '镜像核对' }).click();
+}
+
+test('缺失镜像可从本机传输并导入，核对通过后才能继续', async ({ page }) => {
+  const problems = [];
+  page.on('pageerror', (error) => problems.push(error.message));
+  page.on('console', (message) => { if (['error', 'warning'].includes(message.type())) problems.push(message.text()); });
+  await page.setViewportSize({ width: 1440, height: 1080 });
+  await setupImageTransfer(page);
+  await expect(page).toHaveTitle(/部署/);
+  expect(page.url()).toContain('127.0.0.1:4173');
+  await expect(page.locator('vite-error-overlay')).toHaveCount(0);
+  await expect(page.getByRole('radio', { name: '本机 Docker', exact: true })).toBeChecked();
+  await expect(page.getByRole('button', { name: '下一步：选择更新' })).toBeDisabled();
+  await page.screenshot({ path: '/tmp/deploy-missing-images-desktop.png', fullPage: true, animations: 'disabled' });
+  await page.getByRole('button', { name: '传输并导入缺失镜像' }).click();
+  const dialog = page.getByRole('dialog', { name: '确认导入镜像' });
+  await expect(dialog).toContainText(remoteHost.name);
+  await expect(dialog).toContainText('1 个缺失镜像');
+  await expect(dialog).toContainText('运行中的服务不会重启');
+  await expect(page.getByRole('button', { name: '重新比对', exact: true })).toBeDisabled();
+  await dialog.getByRole('button', { name: '传输并导入', exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await expect(page.getByText('缺失镜像已导入，目标主机镜像核对通过。', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '下一步：选择更新' })).toBeEnabled();
+  await expect(page.locator('.image-preparation')).toHaveCount(0);
+  const calls = await page.evaluate(() => window.__deployTestCalls);
+  const writes = calls.filter((item) => ['export_deployment_images', 'upload_remote_image_bundle', 'import_remote_image_bundle'].includes(item.command));
+  expect(writes.map((item) => item.command)).toEqual(['export_deployment_images', 'upload_remote_image_bundle', 'import_remote_image_bundle']);
+  expect(writes[0].args.references).toEqual(['demo/api:1.4.0']);
+  expect(writes[1].args).toMatchObject({ host: remoteHost.address, port: remoteHost.port,
+    user: sshCredential.username, localDir: '/offline', files: ['api.tar'], overwrite: false });
+  expect(writes[2].args.remoteBundleDir).toBe(writes[1].args.remoteBundleDir);
+  await page.screenshot({ path: '/tmp/deploy-missing-images-complete.png', fullPage: true, animations: 'disabled' });
+  expect(problems).toEqual([]);
+});
+
+test('取消镜像传输时不导出、不上传、不导入', async ({ page }) => {
+  await setupImageTransfer(page);
+  await page.getByRole('button', { name: '传输并导入缺失镜像' }).click();
+  await page.getByRole('dialog').getByRole('button', { name: '取消', exact: true }).click();
+  await expect(page.getByRole('button', { name: '传输并导入缺失镜像' })).toBeEnabled();
+  expect(await page.evaluate(() => window.__deployTestCalls.filter((item) =>
+    ['export_deployment_images', 'upload_remote_image_bundle', 'import_remote_image_bundle'].includes(item.command)))).toEqual([]);
+});
+
+for (const [label, options, imports] of [
+  ['导出失败', { exportFailed: true }, 0],
+  ['上传失败', { failCommand: 'upload_remote_image_bundle' }, 0],
+  ['导入失败', { failCommand: 'import_remote_image_bundle' }, 1],
+  ['导入后仍缺失', { stillMissing: true }, 1]
+]) {
+  test(`镜像${label}时保留缺失状态并允许重试`, async ({ page }) => {
+    await setupImageTransfer(page, options);
+    await page.getByRole('button', { name: '传输并导入缺失镜像' }).click();
+    await page.getByRole('dialog').getByRole('button', { name: '传输并导入', exact: true }).click();
+    await expect(page.locator('.step-card .el-alert--error')).toBeVisible();
+    await expect(page.getByRole('button', { name: '下一步：选择更新' })).toBeDisabled();
+    await expect(page.getByRole('button', { name: '传输并导入缺失镜像' })).toBeEnabled();
+    await expect(page.getByText('缺失镜像已导入，目标主机镜像核对通过。', { exact: true })).toBeHidden();
+    await expect(page.locator('.step-card .el-alert--error')).not.toContainText('Error:');
+    expect(await page.evaluate(() => window.__deployTestCalls.filter((item) =>
+      item.command === 'import_remote_image_bundle').length)).toBe(imports);
+    await page.getByText('查看镜像处理详情', { exact: true }).click();
+    await expect(page.locator('.image-diagnostics pre')).not.toBeEmpty();
+  });
+}
+
+test('离线镜像包只传输缺失项对应文件，并在窄窗口中正常操作', async ({ page }) => {
+  await page.setViewportSize({ width: 800, height: 1000 });
+  await setupImageTransfer(page, { offline: true });
+  await page.locator('.image-preparation').getByText('离线镜像包', { exact: true }).click();
+  await page.getByRole('textbox', { name: '镜像介质目录' }).fill('/media/offline');
+  await page.screenshot({ path: '/tmp/deploy-missing-images-narrow.png', fullPage: true, animations: 'disabled' });
+  await page.getByRole('button', { name: '传输并导入缺失镜像' }).click();
+  await page.getByRole('dialog').getByRole('button', { name: '传输并导入', exact: true }).click();
+  await expect(page.getByText('缺失镜像已导入，目标主机镜像核对通过。', { exact: true })).toBeVisible();
+  const calls = await page.evaluate(() => window.__deployTestCalls);
+  expect(calls.filter((item) => item.command === 'export_deployment_images')).toHaveLength(0);
+  expect(calls.find((item) => item.command === 'upload_remote_image_bundle').args).toMatchObject({
+    localDir: '/media/offline', files: ['api.tar.gz']
+  });
+});
+
+test('导出期间展示阶段状态并阻止重复操作', async ({ page }) => {
+  await setupImageTransfer(page, { pauseExport: true });
+  await page.getByRole('button', { name: '传输并导入缺失镜像' }).click();
+  await page.getByRole('dialog').getByRole('button', { name: '传输并导入', exact: true }).click();
+  await expect(page.getByRole('status')).toContainText('正在从本机导出缺失镜像');
+  await expect(page.getByRole('button', { name: '传输并导入缺失镜像' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: '重新比对', exact: true })).toBeDisabled();
+  await expect(page.getByRole('radio', { name: '离线镜像包', exact: true })).toBeDisabled();
+  await page.evaluate(() => window.__finishImageExport());
+  await expect(page.getByText('缺失镜像已导入，目标主机镜像核对通过。', { exact: true })).toBeVisible();
+});
 
 test('清单比对步骤展示服务、镜像与配置差异', async ({ page }) => {
   const problems = [];
