@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OceanBaseHealth {
@@ -34,7 +34,7 @@ pub(crate) fn check_oceanbase_status_blocking() -> Result<OceanBaseHealth, Strin
     let port_arg = format!("-P{}", database.port);
 
     // 检查容器运行状态
-    let inspect_out = Command::new("docker")
+    let inspect_out = super::docker_setup::docker_command()
         .args([
             "inspect",
             "--format",
@@ -64,7 +64,7 @@ pub(crate) fn check_oceanbase_status_blocking() -> Result<OceanBaseHealth, Strin
     }
 
     // 探测数据库是否允许连接并响应 SELECT 1
-    let ping_out = Command::new("docker")
+    let ping_out = super::docker_setup::docker_command()
         .args([
             "exec",
             &container,
@@ -125,7 +125,7 @@ pub(crate) fn import_oceanbase_sql_blocking(sql_file_path: String) -> Result<DbI
     }
 
     // 1. 确保业务数据库已创建
-    let create_db_cmd = Command::new("docker")
+    let create_db_cmd = super::docker_setup::docker_command()
         .args([
             "exec",
             &container,
@@ -144,7 +144,7 @@ pub(crate) fn import_oceanbase_sql_blocking(sql_file_path: String) -> Result<DbI
 
     // 2. 导入 SQL 脚本
     let file = File::open(p).map_err(|e| format!("打开 SQL 文件失败: {}", e))?;
-    let import_child = Command::new("docker")
+    let import_child = super::docker_setup::docker_command()
         .args([
             "exec",
             "-i",
@@ -220,7 +220,7 @@ fn query_table_list() -> (usize, Vec<String>) {
         "SELECT table_name FROM information_schema.tables WHERE table_schema='{}' ORDER BY table_name;",
         database.name
     );
-    let out = Command::new("docker")
+    let out = super::docker_setup::docker_command()
         .args([
             "exec",
             &container,
@@ -256,7 +256,7 @@ fn query_row_count(table_name: &str) -> usize {
     let client = database.client.as_str();
     let port_arg = format!("-P{}", database.port);
     let query = format!("SELECT count(*) FROM {};", table_name);
-    let out = Command::new("docker")
+    let out = super::docker_setup::docker_command()
         .args([
             "exec",
             &container,

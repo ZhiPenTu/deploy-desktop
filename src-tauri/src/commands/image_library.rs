@@ -131,7 +131,7 @@ pub async fn list_local_docker_images() -> Result<Vec<LocalDockerImage>, String>
 }
 
 pub(crate) fn list_local_docker_images_blocking() -> Result<Vec<LocalDockerImage>, String> {
-    let output = Command::new("docker")
+    let output = super::docker_setup::docker_command()
         .args(["image", "ls", "--no-trunc", "--format", "{{json .}}"])
         .output()
         .map_err(docker_command_error)?;
@@ -331,7 +331,7 @@ pub async fn import_offline_packages(
                 &format!("正在导入 {name}"),
                 false,
             );
-            let output = Command::new("docker")
+            let output = super::docker_setup::docker_command()
                 .arg("load")
                 .arg("-i")
                 .arg(&path)
@@ -424,7 +424,8 @@ pub async fn remove_local_docker_images(
                 &format!("正在删除 {reference}"),
                 false,
             );
-            let result = match Command::new("docker").args(["rmi", &reference]).output() {
+            let result =
+                match super::docker_setup::docker_command().args(["rmi", &reference]).output() {
                 Ok(output) if output.status.success() => OperationResult {
                     target: reference.clone(),
                     success: true,
@@ -652,7 +653,7 @@ fn expand_path(raw: &str) -> PathBuf {
 
 fn docker_command_error(error: std::io::Error) -> String {
     if error.kind() == ErrorKind::NotFound {
-        "未找到 Docker 命令，请先安装 Docker Desktop 并重新打开应用".to_string()
+        "未找到 Docker 命令，请确认已安装并启动 Docker。".to_string()
     } else {
         format!("启动 Docker 命令失败：{error}")
     }

@@ -129,6 +129,13 @@ pub(crate) fn find_docker_binary() -> Option<PathBuf> {
     binaries.into_iter().find(|path| path.is_file())
 }
 
+pub(crate) fn docker_command() -> Command {
+    let binary = find_docker_binary().unwrap_or_else(|| {
+        PathBuf::from(if cfg!(windows) { "docker.exe" } else { "docker" })
+    });
+    Command::new(binary)
+}
+
 fn inspect_installation(
     os: &str,
     binary: Option<&Path>,

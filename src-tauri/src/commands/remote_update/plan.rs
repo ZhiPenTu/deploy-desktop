@@ -7,7 +7,6 @@ use crate::commands::remote_ssh::{resolve_existing_key, run_ssh_script};
 use serde::Serialize;
 use std::fs::{self};
 use std::path::Path;
-use std::process::Command;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -477,7 +476,7 @@ pub(super) fn image_tags_for_target(
 }
 
 pub(super) fn docker_available() -> bool {
-    Command::new("docker")
+    crate::commands::docker_setup::docker_command()
         .args(["info", "--format", "{{.ServerVersion}}"])
         .output()
         .map(|output| output.status.success())
@@ -485,7 +484,7 @@ pub(super) fn docker_available() -> bool {
 }
 
 fn local_image_tags() -> Vec<String> {
-    let Ok(output) = Command::new("docker")
+    let Ok(output) = crate::commands::docker_setup::docker_command()
         .args(["images", "--format", "{{.Repository}}:{{.Tag}}"])
         .output()
     else {

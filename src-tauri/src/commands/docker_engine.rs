@@ -243,8 +243,8 @@ WantedBy=multi-user.target
 
     // 等待 2 秒后探测 docker info
     std::thread::sleep(std::time::Duration::from_millis(2000));
-    let info_res = Command::new("docker").arg("info").output();
-    let version_res = Command::new("docker").arg("--version").output();
+    let info_res = super::docker_setup::docker_command().arg("info").output();
+    let version_res = super::docker_setup::docker_command().arg("--version").output();
 
     let ver_str = version_res
         .ok()
