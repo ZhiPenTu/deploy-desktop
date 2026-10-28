@@ -76,6 +76,7 @@ npm run tauri dev
 
 ## 文档
 
+- [用户使用说明书](docs/user-guide.md)（[DOCX](docs/user-guide.docx) / [PDF](docs/user-guide.pdf)）
 - [部署配置与主机管理](docs/configuration.md)
 - [制品源、交付包与部署向导](docs/artifact-source.md)
 - [镜像源管理](docs/registry-sources.md)
