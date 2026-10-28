@@ -97,11 +97,26 @@ export function buildImageProbeScript(images) {
     // containerd 存储下 tag 会解析到默认架构，digest 形式才解析到目标机架构，两种都探。
     const tag = String(image.imageRef).replace(/@sha256:[0-9a-f]+$/i, '');
     for (const [source, ref] of [['tag', tag], ['ref', image.imageRef]]) {
-      lines.push(`PROBE=$(docker image inspect ${shellQuote(ref)} --format '{{.Os}}/{{.Architecture}}|{{.Id}}|{{join .RepoDigests ","}}' 2>/dev/null || true)`);
+      lines.push(`PROBE=$(docker image inspect ${shellQuote(ref)} --format '{{.Os}}/{{.Architecture}}|{{.Id}}|{{json .RepoDigests}}' 2>/dev/null || true)`);
       lines.push(`printf 'IMG|%s|%s|%s\\n' ${shellQuote(String(index))} ${shellQuote(source)} "\${PROBE:-MISSING||}"`);
     }
   });
   return `${lines.join('\n')}\n`;
+}
+
+// Docker 27 的 join 模板对 RepoDigests（[]interface{}）直接报错，改用 json 输出后在此解析。
+function parseRepoDigests(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return [];
+  if (text.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(text);
+      return Array.isArray(parsed) ? parsed.map((item) => String(item).trim()).filter(Boolean) : [];
+    } catch {
+      return [];
+    }
+  }
+  return text.split(',').map((item) => item.trim()).filter(Boolean);
 }
 
 export function parseImageProbe(stdout) {
@@ -120,14 +135,14 @@ export function parseImageProbe(stdout) {
     const rest = parts.slice(3).join('|');
     const index = Number(rawIndex);
     if (!Number.isInteger(index)) continue;
-    const [osArch, imageId = '', repoDigests = ''] = rest.split('|');
+    const [osArch, imageId = '', rawDigests = ''] = rest.split('|');
     const missing = osArch === 'MISSING';
     probes.push({
       index,
       source,
       osArch: missing ? '' : platformOf(osArch),
       imageId: missing ? '' : imageId.trim(),
-      repoDigests: repoDigests.split(',').map((item) => item.trim()).filter(Boolean)
+      repoDigests: parseRepoDigests(rawDigests)
     });
   }
   return { hostPlatform, probes };

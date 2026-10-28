@@ -62,6 +62,24 @@ test('buildImageProbeScript 转义镜像引用并保留缺失回退', () => {
   assert.match(script, /'0' 'tag'/);
   assert.match(script, /'0' 'ref'/);
   assert.match(script, /MISSING\|\|/);
+  assert.match(script, /'\{\{\.Os\}\}\/\{\{\.Architecture\}\}\|\{\{\.Id\}\}\|\{\{json \.RepoDigests\}\}'/);
+});
+
+test('parseImageProbe 兼容 Docker 27 输出的 JSON 形式 RepoDigests', () => {
+  const stdout = [
+    'HOST|linux/x86_64',
+    `IMG|0|ref|linux/amd64|${sha('3')}|["demo/db@${digestOf(DIGEST_A)}","mirror/db@${digestOf(DIGEST_A)}"]`,
+    `IMG|1|ref|linux/amd64|${sha('4')}|[]`,
+    `IMG|2|ref|linux/amd64|${sha('5')}|demo/db@${digestOf(DIGEST_B)}`
+  ].join('\n');
+  const parsed = parseImageProbe(stdout);
+  assert.equal(parsed.hostPlatform, 'linux/amd64');
+  assert.deepEqual(parsed.probes[0].repoDigests, [
+    `demo/db@${digestOf(DIGEST_A)}`,
+    `mirror/db@${digestOf(DIGEST_A)}`
+  ]);
+  assert.deepEqual(parsed.probes[1].repoDigests, []);
+  assert.deepEqual(parsed.probes[2].repoDigests, [`demo/db@${digestOf(DIGEST_B)}`]);
 });
 
 test('parseImageProbe 归一化架构并识别缺失镜像', () => {
