@@ -587,6 +587,7 @@ version = "0.3.20"
 dependencies = [
  "chrono",
  "dirs",
+ "flate2",
  "keyring",
  "libc",
  "log",
@@ -596,6 +597,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2",
+ "tar",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",

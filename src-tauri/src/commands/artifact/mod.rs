@@ -816,6 +816,210 @@ mod tests {
         assert!(!is_safe_entry("C:/Windows/system32"));
         assert!(!is_safe_entry("..\\x"));
         assert!(!is_safe_entry(""));
+        assert!(!is_safe_entry("app/\0server.jar"));
+        assert!(!is_safe_entry("app/NUL"));
+        assert!(!is_safe_entry("app/con.txt"));
+        assert!(!is_safe_entry("app/aux.tar.gz"));
+        assert!(!is_safe_entry("app/COM1"));
+        assert!(!is_safe_entry("app/file."));
+        assert!(!is_safe_entry("app/file "));
+        assert!(!is_safe_entry("app/a:b"));
+        assert!(!is_safe_entry("app/NUL .txt"));
+        assert!(!is_safe_entry("app/COM1 .txt"));
+        assert!(!is_safe_entry("app/COM¹.txt"));
+        assert!(!is_safe_entry("app/LPT¹.txt"));
+        assert!(is_safe_entry("app/common.txt"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extracted_modes_drop_group_and_other_write() {
+        assert_eq!(permission_mode(0o666, 0o644), 0o644);
+        assert_eq!(permission_mode(0o777, 0o644), 0o755);
+        assert_eq!(permission_mode(0o400, 0o644), 0o400);
+        assert_eq!(permission_mode(0, 0o644), 0o644);
+    }
+
+    fn write_test_archive(path: &Path, files: &[(&str, &[u8])]) {
+        let file = fs::File::create(path).unwrap();
+        let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        for (name, data) in files {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            header.set_mtime(0);
+            builder.append_data(&mut header, name, *data).unwrap();
+        }
+        builder.into_inner().unwrap().finish().unwrap();
+    }
+
+    #[test]
+    fn extracts_archive_with_non_ascii_names() {
+        let root = std::env::temp_dir().join(format!("deploy-unicode-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let archive = root.join("bundle.tgz");
+        write_test_archive(
+            &archive,
+            &[
+                ("bundle.json", b"{}"),
+                ("app/frontend-dist/sound/网管告警.wav", b"wav"),
+            ],
+        );
+        let dest = root.join("out");
+        let count = safe_extract(&archive, &dest).unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(
+            fs::read_to_string(dest.join("app/frontend-dist/sound/网管告警.wav")).unwrap(),
+            "wav"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rejects_link_entries_before_writing() {
+        let root = std::env::temp_dir().join(format!("deploy-link-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let archive = root.join("bundle.tgz");
+        let file = fs::File::create(&archive).unwrap();
+        let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_size(0);
+        header.set_mode(0o777);
+        header.set_mtime(0);
+        builder
+            .append_link(&mut header, "app/link", "/etc/passwd")
+            .unwrap();
+        builder.into_inner().unwrap().finish().unwrap();
+
+        let dest = root.join("out");
+        let error = safe_extract(&archive, &dest).unwrap_err();
+        assert!(error.contains("链接"), "unexpected message: {error}");
+        assert!(!dest.join("app/link").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rejects_corrupted_archive() {
+        let root = std::env::temp_dir().join(format!("deploy-corrupt-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let archive = root.join("bundle.tgz");
+        fs::write(&archive, b"not a tarball").unwrap();
+        let error = safe_extract(&archive, &root.join("out")).unwrap_err();
+        assert!(
+            error.contains("有效的 tar.gz"),
+            "unexpected message: {error}"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rejects_parent_directory_entries() {
+        let root = std::env::temp_dir().join(format!("deploy-escape-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let archive = root.join("bundle.tgz");
+        let file = fs::File::create(&archive).unwrap();
+        let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        let mut header = tar::Header::new_gnu();
+        header.set_size(1);
+        header.set_mode(0o644);
+        header.set_mtime(0);
+        let name = b"../escape.txt";
+        header.as_mut_bytes()[..name.len()].copy_from_slice(name);
+        header.set_cksum();
+        builder.append(&header, b"x".as_slice()).unwrap();
+        builder.into_inner().unwrap().finish().unwrap();
+
+        let dest = root.join("out");
+        let error = safe_extract(&archive, &dest).unwrap_err();
+        assert!(error.contains("非法路径"), "unexpected message: {error}");
+        assert!(!root.join("escape.txt").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn accepts_contiguous_files_and_skips_global_pax_headers() {
+        let root = std::env::temp_dir().join(format!("deploy-pax-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let archive = root.join("bundle.tgz");
+        let file = fs::File::create(&archive).unwrap();
+        let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::XGlobalHeader);
+        header.set_size(0);
+        header.set_mode(0o644);
+        header.set_mtime(0);
+        builder
+            .append_data(&mut header, "pax_global_header", b"".as_slice())
+            .unwrap();
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Continuous);
+        header.set_size(4);
+        header.set_mode(0o644);
+        header.set_mtime(0);
+        builder
+            .append_data(&mut header, "app/stream.bin", b"data".as_slice())
+            .unwrap();
+        builder.into_inner().unwrap().finish().unwrap();
+
+        let dest = root.join("out");
+        assert_eq!(safe_extract(&archive, &dest).unwrap(), 1);
+        assert_eq!(
+            fs::read_to_string(dest.join("app/stream.bin")).unwrap(),
+            "data"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extracted_files_and_directories_do_not_grant_group_write() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!("deploy-mode-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let archive = root.join("bundle.tgz");
+        let file = fs::File::create(&archive).unwrap();
+        let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Directory);
+        header.set_size(0);
+        header.set_mode(0o777);
+        header.set_mtime(0);
+        builder
+            .append_data(&mut header, "app", b"".as_slice())
+            .unwrap();
+        let mut header = tar::Header::new_gnu();
+        header.set_mode(0o666);
+        header.set_size(1);
+        header.set_mtime(0);
+        builder
+            .append_data(&mut header, "app/config.env", b"x".as_slice())
+            .unwrap();
+        builder.into_inner().unwrap().finish().unwrap();
+
+        let dest = root.join("out");
+        safe_extract(&archive, &dest).unwrap();
+        let file_mode = fs::metadata(dest.join("app/config.env"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        let dir_mode = fs::metadata(dest.join("app")).unwrap().permissions().mode() & 0o777;
+        assert_eq!(file_mode, 0o644);
+        assert_eq!(dir_mode, 0o755);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

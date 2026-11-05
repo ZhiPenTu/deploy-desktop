@@ -5,7 +5,7 @@
 
 use std::fs;
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tauri::{ipc::Channel, AppHandle};
@@ -138,59 +138,116 @@ pub(super) fn download_to_file(
     Ok((downloaded, digest))
 }
 
+/// 直接读取 gzip/tar 流解包，不依赖系统 tar。
+///
+/// Windows 自带 tar 与 macOS/Linux 的 tar 在文件名编码、退出码上存在差异：
+/// 包含中文文件名的交付包可能在 Windows 上中途失败，且失败原因只留在子进程
+/// stderr 里。这里逐条校验并写入，仍拒绝绝对路径、父目录跳转、链接与特殊文件。
 pub(super) fn safe_extract(archive: &Path, dest: &Path) -> Result<usize, String> {
-    let listing = Command::new("tar")
-        .arg("-tzf")
-        .arg(archive)
-        .output()
-        .map_err(|e| format!("调用 tar 失败：{e}"))?;
-    if !listing.status.success() {
-        return Err("构建物不是有效的 tar.gz 压缩包".to_string());
-    }
-    let names = String::from_utf8_lossy(&listing.stdout);
-    let mut count = 0usize;
-    for name in names.lines() {
-        let name = name.trim();
-        if name.is_empty() {
-            continue;
-        }
-        count += 1;
-        if !is_safe_entry(name) {
-            return Err(format!("构建物包含非法路径：{name}"));
-        }
-    }
-
-    let verbose = Command::new("tar")
-        .arg("-tvzf")
-        .arg(archive)
-        .output()
-        .map_err(|e| format!("调用 tar 失败：{e}"))?;
-    if !verbose.status.success() {
-        return Err("无法检查压缩包内容，请重新选择完整的交付包".to_string());
-    }
-    let details = String::from_utf8_lossy(&verbose.stdout);
-    for line in details.lines() {
-        if !line.starts_with('-') && !line.starts_with('d') {
-            return Err("交付包包含链接或特殊文件，无法解压，请重新打包后重试".to_string());
-        }
-    }
+    let file = fs::File::open(archive).map_err(|error| {
+        log::error!(
+            target: "artifact",
+            "打开交付包失败：{}：{error}",
+            archive.display()
+        );
+        "无法读取交付包，请重新下载后重试".to_string()
+    })?;
+    let mut tar = tar::Archive::new(flate2::read::MultiGzDecoder::new(file));
+    let entries = tar.entries().map_err(|error| {
+        log::error!(
+            target: "artifact",
+            "读取交付包失败：{}：{error}",
+            archive.display()
+        );
+        "构建物不是有效的 tar.gz 压缩包，请重新下载后重试".to_string()
+    })?;
 
     fs::create_dir_all(dest).map_err(|e| format!("创建解包目录失败：{e}"))?;
-    let status = Command::new("tar")
-        .arg("-xzf")
-        .arg(archive)
-        .arg("-C")
-        .arg(dest)
-        .status()
-        .map_err(|e| format!("调用 tar 失败：{e}"))?;
-    if !status.success() {
-        return Err("解包构建物失败".to_string());
+    let mut directories: Vec<(PathBuf, u32)> = Vec::new();
+    let mut count = 0usize;
+
+    for entry in entries {
+        let mut entry = entry.map_err(|error| {
+            log::error!(target: "artifact", "读取交付包条目失败：{error}");
+            "构建物不是有效的 tar.gz 压缩包，请重新下载后重试".to_string()
+        })?;
+        let kind = entry.header().entry_type();
+        if kind.is_pax_global_extensions() {
+            continue;
+        }
+        let raw = entry.path_bytes().to_vec();
+        let name = std::str::from_utf8(&raw)
+            .map_err(|_| {
+                log::error!(
+                    target: "artifact",
+                    "交付包文件名不是有效的 UTF-8：{}",
+                    String::from_utf8_lossy(&raw)
+                );
+                "交付包包含无法识别的文件名，请使用支持的文件名重新打包".to_string()
+            })?
+            .to_string();
+        if !is_safe_entry(&name) {
+            return Err(format!("构建物包含非法路径：{name}"));
+        }
+        let is_file = kind.is_file() || kind.is_contiguous();
+        if !is_file && !kind.is_dir() {
+            return Err("交付包包含链接或特殊文件，无法解压，请重新打包后重试".to_string());
+        }
+        count += 1;
+        let target = dest.join(&name);
+        if kind.is_dir() {
+            fs::create_dir_all(&target).map_err(|error| unpack_error(&name, &error))?;
+            directories.push((target, entry.header().mode().unwrap_or(0o755)));
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|error| unpack_error(&name, &error))?;
+        }
+        let mut output = fs::File::create(&target).map_err(|error| unpack_error(&name, &error))?;
+        std::io::copy(&mut entry, &mut output).map_err(|error| unpack_error(&name, &error))?;
+        output
+            .flush()
+            .map_err(|error| unpack_error(&name, &error))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = permission_mode(entry.header().mode().unwrap_or(0o644), 0o644);
+            fs::set_permissions(&target, fs::Permissions::from_mode(mode))
+                .map_err(|error| unpack_error(&name, &error))?;
+        }
     }
+
+    #[cfg(unix)]
+    for (path, mode) in directories.iter().rev() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = permission_mode(*mode, 0o755);
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))
+            .map_err(|error| unpack_error(&path.to_string_lossy(), &error))?;
+    }
+    #[cfg(not(unix))]
+    let _ = directories;
+
     Ok(count)
 }
 
+fn unpack_error(name: &str, error: &std::io::Error) -> String {
+    log::error!(target: "artifact", "解包交付包失败：文件={name}：{error}");
+    "解包交付包失败，请确认磁盘空间充足后重试".to_string()
+}
+
+/// 不放大归档声明的权限：去掉组和其他用户的写权限，保留可执行位等其余属性。
+#[cfg(unix)]
+pub(super) fn permission_mode(mode: u32, default: u32) -> u32 {
+    let mode = mode & 0o777;
+    if mode == 0 {
+        default
+    } else {
+        mode & !0o022
+    }
+}
+
 pub(super) fn is_safe_entry(name: &str) -> bool {
-    if name.is_empty() {
+    if name.is_empty() || name.contains('\0') {
         return false;
     }
     if name.starts_with('/') || name.starts_with('\\') {
@@ -202,7 +259,60 @@ pub(super) fn is_safe_entry(name: &str) -> bool {
     }
     !name
         .split(|ch| ch == '/' || ch == '\\')
-        .any(|part| part == "..")
+        .any(|part| part == ".." || !is_portable_component(part))
+}
+
+/// Windows 会把保留设备名、结尾的点和空格解释成特殊对象，也会把冒号当成
+/// 备用数据流。交付包在 macOS、Linux 与 Windows 上共用，统一拒绝这类名称，
+/// 避免同一份交付包在 Windows 上解出不同的文件。
+fn is_portable_component(part: &str) -> bool {
+    if part.is_empty() || part == "." {
+        return true;
+    }
+    if part.ends_with('.') || part.ends_with(' ') || part.contains(':') {
+        return false;
+    }
+    let stem = part
+        .split('.')
+        .next()
+        .unwrap_or(part)
+        .trim_end_matches(' ')
+        .to_ascii_uppercase();
+    !matches!(
+        stem.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "CONIN$"
+            | "CONOUT$"
+            | "COM0"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "COM¹"
+            | "COM²"
+            | "COM³"
+            | "LPT0"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+            | "LPT¹"
+            | "LPT²"
+            | "LPT³"
+    )
 }
 
 pub(super) fn validate_layout(dir: &Path) -> Result<(String, String), String> {
@@ -254,7 +364,15 @@ pub(super) fn install_artifact_archive(
             size_bytes: 0,
         })
     })();
-    let _ = fs::remove_dir_all(staged);
+    if let Err(error) = fs::remove_dir_all(&staged) {
+        if staged.exists() {
+            log::warn!(
+                target: "artifact",
+                "清理临时解包目录失败：{}：{error}",
+                staged.display()
+            );
+        }
+    }
     result
 }
 
@@ -452,7 +570,13 @@ pub(super) fn prepare_local_bundle(
         let dest = cache_root.join(format!("local-{}-{stamp}", std::process::id()));
         fs::create_dir(&dest).map_err(|e| format!("创建解压目录失败：{e}"))?;
         if let Err(error) = safe_extract(&source, &dest) {
-            let _ = fs::remove_dir_all(&dest);
+            if let Err(cleanup) = fs::remove_dir_all(&dest) {
+                log::warn!(
+                    target: "artifact",
+                    "清理本地解包目录失败：{}：{cleanup}",
+                    dest.display()
+                );
+            }
             return Err(error);
         }
         Some(dest)
@@ -475,7 +599,13 @@ pub(super) fn prepare_local_bundle(
     })();
     if result.is_err() {
         if let Some(dest) = extracted {
-            let _ = fs::remove_dir_all(dest);
+            if let Err(cleanup) = fs::remove_dir_all(&dest) {
+                log::warn!(
+                    target: "artifact",
+                    "清理本地解包目录失败：{}：{cleanup}",
+                    dest.display()
+                );
+            }
         }
     }
     result
