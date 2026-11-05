@@ -828,6 +828,14 @@ mod tests {
         assert!(!is_safe_entry("app/COM1 .txt"));
         assert!(!is_safe_entry("app/COM¹.txt"));
         assert!(!is_safe_entry("app/LPT¹.txt"));
+        assert!(!is_safe_entry("app/a\\b"));
+        assert!(!is_safe_entry("app/a*b"));
+        assert!(!is_safe_entry("app/a?b"));
+        assert!(!is_safe_entry("app/a|b"));
+        assert!(!is_safe_entry("app/a<b"));
+        assert!(!is_safe_entry("app/a>b"));
+        assert!(!is_safe_entry("app/a\"b"));
+        assert!(!is_safe_entry("app/a\u{1}b"));
         assert!(is_safe_entry("app/common.txt"));
     }
 

@@ -250,7 +250,7 @@ pub(super) fn is_safe_entry(name: &str) -> bool {
     if name.is_empty() || name.contains('\0') {
         return false;
     }
-    if name.starts_with('/') || name.starts_with('\\') {
+    if name.starts_with('/') || name.contains('\\') {
         return false;
     }
     let bytes = name.as_bytes();
@@ -270,6 +270,12 @@ fn is_portable_component(part: &str) -> bool {
         return true;
     }
     if part.ends_with('.') || part.ends_with(' ') || part.contains(':') {
+        return false;
+    }
+    if part
+        .chars()
+        .any(|ch| ch.is_control() || matches!(ch, '<' | '>' | '"' | '|' | '?' | '*'))
+    {
         return false;
     }
     let stem = part
