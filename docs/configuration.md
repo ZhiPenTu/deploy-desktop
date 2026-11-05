@@ -10,7 +10,9 @@ Windows、Linux 和 macOS 桌面应用在启动后检查本机是否安装 Docke
 - [macOS 安装 Docker Desktop](https://docs.docker.com/desktop/setup/install/mac-install/)
 - [Linux 安装 Docker Engine](https://docs.docker.com/engine/install/)
 
-按官方说明完成安装后，返回应用会重新检查，也可以点击「重新检测」。打开安装页面不代表安装完成；只有重新检测到 Docker 才会关闭缺失提示。检测异常和浏览器打开失败均保留重试入口，不会作为未安装或安装成功处理。安装操作由用户在官方页面完成，应用不自动下载或执行安装脚本。
+按官方说明完成安装后，返回应用会重新检查，也可以点击「重新检测」。打开安装页面不代表安装完成；只有重新检测到 Docker 才会关闭缺失提示。检测异常和浏览器打开失败均保留重试入口，不会作为未安装或安装成功处理。安装操作由用户在官方页面完成，应用不自动执行安装脚本。
+
+部署向导的「检测环境」中，Docker 未就绪时还可点击「安装离线 Docker 引擎」旁的「下载离线包」。可选择 Linux（x86_64 / ARM64）、Windows（x64）、macOS（Apple 芯片 / Intel 芯片）及对应版本，从 Docker 官方下载站保存到本机。Linux 提供 Docker Engine 静态离线包，Windows 与 macOS 提供 Docker Desktop 安装包；下载完成只表示文件已保存，不代表已安装或当前环境已就绪，仍需安装后重新检测。当前应用只在 Linux 目标机执行离线安装，Windows 与 macOS 安装包需由用户自行运行。
 
 检测覆盖系统命令目录、用户 Docker 命令目录、Docker Desktop 的常见安装位置及 `PATH`，避免桌面应用尚未继承新命令路径时误报。浏览器预览不执行启动检查；部署前仍按所选目标检查 Docker 服务与 Compose 是否就绪。
 

@@ -41,7 +41,22 @@
         </li>
       </ul>
       <el-collapse v-if="!envData.docker_running" class="optional-panel">
-        <el-collapse-item title="安装离线 Docker 引擎" name="docker">
+        <el-collapse-item name="docker">
+          <template #title>
+            <div class="collapse-title">
+              <span>安装离线 Docker 引擎</span>
+              <el-button
+                link
+                type="primary"
+                size="small"
+                :disabled="busy"
+                @click.stop="downloadVisible = true"
+              >
+                <el-icon><Download /></el-icon>
+                <span>下载离线包</span>
+              </el-button>
+            </div>
+          </template>
           <p class="field-hint">
             请填写{{ isRemote ? '目标主机' : '本机' }}上的离线介质目录，目录中需包含 Docker 安装包。
           </p>
@@ -62,6 +77,11 @@
           </div>
         </el-collapse-item>
       </el-collapse>
+      <DockerOfflineDownloadDialog
+        v-model:visible="downloadVisible"
+        :media-dir="mediaDir"
+        :is-remote="isRemote"
+      />
       <el-table :data="envData.ports || []" size="small" empty-text="暂无需检查的端口">
         <el-table-column prop="port" label="端口" width="90" />
         <el-table-column prop="protocol" label="协议" width="80" />
@@ -86,8 +106,10 @@
 </template>
 
 <script setup>
-import { ArrowRight } from '@element-plus/icons-vue';
+import { ref } from 'vue';
+import { ArrowRight, Download } from '@element-plus/icons-vue';
 import { safeText } from '../domain/errors.js';
+import DockerOfflineDownloadDialog from './DockerOfflineDownloadDialog.vue';
 
 defineProps({
   targetLabel: { type: String, default: '' },
@@ -108,6 +130,8 @@ const emit = defineEmits([
   'previous',
   'next'
 ]);
+
+const downloadVisible = ref(false);
 </script>
 
 <style scoped>
@@ -217,6 +241,14 @@ h3 {
 }
 .optional-panel {
   margin-top: 20px;
+}
+.collapse-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding-right: 8px;
 }
 .optional-panel .input-row {
   margin: 12px 0;

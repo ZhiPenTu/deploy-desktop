@@ -40,6 +40,50 @@ const localEnv = {
   issues: []
 };
 
+const offlineEnv = {
+  ...localEnv,
+  docker_running: false,
+  compose_installed: false,
+  is_ready: false,
+  issues: ['Docker 服务未处于运行状态']
+};
+
+const dockerOfflineCatalog = {
+  packages: [
+    {
+      platform: 'linux',
+      arch: 'x86_64',
+      version: '29.9.3',
+      build: '',
+      fileName: 'docker-29.9.3.tgz'
+    },
+    {
+      platform: 'windows',
+      arch: 'amd64',
+      version: '4.98.0',
+      build: '245422',
+      fileName: 'Docker-Desktop-4.98.0-245422-amd64.exe'
+    },
+    {
+      platform: 'windows',
+      arch: 'amd64',
+      version: '4.97.0',
+      build: '244584',
+      fileName: 'Docker-Desktop-4.97.0-244584-amd64.exe'
+    },
+    {
+      platform: 'macos',
+      arch: 'arm64',
+      version: '4.98.0',
+      build: '245422',
+      fileName: 'Docker-4.98.0-245422-arm64.dmg'
+    }
+  ],
+  defaultPlatform: 'windows:amd64',
+  downloadDir: '/tmp/downloads',
+  warnings: []
+};
+
 async function openWizard(page) {
   await page.goto('/');
   await page.locator('.nav-menu .nav-item', { hasText: '部署向导' }).click();
@@ -111,6 +155,58 @@ test('部署目标与环境检测步骤展示项目、主机与环境指标', as
   await expect(page.locator('.step-card').first().locator('h3')).toHaveText('确认部署目标');
   await expect(page.locator('.stepper [aria-current="step"]')).toHaveText('1选择项目');
 
+  expect(problems).toEqual([]);
+});
+
+test('离线 Docker 引擎可下载对应平台的安装包', async ({ page }) => {
+  const problems = [];
+  page.on('pageerror', (error) => problems.push(`未捕获异常：${error.message}`));
+
+  await useDesktopBackend(page, {
+    hosts: [localHost],
+    projects: [localProject],
+    activeProjectId: localProject.id,
+    localEnv: offlineEnv,
+    dialogPath: '/tmp/downloads/Docker-Desktop-4.97.0-244584-amd64.exe',
+    dockerOfflineCatalog
+  });
+  await openWizard(page);
+  await page.getByRole('button', { name: '下一步：检测环境' }).click();
+
+  const environment = page.locator('.step-card').first();
+  await expect(environment.getByText('安装离线 Docker 引擎')).toBeVisible();
+  await environment.getByRole('button', { name: '下载离线包', exact: true }).click();
+
+  const dialog = page.getByRole('dialog', { name: '下载 Docker 离线包' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText('Windows（x64）');
+  await expect(dialog).toContainText('4.98.0（构建 245422）');
+  await expect(dialog).toContainText('Docker-Desktop-4.98.0-245422-amd64.exe');
+
+  await dialog.locator('.el-select').first().click();
+  await page.getByRole('option', { name: 'Linux（x86_64）' }).click();
+  await expect(dialog).toContainText('docker-29.9.3.tgz');
+  await expect(dialog).toContainText('docker-engine 子目录');
+
+  await dialog.locator('.el-select').first().click();
+  await page.getByRole('option', { name: 'Windows（x64）' }).click();
+  await dialog.locator('.el-select').nth(1).click();
+  await page.getByRole('option', { name: '4.97.0（构建 244584）' }).click();
+  await expect(dialog).toContainText('Docker-Desktop-4.97.0-244584-amd64.exe');
+
+  await dialog.getByRole('button', { name: '下载', exact: true }).click();
+  await expect(dialog.getByText('离线包已下载')).toBeVisible();
+  await expect(dialog).toContainText('/tmp/downloads/Docker-Desktop-4.97.0-244584-amd64.exe');
+
+  const call = await page.evaluate(() =>
+    window.__deployTestCalls.find((item) => item.command === 'download_docker_offline_package')
+  );
+  expect(call.args).toMatchObject({
+    platform: 'windows',
+    arch: 'amd64',
+    version: '4.97.0',
+    build: '244584'
+  });
   expect(problems).toEqual([]);
 });
 

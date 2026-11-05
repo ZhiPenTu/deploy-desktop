@@ -19,6 +19,7 @@ export async function useDesktopBackend(
     localEnv = null,
     remoteEnv = null,
     dialogPath = '',
+    dockerOfflineCatalog = null,
     preparedBundle = null,
     bundlePlan = null,
     bundleConfig = null,
@@ -43,6 +44,7 @@ export async function useDesktopBackend(
     initialLocalEnv,
     initialRemoteEnv,
     initialDialogPath,
+    initialDockerOfflineCatalog,
     initialPreparedBundle,
     initialBundlePlan,
     initialBundleConfig,
@@ -66,6 +68,7 @@ export async function useDesktopBackend(
       localEnv: structuredClone(initialLocalEnv),
       remoteEnv: structuredClone(initialRemoteEnv),
       dialogPath: initialDialogPath,
+      dockerOfflineCatalog: structuredClone(initialDockerOfflineCatalog),
       preparedBundle: structuredClone(initialPreparedBundle),
       bundlePlan: structuredClone(initialBundlePlan),
       bundleConfig: structuredClone(initialBundleConfig),
@@ -151,6 +154,17 @@ export async function useDesktopBackend(
           }
           case 'plugin:dialog|open':
             return state.dialogPath || null;
+          case 'plugin:dialog|save':
+            return state.dialogPath || null;
+          case 'list_docker_offline_packages':
+            if (!state.dockerOfflineCatalog) throw '当前操作暂不可用，请在桌面应用中重试。';
+            return structuredClone(state.dockerOfflineCatalog);
+          case 'download_docker_offline_package':
+            return {
+              path: args.savePath,
+              sizeBytes: 623748528,
+              sha256: 'test-digest'
+            };
           case 'get_containers_status':
             return state.containers.map((item) => ({ ...item }));
           case 'get_remote_containers_status':
@@ -267,6 +281,7 @@ export async function useDesktopBackend(
     initialLocalEnv: localEnv,
     initialRemoteEnv: remoteEnv,
     initialDialogPath: dialogPath,
+    initialDockerOfflineCatalog: dockerOfflineCatalog,
     initialPreparedBundle: preparedBundle,
     initialBundlePlan: bundlePlan,
     initialBundleConfig: bundleConfig,

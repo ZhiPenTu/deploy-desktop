@@ -1,4 +1,4 @@
-import { invokeRead, invokeDesktop, listenProgress } from '../desktop.js';
+import { invokeRead, invokeDesktop, invokeWithProgress, listenProgress } from '../desktop.js';
 
 export async function installOfflineDockerEngine(bundleDir) {
   return await invokeDesktop("install_offline_docker_engine", { bundleDir });
@@ -6,6 +6,24 @@ export async function installOfflineDockerEngine(bundleDir) {
 
 export async function installRemoteDockerEngine(host, port, user, keyPath, bundleDir) {
   return await invokeDesktop("install_remote_docker_engine", { host, port, user, keyPath, bundleDir });
+}
+
+export async function listDockerOfflinePackages() {
+  return await invokeRead("list_docker_offline_packages");
+}
+
+export async function downloadDockerOfflinePackage(item = {}, savePath, onProgress) {
+  return await invokeWithProgress(
+    "download_docker_offline_package",
+    {
+      platform: item.platform,
+      arch: item.arch,
+      version: item.version,
+      build: item.build || "",
+      savePath
+    },
+    onProgress
+  );
 }
 
 export async function loadOfflineImages(bundleDir) {

@@ -1,5 +1,11 @@
 // Stable public facade: feature code imports desktop operations only from this file.
-export { isDesktopApp, selectLocalPath, reportClientEvent, setCommandTrace } from './desktop.js';
+export {
+  isDesktopApp,
+  selectLocalPath,
+  selectLocalSavePath,
+  reportClientEvent,
+  setCommandTrace
+} from './desktop.js';
 
 export {
   listArtifactSources,
@@ -33,6 +39,8 @@ export {
 export {
   installOfflineDockerEngine,
   installRemoteDockerEngine,
+  listDockerOfflinePackages,
+  downloadDockerOfflinePackage,
   loadOfflineImages,
   exportDeploymentImages,
   inspectBundlePlan,

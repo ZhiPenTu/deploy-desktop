@@ -1,6 +1,6 @@
 import { Channel, invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { open } from '@tauri-apps/plugin-dialog';
+import { open, save } from '@tauri-apps/plugin-dialog';
 
 export function isDesktopApp() {
   return isTauri();
@@ -111,4 +111,9 @@ export function listenProgress(event, callback) {
 export async function selectLocalPath(options) {
   requireDesktop();
   return await open(options);
+}
+
+export async function selectLocalSavePath(options) {
+  requireDesktop();
+  return await save(options);
 }
