@@ -2,11 +2,10 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { Bundle } from './bundle.mjs';
 import { appVersion } from './config.mjs';
 import { DeployError } from './errors.mjs';
+import { safeExtract } from './tar-extract.mjs';
 import {
   artifactCacheRoot,
   artifactSourcePath,
@@ -26,7 +25,6 @@ import {
 } from './artifact-sources.mjs';
 import { isObject } from './util.mjs';
 
-const execFileAsync = promisify(execFile);
 const FLOW_API = 'https://openapi-rdc.aliyuncs.com/oapi/v1/flow/organizations';
 const FLOW_WEB = 'https://flow.aliyun.com/pipelines';
 const FLOW_PAGE_SIZE = 20;
@@ -423,43 +421,6 @@ async function downloadToFile(url, target, expectedTotal, onProgress) {
   return { size: downloaded, md5: hash.digest('hex') };
 }
 
-function isSafeEntry(name) {
-  if (!name || name.startsWith('/') || name.startsWith('\\')) return false;
-  if (/^[A-Za-z]:/.test(name)) return false;
-  return !name.split(/[\\/]/).some((part) => part === '..');
-}
-
-async function safeExtract(archive, destination) {
-  let listing;
-  try {
-    listing = await execFileAsync('tar', ['-tzf', archive], { maxBuffer: 32 * 1024 * 1024 });
-  } catch {
-    throw fail('构建物不是有效的 tar.gz 压缩包', 'ARTIFACT_ARCHIVE_INVALID');
-  }
-  for (const line of String(listing.stdout || '').split('\n')) {
-    const name = line.trim();
-    if (name && !isSafeEntry(name)) throw fail(`构建物包含非法路径：${name}`, 'ARTIFACT_ARCHIVE_UNSAFE');
-  }
-  let verbose;
-  try {
-    verbose = await execFileAsync('tar', ['-tvzf', archive], { maxBuffer: 32 * 1024 * 1024 });
-  } catch {
-    throw fail('无法检查压缩包内容，请重新选择完整的交付包', 'ARTIFACT_ARCHIVE_INVALID');
-  }
-  for (const line of String(verbose.stdout || '').split('\n')) {
-    if (!line) continue;
-    if (!line.startsWith('-') && !line.startsWith('d')) {
-      throw fail('交付包包含链接或特殊文件，无法解压，请重新打包后重试', 'ARTIFACT_ARCHIVE_UNSAFE');
-    }
-  }
-  await fs.mkdir(destination, { recursive: true, mode: 0o700 });
-  try {
-    await execFileAsync('tar', ['-xzf', archive, '-C', destination], { maxBuffer: 32 * 1024 * 1024 });
-  } catch {
-    throw fail('解包构建物失败', 'ARTIFACT_EXTRACT_FAILED');
-  }
-}
-
 async function countPayloadFiles(root, relative = '', totals = { files: 0, bytes: 0 }) {
   const entries = await fs.readdir(path.join(root, relative), { withFileTypes: true });
   for (const entry of entries) {
@@ -488,7 +449,10 @@ async function installArtifactArchive(archive, destination, version) {
   const staging = path.join(parent, `.unpack-${token}`);
   const backup = path.join(parent, `.previous-${token}`);
   try {
-    await safeExtract(archive, staging);
+    await safeExtract(archive, staging, {
+      maxBytes: MAX_EXTRACTED_BYTES,
+      maxFiles: MAX_EXTRACTED_FILES
+    });
     const bundle = await Bundle.load(staging, { appVersion: await appVersion() });
     await bundle.verifyPayload();
     if (bundle.version() !== version) {
