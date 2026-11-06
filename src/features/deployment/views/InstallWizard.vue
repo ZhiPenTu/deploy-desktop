@@ -95,6 +95,12 @@
       :is-remote="isRemote"
       :image-media-dir="imageMediaDir"
       v-model:image-source="imageSource"
+      :image-registry-source-id="imageRegistrySourceId"
+      :image-registry-password="imageRegistryPassword"
+      :image-registry-options="imageRegistryOptions"
+      :image-registry-needs-password="imageRegistryNeedsPassword"
+      :image-registry-mixed="imageRegistryMixed"
+      :image-registry-load-error="imageRegistryLoadError"
       :image-phase="imagePhase"
       :image-progress="imageProgress"
       :image-diagnostics="imageDiagnostics"
@@ -104,6 +110,8 @@
       @recheck="loadReview"
       @update:review-tab="reviewTab = $event"
       @update:image-media-dir="imageMediaDir = $event"
+      @update:image-registry-source-id="imageRegistrySourceId = $event"
+      @update:image-registry-password="imageRegistryPassword = $event"
       @pick-image-directory="pickImageDirectory"
       @prepare-images="prepareImages"
       @previous="previousStep"
@@ -206,6 +214,12 @@ const {
   reviewTab,
   imageMediaDir,
   imageSource,
+  imageRegistrySourceId,
+  imageRegistryPassword,
+  imageRegistryOptions,
+  imageRegistryNeedsPassword,
+  imageRegistryMixed,
+  imageRegistryLoadError,
   imagePhase,
   imageProgress,
   imageDiagnostics,

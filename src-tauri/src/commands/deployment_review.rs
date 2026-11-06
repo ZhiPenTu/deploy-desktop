@@ -3,6 +3,9 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
+
+use crate::core::process;
 
 use super::remote_ssh::{find_binary, resolve_existing_key, run_ssh_script, shell_quote};
 use super::remote_update::{
@@ -228,20 +231,25 @@ fn unique_images(services: &[ComposeServiceView]) -> Vec<String> {
 fn inspect_local_target(install: &Path, images: &[String]) -> Result<TargetSnapshot, String> {
     check_local_endpoint()?;
     let mut target = local_compose_snapshot(install)?;
-    target.docker_running = Command::new(find_binary("docker"))
-        .arg("info")
-        .output()
+    let mut info_command = Command::new(find_binary("docker"));
+    info_command.arg("info");
+    target.docker_running = run_local_docker(info_command, Duration::from_secs(15))
         .map(|output| output.status.success())
         .unwrap_or(false);
-    target.compose_available = Command::new(find_binary("docker"))
-        .args(["compose", "version"])
-        .output()
+    let mut compose_command = Command::new(find_binary("docker"));
+    compose_command.args(["compose", "version"]);
+    target.compose_available = run_local_docker(compose_command, Duration::from_secs(15))
         .map(|output| output.status.success())
         .unwrap_or(false);
+    let target_platform = if target.docker_running {
+        local_docker_platform().unwrap_or_default()
+    } else {
+        String::new()
+    };
     if target.docker_running {
-        let containers = Command::new(find_binary("docker"))
-            .args(["ps", "-aq"])
-            .output()
+        let mut ps_command = Command::new(find_binary("docker"));
+        ps_command.args(["ps", "-aq"]);
+        let containers = run_local_docker(ps_command, Duration::from_secs(15))
             .map_err(|_| "无法读取本机容器状态，请检查 Docker 后重试".to_string())?;
         if !containers.status.success() {
             return Err("无法读取本机容器状态，请检查 Docker 后重试".to_string());
@@ -253,10 +261,11 @@ fn inspect_local_target(install: &Path, images: &[String]) -> Result<TargetSnaps
             .filter(|id| !id.is_empty())
             .collect();
         if !ids.is_empty() {
-            let output = Command::new(find_binary("docker"))
+            let mut command = Command::new(find_binary("docker"));
+            command
                 .args(["inspect", "--format", CONTAINER_FORMAT, "--"])
-                .args(&ids)
-                .output()
+                .args(&ids);
+            let output = run_local_docker(command, Duration::from_secs(30))
                 .map_err(|_| "无法核对本机容器状态，请重试".to_string())?;
             if !output.status.success() {
                 return Err("无法核对本机容器状态，请重试".to_string());
@@ -278,17 +287,27 @@ fn inspect_local_target(install: &Path, images: &[String]) -> Result<TargetSnaps
         let state = if !target.docker_running || !valid_image_reference(reference) {
             "unconfirmed"
         } else {
-            match Command::new(find_binary("docker"))
-                .args(["image", "inspect", "--format", "{{.Id}}", "--", reference])
-                .output()
-            {
-                Ok(output)
-                    if output.status.success()
-                        && valid_image_id(String::from_utf8_lossy(&output.stdout).trim()) =>
-                {
-                    "ready"
+            let mut command = Command::new(find_binary("docker"));
+            command.args([
+                "image",
+                "inspect",
+                "--format",
+                "{{.Id}}|{{.Os}}/{{.Architecture}}",
+                "--",
+                reference,
+            ]);
+            match run_local_docker(command, Duration::from_secs(15)) {
+                Ok(output) if output.status.success() => {
+                    let text = String::from_utf8_lossy(&output.stdout);
+                    match text.trim().split_once('|') {
+                        Some((id, platform))
+                            if valid_image_id(id) && platform_matches(platform, &target_platform) =>
+                        {
+                            "ready"
+                        }
+                        _ => "unconfirmed",
+                    }
                 }
-                Ok(output) if output.status.success() => "unconfirmed",
                 Ok(output)
                     if String::from_utf8_lossy(&output.stderr)
                         .to_ascii_lowercase()
@@ -331,14 +350,14 @@ fn local_compose_snapshot(install: &Path) -> Result<TargetSnapshot, String> {
 }
 
 pub(super) fn check_local_endpoint() -> Result<(), String> {
-    let context = Command::new(find_binary("docker"))
-        .args([
-            "context",
-            "inspect",
-            "--format",
-            "{{.Endpoints.docker.Host}}",
-        ])
-        .output()
+    let mut command = Command::new(find_binary("docker"));
+    command.args([
+        "context",
+        "inspect",
+        "--format",
+        "{{.Endpoints.docker.Host}}",
+    ]);
+    let context = run_local_docker(command, Duration::from_secs(15))
         .map_err(|_| "无法读取 Docker 连接，请确认已安装 Docker".to_string())?;
     if !context.status.success() {
         return Err("无法读取 Docker 连接，请检查本机 Docker 配置后重试".to_string());
@@ -354,6 +373,55 @@ pub(super) fn check_local_endpoint() -> Result<(), String> {
         return Err("本机部署需要连接本机 Docker，请先切换 Docker 连接后重新核对".to_string());
     }
     Ok(())
+}
+
+fn run_local_docker(
+    command: Command,
+    timeout: Duration,
+) -> Result<std::process::Output, String> {
+    process::run(
+        command,
+        process::Input::Bytes(vec![]),
+        process::Options {
+            timeout,
+            ..Default::default()
+        },
+    )
+}
+
+fn local_docker_platform() -> Result<String, String> {
+    let mut command = Command::new(find_binary("docker"));
+    command.args(["info", "--format", "{{.OSType}}/{{.Architecture}}"]);
+    let output = run_local_docker(command, Duration::from_secs(15))?;
+    if !output.status.success() {
+        return Err("无法确认本机 Docker 平台，请检查 Docker 状态后重试".to_string());
+    }
+    let platform = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if platform.is_empty() {
+        return Err("未读取到本机 Docker 平台，请检查 Docker 状态后重试".to_string());
+    }
+    Ok(platform)
+}
+
+fn architecture(value: &str) -> &str {
+    match value {
+        "x86_64" | "amd64" => "amd64",
+        "aarch64" | "arm64" => "arm64",
+        other => other,
+    }
+}
+
+fn platform_matches(image: &str, target: &str) -> bool {
+    let Some((image_os, image_arch)) = image.trim().split_once('/') else {
+        return false;
+    };
+    let Some((target_os, target_arch)) = target.trim().split_once('/') else {
+        return false;
+    };
+    !image_os.is_empty()
+        && !target_os.is_empty()
+        && image_os == target_os
+        && architecture(image_arch) == architecture(target_arch)
 }
 
 fn local_endpoint(
@@ -458,6 +526,8 @@ fn target_script(install: &str, images: &[String]) -> String {
     let mut script = format!(
         r#"set -eu
 INSTALL={install}
+normalize_arch() {{ case "$1" in x86_64|amd64) printf 'amd64';; aarch64|arm64) printf 'arm64';; *) printf '%s' "$1";; esac; }}
+target_platform=$(docker info --format '{{{{.OSType}}}}/{{{{.Architecture}}}}' 2>/dev/null || true)
 {compose_location}
 if [ -d "$INSTALL" ] && [ ! -r "$INSTALL" ]; then exit 3; fi
 if [ -d "$DEPLOY" ] && [ ! -r "$DEPLOY" ]; then exit 3; fi
@@ -502,7 +572,7 @@ echo 'CONTAINERS_CHECKED=yes'
             continue;
         }
         script.push_str(&format!(
-            "if docker info >/dev/null 2>&1; then\n  if image_id=$(docker image inspect --format '{{{{.Id}}}}' -- {reference} 2>&1); then printf 'IMAGE|{index}|ready|%s\\n' \"$image_id\"; else\n    case \"$image_id\" in *[Nn]o\\ such\\ image*) echo 'IMAGE|{index}|missing';; *) echo 'IMAGE|{index}|unconfirmed';; esac\n  fi\nelse\n  echo 'IMAGE|{index}|unconfirmed'\nfi\n",
+            "if docker info >/dev/null 2>&1; then\n  if image_info=$(docker image inspect --format '{{{{.Id}}}}|{{{{.Os}}}}/{{{{.Architecture}}}}' -- {reference} 2>&1); then\n    image_id=${{image_info%%|*}}\n    image_platform=${{image_info#*|}}\n    target_os=${{target_platform%%/*}}\n    target_arch=${{target_platform#*/}}\n    image_os=${{image_platform%%/*}}\n    image_arch=${{image_platform#*/}}\n    if [ \"$image_os\" = \"$target_os\" ] && [ \"$(normalize_arch \"$image_arch\")\" = \"$(normalize_arch \"$target_arch\")\" ]; then\n      printf 'IMAGE|{index}|ready|%s\\n' \"$image_id\"\n    else\n      echo 'IMAGE|{index}|unconfirmed'\n    fi\n  else\n    case \"$image_info\" in *[Nn]o\\ such\\ image*) echo 'IMAGE|{index}|missing';; *) echo 'IMAGE|{index}|unconfirmed';; esac\n  fi\nelse\n  echo 'IMAGE|{index}|unconfirmed'\nfi\n",
             reference = shell_quote(reference),
         ));
     }
@@ -983,11 +1053,22 @@ mod tests {
         let digest = format!("registry.example.com/demo/web:1@sha256:{}", "a".repeat(64));
         let script = target_script("/srv/demo's directory", &[digest.clone()]);
         assert!(script.contains(&format!(
-            "docker image inspect --format '{{{{.Id}}}}' -- '{}'",
+            "docker image inspect --format '{{{{.Id}}}}|{{{{.Os}}}}/{{{{.Architecture}}}}' -- '{}'",
             digest
         )));
         assert!(!script.contains("docker images"));
         assert!(script.contains("INSTALL='/srv/demo'\\''s directory'"));
+        assert!(script.contains("normalize_arch()"));
+        assert!(script.contains("target_platform=$(docker info"));
+    }
+
+    #[test]
+    fn image_platform_must_match_the_docker_platform() {
+        assert!(platform_matches("linux/amd64", "linux/x86_64"));
+        assert!(platform_matches("linux/arm64", "linux/aarch64"));
+        assert!(!platform_matches("linux/arm64", "linux/amd64"));
+        assert!(!platform_matches("windows/amd64", "linux/amd64"));
+        assert!(!platform_matches("", "linux/amd64"));
     }
 
     #[test]
@@ -1215,10 +1296,13 @@ mod tests {
             &binary,
             r#"#!/bin/sh
 case "$1" in
-  info|compose) exit 0;;
+  info)
+    if [ "$2" = "--format" ]; then printf 'linux/amd64\n'; fi
+    exit 0;;
+  compose) exit 0;;
   ps) printf 'container-id\n';;
   inspect) printf '/demo-web\tnginx:1.27\trunning\tweb\t%s\thealthy\n' "$REVIEW_TEST_ROOT";;
-  image) printf 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n';;
+  image) printf 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|linux/amd64\n';;
   *) exit 1;;
 esac
 "#,

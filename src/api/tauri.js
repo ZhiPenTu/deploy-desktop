@@ -43,6 +43,7 @@ export {
   downloadDockerOfflinePackage,
   loadOfflineImages,
   exportDeploymentImages,
+  pullDeploymentImages,
   inspectBundlePlan,
   inspectBundleConfig,
   inspectDeploymentReview,

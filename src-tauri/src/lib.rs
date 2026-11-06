@@ -67,6 +67,7 @@ pub fn run() {
             inspect_remote_deployment,
             inspect_deployment_review,
             export_deployment_images,
+            pull_deployment_images,
             update_local_deployment,
             inspect_bundle_plan,
             inspect_bundle_config,

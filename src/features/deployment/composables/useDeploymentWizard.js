@@ -10,6 +10,7 @@ import {
   inspectBundlePlan,
   inspectDeploymentReview,
   isDesktopApp,
+  listRegistrySources,
   onImageLibraryProgress,
   onImageManagerProgress
 } from '../../../api/tauri.js';
@@ -22,7 +23,11 @@ import {
 } from '../domain/components.js';
 import { safeText, failureText } from '../domain/errors.js';
 import { invokeIncremental } from '../services/operations.js';
-import { prepareImagePackages, importImagePackages } from '../services/imagePreparation.js';
+import {
+  prepareImagePackages,
+  importImagePackages,
+  pullMissingImages
+} from '../services/imagePreparation.js';
 import { useEnvironmentCheck } from './useEnvironmentCheck.js';
 import { useExecutionFeedback } from './useExecutionFeedback.js';
 import { useHostAccess } from './useHostAccess.js';
@@ -69,15 +74,68 @@ export function useDeploymentWizard(config, emit) {
   const bundlePlan = ref(null),
     imageMediaDir = ref(''),
     importingImages = ref(false);
-  const imageSource = ref(isRemote.value ? 'docker' : 'offline');
+  const imageSource = ref('pull');
+  const imageRegistrySourceId = ref(''),
+    imageRegistryPassword = ref(''),
+    imageRegistrySources = ref([]),
+    imageRegistryLoadError = ref('');
+  const imageOperationRevision = ref(0);
   const imagePhase = ref(''),
     imageProgress = ref(null),
     imageDiagnostics = ref(''),
     imageResult = ref('');
 
-  watch(isRemote, (remote) => { imageSource.value = remote ? 'docker' : 'offline'; });
+  function registryOfReference(reference) {
+    const value = String(reference || '');
+    const first = value.split('/')[0];
+    return normalizeRegistry(
+      value.includes('/') && (first.includes('.') || first.includes(':') || first === 'localhost')
+        ? first
+        : 'docker.io'
+    );
+  }
+
+  function normalizeRegistry(value) {
+    const registry = String(value || '').trim().toLowerCase();
+    return registry === 'registry-1.docker.io' || registry === 'index.docker.io'
+      ? 'docker.io'
+      : registry;
+  }
+
+  const missingImageRegistries = computed(() =>
+    new Set((review.value?.missingImages || []).map(registryOfReference))
+  );
+  const imageRegistryMixed = computed(() => missingImageRegistries.value.size > 1);
+  const imageRegistryOptions = computed(() =>
+    imageRegistrySources.value.filter((source) => {
+      const registries = [...missingImageRegistries.value];
+      return registries.length > 0 &&
+        registries.every((registry) => registry === normalizeRegistry(source.address));
+    })
+  );
+  const selectedImageRegistrySource = computed(
+    () => imageRegistryOptions.value.find((source) => source.id === imageRegistrySourceId.value) || null
+  );
+  const imageRegistryNeedsPassword = computed(
+    () => Boolean(selectedImageRegistrySource.value?.username && !selectedImageRegistrySource.value?.hasPassword)
+  );
+
+  watch(isRemote, () => { imageSource.value = 'pull'; });
+  watch(imageRegistryOptions, (options) => {
+    if (!options.some((source) => source.id === imageRegistrySourceId.value)) {
+      imageRegistrySourceId.value = '';
+    }
+  });
+  watch(imageRegistrySourceId, () => { imageRegistryPassword.value = ''; });
+  watch(imageSource, (value) => {
+    if (value !== 'pull') imageRegistryPassword.value = '';
+  });
+  watch(activeStep, (step) => {
+    if (step !== 4) imageRegistryPassword.value = '';
+  });
   const receiveImageProgress = (event) => {
-    if (importingImages.value && event.phase !== 'done') {
+    if (importingImages.value && event.phase !== 'done' &&
+        imageOperationRevision.value !== 0) {
       imageProgress.value = { percent: Math.max(0, Math.min(100, Number(event.percent) || 0)),
         message: safeText(event.message) };
     }
@@ -150,6 +208,7 @@ export function useDeploymentWizard(config, emit) {
   );
 
   let revision = 0,
+    imageOperationSequence = 0,
     disposed = false;
 
   // Read-only SSH checks may continue after leaving; destructive work keeps its guard.
@@ -162,6 +221,8 @@ export function useDeploymentWizard(config, emit) {
     executionFeedback.stop();
     disposed = true;
     revision += 1;
+    imageRegistryPassword.value = '';
+    imageOperationRevision.value = 0;
     environment.dispose();
     emit('busy-change', false);
   });
@@ -195,6 +256,11 @@ export function useDeploymentWizard(config, emit) {
     bundlePlan.value = null;
     imageResult.value = '';
     imageDiagnostics.value = '';
+    imageRegistryPassword.value = '';
+    imageRegistryLoadError.value = '';
+    imagePhase.value = '';
+    imageProgress.value = null;
+    imageOperationRevision.value = 0;
     clearExecution();
   }
 
@@ -272,15 +338,24 @@ export function useDeploymentWizard(config, emit) {
     clearExecution();
     imageResult.value = '';
     imageDiagnostics.value = '';
+    imageRegistryLoadError.value = '';
     try {
       desktopGuard();
-      const [checked, plan] = await Promise.all([
+      const [checked, plan, registry] = await Promise.all([
         inspectDeploymentReview(preparedBundle.value.dir, config.installDir, target(), imageMediaDir.value),
-        inspectBundlePlan(preparedBundle.value.dir, target())
+        inspectBundlePlan(preparedBundle.value.dir, target()),
+        listRegistrySources()
+          .then((sources) => ({ sources: Array.isArray(sources) ? sources : [], error: '' }))
+          .catch((error) => ({
+            sources: [],
+            error: `读取镜像源失败：${safeText(error?.message || error) || '请稍后重试'}`
+          }))
       ]);
       if (current !== revision || disposed) return;
       review.value = checked;
       bundlePlan.value = plan;
+      imageRegistrySources.value = registry.sources;
+      imageRegistryLoadError.value = registry.error;
     } catch (error) {
       if (current === revision && !disposed) reviewError.value = failureText(error, '清单比对');
     } finally {
@@ -304,7 +379,14 @@ export function useDeploymentWizard(config, emit) {
 
   async function prepareImages() {
     if (busy.value || !preparedBundle.value || !review.value?.missingImages?.length) return;
-    const current = revision;
+    if (imageSource.value === 'pull' && imageRegistryNeedsPassword.value && !imageRegistryPassword.value) {
+      reviewError.value = '请填写所选镜像源本次使用的密码';
+      imageDiagnostics.value = '';
+      imageResult.value = '';
+      return;
+    }
+    const operation = ++imageOperationSequence;
+    imageOperationRevision.value = operation;
     const context = Object.freeze({
       source: imageSource.value,
       bundleDir: preparedBundle.value.dir,
@@ -313,6 +395,8 @@ export function useDeploymentWizard(config, emit) {
       label: targetLabel.value,
       target: target() ? Object.freeze({ ...target() }) : null,
       references: Object.freeze([...new Set(review.value.missingImages)]),
+      registrySourceId: imageSource.value === 'pull' ? imageRegistrySourceId.value : '',
+      password: imageSource.value === 'pull' ? imageRegistryPassword.value : '',
       remoteDir: `${config.installDir.replace(/\/+$/, '')}/bundle-images-${crypto.randomUUID()}`
     });
     importingImages.value = true;
@@ -322,42 +406,82 @@ export function useDeploymentWizard(config, emit) {
     imageProgress.value = null;
     clearExecution();
     const setImagePhase = (message) => {
-      if (disposed || current !== revision) throw new Error('部署目标已变化，请重新选择项目并比对');
+      if (disposed || imageOperationRevision.value !== operation) {
+        throw new Error('部署目标已变化，请重新选择项目并比对');
+      }
       imagePhase.value = message;
       imageProgress.value = null;
     };
     try {
       desktopGuard();
       try {
+        const sourceText =
+          context.source === 'docker'
+            ? '从本机 Docker 导出'
+            : context.source === 'offline'
+              ? '从离线目录读取'
+              : '按清单地址拉取';
+        const destinationText =
+          context.source === 'pull'
+            ? context.target
+              ? `到${context.label}的 Docker`
+              : '到本机 Docker'
+            : context.target
+              ? `，传输到 ${context.remoteDir}/images 后解压并导入 Docker`
+              : '并导入本机 Docker';
+        const retentionText =
+          context.source === 'pull'
+            ? '拉取完成后会重新核对，运行中的服务不会重启。'
+            : '镜像包会保留并占用磁盘空间，运行中的服务不会重启。';
         await ElMessageBox.confirm(
-          `目标：${context.label}。将${context.source === 'docker' ? '从本机 Docker 导出' : '从离线目录读取'} ${context.references.length} 个缺失镜像${
-            context.target ? `，传输到 ${context.remoteDir}/images 后解压并导入 Docker` : '并导入本机 Docker'
-          }。镜像包会保留并占用磁盘空间，运行中的服务不会重启。是否继续？`,
-          '确认导入镜像',
-          { type: 'warning', confirmButtonText: context.target ? '传输并导入' : '导入', cancelButtonText: '取消', closeOnClickModal: false }
+          `目标：${context.label}。将${sourceText} ${context.references.length} 个缺失镜像${destinationText}。${retentionText}是否继续？`,
+          context.source === 'pull' ? '确认拉取镜像' : '确认导入镜像',
+          {
+            type: 'warning',
+            confirmButtonText:
+              context.source === 'pull' ? '开始拉取' : context.target ? '传输并导入' : '导入',
+            cancelButtonText: '取消',
+            closeOnClickModal: false
+          }
         );
       } catch {
         return;
       }
-      if (disposed || current !== revision) return;
-      const packages = await prepareImagePackages(context, setImagePhase);
-      await importImagePackages(context, packages, setImagePhase);
-      setImagePhase('正在重新核对目标主机镜像');
+      if (disposed || imageOperationRevision.value !== operation) return;
+      if (context.source === 'pull') {
+        await pullMissingImages(context, setImagePhase);
+      } else {
+        const packages = await prepareImagePackages(context, setImagePhase);
+        await importImagePackages(context, packages, setImagePhase);
+      }
+      setImagePhase('正在重新核对目标镜像');
       await loadReview();
-      if (!review.value) throw new Error('镜像导入后未能确认目标状态，请重新比对');
+      if (!review.value) throw new Error('镜像准备后未能确认目标状态，请重新比对');
       if (review.value.images?.some((image) => image.status !== 'ready') ||
           context.references.some((reference) => !review.value.images?.some((image) =>
             image.imageRef === reference && image.status === 'ready'))) {
-        throw new Error('导入后仍有镜像缺失或未确认，请确认镜像包包含清单要求的完整镜像地址与摘要后重新比对');
+        throw new Error(
+          context.source === 'pull'
+            ? '拉取后仍有镜像缺失或未确认，请检查镜像地址、仓库权限与目标主机网络后重新比对'
+            : '导入后仍有镜像缺失或未确认，请确认镜像包包含清单要求的完整镜像地址与摘要后重新比对'
+        );
       }
-      imageResult.value = '缺失镜像已导入，目标主机镜像核对通过。';
+      imageResult.value =
+        context.source === 'pull'
+          ? '缺失镜像已拉取，目标镜像核对通过。'
+          : `缺失镜像已导入，${context.target ? '目标主机' : '目标'}镜像核对通过。`;
     } catch (error) {
-      reviewError.value = failureText(safeText(error?.message || error), '准备镜像');
-      imageDiagnostics.value = safeText(error?.message || error);
+      if (imageOperationRevision.value === operation && !disposed) {
+        const message = safeText(error?.message || error);
+        reviewError.value = message || failureText(message, '准备镜像');
+        imageDiagnostics.value = message;
+      }
     } finally {
       importingImages.value = false;
       imagePhase.value = '';
       imageProgress.value = null;
+      imageRegistryPassword.value = '';
+      imageOperationRevision.value = 0;
     }
   }
 
@@ -515,5 +639,5 @@ export function useDeploymentWizard(config, emit) {
 
   const { progressStep, progressPercent, progressMessage, elapsedText } = executionFeedback;
 
-  return { steps, activeStep, selectedHost, isRemote, targetLabel, hostReady, testingSsh, settingKey, sshMessage, sshOk, envData, envError, checkingEnv, installingDocker, artifactPicker, candidate, preparedBundle, artifactBusy, review, reviewError, checkingReview, reviewTab, imageMediaDir, imageSource, imagePhase, imageProgress, imageDiagnostics, imageResult, importingImages, deploymentAction, selectedComponents, backup, executing, preflighting, preflightPassed, phase, operationError, diagnostics, result, busy, environmentReady, componentOptions, canExecute, artifactChosen, artifactPrepared, testConnection, setupAccess, checkEnvironment, installDocker, nextStep, previousStep, loadReview, pickImageDirectory, prepareImages, runPreflight, executeDeployment, progressStep, progressPercent, progressMessage, elapsedText };
+  return { steps, activeStep, selectedHost, isRemote, targetLabel, hostReady, testingSsh, settingKey, sshMessage, sshOk, envData, envError, checkingEnv, installingDocker, artifactPicker, candidate, preparedBundle, artifactBusy, review, reviewError, checkingReview, reviewTab, imageMediaDir, imageSource, imageRegistrySourceId, imageRegistryPassword, imageRegistryOptions, imageRegistryNeedsPassword, imageRegistryMixed, imageRegistryLoadError, imagePhase, imageProgress, imageDiagnostics, imageResult, importingImages, deploymentAction, selectedComponents, backup, executing, preflighting, preflightPassed, phase, operationError, diagnostics, result, busy, environmentReady, componentOptions, canExecute, artifactChosen, artifactPrepared, testConnection, setupAccess, checkEnvironment, installDocker, nextStep, previousStep, loadReview, pickImageDirectory, prepareImages, runPreflight, executeDeployment, progressStep, progressPercent, progressMessage, elapsedText };
 }

@@ -76,7 +76,13 @@ pub(crate) fn ensure_key_permissions(_path: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn ssh_base_command(host: &str, port: u16, user: &str, key: Option<&str>) -> Command {
+fn ssh_base_command_with_policy(
+    host: &str,
+    port: u16,
+    user: &str,
+    key: Option<&str>,
+    strict_host_key: bool,
+) -> Command {
     let mut cmd = Command::new(find_binary("ssh"));
     cmd.args([
         "-o",
@@ -84,7 +90,11 @@ pub(crate) fn ssh_base_command(host: &str, port: u16, user: &str, key: Option<&s
         "-o",
         "ConnectTimeout=8",
         "-o",
-        "StrictHostKeyChecking=no",
+        if strict_host_key {
+            "StrictHostKeyChecking=yes"
+        } else {
+            "StrictHostKeyChecking=no"
+        },
         "-o",
         "LogLevel=ERROR",
         "-o",
@@ -99,6 +109,32 @@ pub(crate) fn ssh_base_command(host: &str, port: u16, user: &str, key: Option<&s
     }
     cmd.arg(format!("{user}@{host}"));
     cmd
+}
+
+pub(crate) fn ssh_base_command(host: &str, port: u16, user: &str, key: Option<&str>) -> Command {
+    ssh_base_command_with_policy(host, port, user, key, false)
+}
+
+pub(crate) fn known_host_token(host: &str, port: u16) -> String {
+    if port == 22 {
+        host.to_owned()
+    } else {
+        format!("[{host}]:{port}")
+    }
+}
+
+pub(crate) fn ensure_known_host(host: &str, port: u16) -> Result<(), String> {
+    let token = known_host_token(host, port);
+    let output = Command::new(find_binary("ssh-keygen"))
+        .args(["-F", &token])
+        .output()
+        .map_err(|_| String::from("无法确认目标主机身份，请检查本机 OpenSSH 配置后重试"))?;
+    if output.status.success() && !output.stdout.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "目标主机 {token} 的 SSH 指纹尚未在本机确认。发送镜像仓库凭据前，请先用系统 SSH 连接并确认主机指纹，或改用离线镜像包。"
+    ))
 }
 
 pub(crate) fn run_ssh_script(
@@ -126,8 +162,47 @@ pub(crate) fn run_ssh_script_with_timeout(
     script: &str,
     timeout: std::time::Duration,
 ) -> Result<Output, String> {
+    run_ssh_script_with_policy(
+        host,
+        port,
+        user,
+        key,
+        script,
+        timeout,
+        false,
+    )
+}
+
+pub(crate) fn run_ssh_script_strict_with_timeout(
+    host: &str,
+    port: u16,
+    user: &str,
+    key: Option<&str>,
+    script: &str,
+    timeout: std::time::Duration,
+) -> Result<Output, String> {
+    run_ssh_script_with_policy(
+        host,
+        port,
+        user,
+        key,
+        script,
+        timeout,
+        true,
+    )
+}
+
+fn run_ssh_script_with_policy(
+    host: &str,
+    port: u16,
+    user: &str,
+    key: Option<&str>,
+    script: &str,
+    timeout: std::time::Duration,
+    strict_host_key: bool,
+) -> Result<Output, String> {
     use crate::core::{process, shell};
-    let mut cmd = ssh_base_command(host, port, user, key);
+    let mut cmd = ssh_base_command_with_policy(host, port, user, key, strict_host_key);
     cmd.arg(shell::BASH_STDIN);
     process::run(
         cmd,
@@ -203,4 +278,18 @@ pub(crate) fn base64_encode(input: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout)
         .split_whitespace()
         .collect::<String>())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn known_host_token_includes_non_default_port() {
+        assert_eq!(known_host_token("host.example.com", 22), "host.example.com");
+        assert_eq!(
+            known_host_token("host.example.com", 2222),
+            "[host.example.com]:2222"
+        );
+    }
 }

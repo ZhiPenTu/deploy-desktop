@@ -41,6 +41,19 @@ export async function exportDeploymentImages(bundleDir, references, target) {
   });
 }
 
+export async function pullDeploymentImages(bundleDir, references, target = null, registrySourceId = null, password = null) {
+  return await invokeDesktop('pull_deployment_images', {
+    bundleDir,
+    references,
+    host: target?.host || null,
+    port: target?.port ?? null,
+    user: target?.user || null,
+    keyPath: target?.keyPath || null,
+    registrySourceId: registrySourceId || null,
+    password: password || null
+  });
+}
+
 export async function inspectBundlePlan(bundleDir, target = null) {
   return await invokeRead('inspect_bundle_plan', {
     bundleDir,

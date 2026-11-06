@@ -11,6 +11,7 @@ export async function useDesktopBackend(
     artifactTokens = [],
     artifactReleases = [],
     dockerImages = [],
+    registrySources = [],
     offlineDir = '',
     offlinePackages = [],
     projects = [],
@@ -36,6 +37,7 @@ export async function useDesktopBackend(
     initialTokens,
     initialReleases,
     initialImages,
+    initialRegistrySources,
     initialOfflineDir,
     initialPackages,
     initialProjects,
@@ -60,6 +62,7 @@ export async function useDesktopBackend(
       tokens: structuredClone(initialTokens),
       releases: structuredClone(initialReleases),
       images: structuredClone(initialImages),
+      registrySources: structuredClone(initialRegistrySources),
       offlineDir: initialOfflineDir,
       packages: structuredClone(initialPackages),
       projects: structuredClone(initialProjects),
@@ -239,7 +242,7 @@ export async function useDesktopBackend(
             state.tokens = state.tokens.filter((item) => item.id !== args.id);
             return null;
           case 'list_registry_sources':
-            return [];
+            return state.registrySources.map((item) => ({ ...item }));
           case 'list_cached_artifact_releases':
             return { page: 1, hasMore: false, items: [] };
           case 'list_artifact_releases':
@@ -273,6 +276,7 @@ export async function useDesktopBackend(
     initialTokens: artifactTokens,
     initialReleases: artifactReleases,
     initialImages: dockerImages,
+    initialRegistrySources: registrySources,
     initialOfflineDir: offlineDir,
     initialPackages: offlinePackages,
     initialProjects: projects,

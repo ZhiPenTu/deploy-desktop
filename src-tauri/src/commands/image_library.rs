@@ -2,12 +2,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{ErrorKind, Write};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::UNIX_EPOCH;
+use std::process::Command;
+use std::time::{Duration, UNIX_EPOCH};
 
 use tauri::{AppHandle, Emitter, Manager};
+
+use crate::core::process;
 
 use super::registry_sources::{reference_from_source, source_access, source_credentials};
 use super::remote_ssh::find_binary;
@@ -659,7 +661,7 @@ fn docker_command_error(error: std::io::Error) -> String {
     }
 }
 
-fn docker_failure(stderr: &str) -> String {
+pub(super) fn docker_failure(stderr: &str) -> String {
     let text = stderr.trim();
     if text.is_empty() {
         return "Docker 命令执行失败，未返回错误信息".to_string();
@@ -723,11 +725,11 @@ fn validate_pull_reference(reference: &str) -> Result<String, String> {
     Ok(value)
 }
 
-fn redact_secret(text: &str, password: &str) -> String {
+pub(super) fn redact_secret(text: &str, password: &str) -> String {
     if password.is_empty() { text.to_string() } else { text.replace(password, "[已隐藏]") }
 }
 
-fn registry_for_reference(reference: &str) -> String {
+pub(super) fn registry_for_reference(reference: &str) -> String {
     let first = reference.split('/').next().unwrap_or("");
     if reference.contains('/')
         && (first.contains('.') || first.contains(':') || first == "localhost")
@@ -747,21 +749,20 @@ pub(super) fn login_docker(
     let mut command = Command::new(find_binary("docker"));
     command
         .args(["login", registry, "-u", username, "--password-stdin"])
-        .env("DOCKER_CONFIG", docker_config)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command.spawn().map_err(docker_command_error)?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(password.as_bytes())
-            .map_err(|e| format!("写入仓库密码失败：{e}"))?;
-    }
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("等待 Docker 登录失败：{e}"))?;
+        .env("DOCKER_CONFIG", docker_config);
+    let output = process::run(
+        command,
+        process::Input::Bytes(password.as_bytes().to_vec()),
+        process::Options {
+            timeout: Duration::from_secs(60),
+            ..Default::default()
+        },
+    )
+    .map_err(|_| String::from("镜像源登录失败，请检查用户名、密码、网络和仓库证书"))?;
     if !output.status.success() {
-        return Err("镜像源登录失败，请检查用户名、密码、网络和仓库证书".to_string());
+        return Err(String::from(
+            "镜像源登录失败，请检查用户名、密码、网络和仓库证书",
+        ));
     }
     Ok(())
 }
@@ -788,12 +789,87 @@ impl TempDockerConfig {
         }
         Ok(Self { path })
     }
+
+    pub(super) fn create_for_current_context() -> Result<Self, String> {
+        let source = std::env::var_os("DOCKER_CONFIG")
+            .map(PathBuf::from)
+            .filter(|path| path.is_dir())
+            .or_else(|| {
+                dirs::home_dir()
+                    .map(|home| home.join(".docker"))
+                    .filter(|path| path.is_dir())
+            });
+        Self::create_from(source.as_deref())
+    }
+
+    fn create_from(source: Option<&Path>) -> Result<Self, String> {
+        let config = Self::create()?;
+        if let Some(source) = source {
+            copy_docker_context(source, &config.path)?;
+        }
+        Ok(config)
+    }
 }
 
 impl Drop for TempDockerConfig {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.path);
     }
+}
+
+fn copy_docker_context(source: &Path, target: &Path) -> Result<(), String> {
+    let config_path = source.join("config.json");
+    match fs::read(&config_path) {
+        Ok(bytes) => {
+            let value: Value = serde_json::from_slice(&bytes)
+                .map_err(|_| String::from("无法读取本机 Docker 配置中的当前上下文，请检查 Docker 配置后重试"))?;
+            let mut minimal = serde_json::Map::new();
+            for key in ["currentContext", "HttpHeaders"] {
+                if let Some(value) = value.get(key) {
+                    minimal.insert(key.to_owned(), value.clone());
+                }
+            }
+            let content = serde_json::to_vec_pretty(&Value::Object(minimal))
+                .map_err(|error| format!("准备 Docker 配置失败：{error}"))?;
+            write_private_file(&target.join("config.json"), &content)?;
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("无法读取本机 Docker 配置：{error}")),
+    }
+    copy_dir_if_exists(&source.join("contexts"), &target.join("contexts"))?;
+    copy_dir_if_exists(&source.join("certs.d"), &target.join("certs.d"))?;
+    Ok(())
+}
+
+fn write_private_file(path: &Path, content: &[u8]) -> Result<(), String> {
+    fs::write(path, content).map_err(|error| format!("写入 Docker 配置失败：{error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
+fn copy_dir_if_exists(source: &Path, target: &Path) -> Result<(), String> {
+    if !source.is_dir() {
+        return Ok(());
+    }
+    fs::create_dir_all(target).map_err(|error| format!("创建 Docker 配置目录失败：{error}"))?;
+    for entry in fs::read_dir(source).map_err(|error| format!("读取 Docker 配置目录失败：{error}"))? {
+        let entry = entry.map_err(|error| format!("读取 Docker 配置目录失败：{error}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("读取 Docker 配置失败：{error}"))?;
+        let destination = target.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_if_exists(&entry.path(), &destination)?;
+        } else if file_type.is_file() {
+            fs::copy(entry.path(), &destination)
+                .map_err(|error| format!("复制 Docker 配置失败：{error}"))?;
+        }
+    }
+    Ok(())
 }
 
 fn parse_docker_size(text: &str) -> u64 {
@@ -1422,6 +1498,46 @@ mod tests {
             unique_archive_name("app", &manifest, &existing),
             "app-2.tar"
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn temp_docker_config_keeps_context_and_drops_saved_credentials() {
+        let dir = temp_dir("docker-context");
+        let source = dir.join("source");
+        fs::create_dir_all(source.join("contexts/meta/demo")).unwrap();
+        fs::create_dir_all(source.join("certs.d/registry.example.com")).unwrap();
+        fs::write(
+            source.join("config.json"),
+            r#"{
+                "currentContext": "orbstack",
+                "credsStore": "desktop",
+                "auths": {"registry.example.com": {"auth": "secret"}}
+            }"#,
+        )
+        .unwrap();
+        fs::write(source.join("contexts/meta/demo/meta.json"), b"{}").unwrap();
+        fs::write(
+            source.join("certs.d/registry.example.com/ca.crt"),
+            b"certificate",
+        )
+        .unwrap();
+
+        let config = TempDockerConfig::create_from(Some(&source)).unwrap();
+        let copied: serde_json::Value =
+            serde_json::from_slice(&fs::read(config.path.join("config.json")).unwrap()).unwrap();
+        assert_eq!(copied["currentContext"], "orbstack");
+        assert!(copied.get("credsStore").is_none());
+        assert!(copied.get("auths").is_none());
+        assert!(config.path.join("contexts/meta/demo/meta.json").is_file());
+        assert!(config
+            .path
+            .join("certs.d/registry.example.com/ca.crt")
+            .is_file());
+
+        let path = config.path.clone();
+        drop(config);
+        assert!(!path.exists());
         let _ = fs::remove_dir_all(&dir);
     }
 }

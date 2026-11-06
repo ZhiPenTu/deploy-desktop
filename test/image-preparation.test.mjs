@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, test } from 'node:test';
 import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
-import { prepareImagePackages, importImagePackages } from '../src/features/deployment/services/imagePreparation.js';
+import {
+  prepareImagePackages,
+  importImagePackages,
+  pullMissingImages
+} from '../src/features/deployment/services/imagePreparation.js';
 
 const reference = `demo/api@sha256:${'a'.repeat(64)}`;
 const context = {
@@ -95,4 +99,61 @@ test('import failure or missing result is not reported as complete', async () =>
     });
     await assert.rejects(importImagePackages(context, { root: '/offline', files: ['api.tar'] }, () => {}));
   }
+});
+
+test('pull source requests exact missing references for a remote target', async () => {
+  const calls = [];
+  mockIPC((command, args) => {
+    calls.push({ command, args });
+    return [
+      { reference, message: '已在目标主机拉取并确认' },
+      { reference: 'demo/worker:1', message: '已在目标主机拉取并确认' }
+    ];
+  });
+  const pulled = await pullMissingImages({
+    ...context,
+    source: 'pull',
+    references: [reference, 'demo/worker:1'],
+    registrySourceId: 'registry-1',
+    password: 'secret'
+  }, () => {});
+  assert.equal(pulled.length, 2);
+  assert.deepEqual(calls, [{
+    command: 'pull_deployment_images',
+    args: {
+      bundleDir: '/bundle',
+      references: [reference, 'demo/worker:1'],
+      host: 'host.example.com',
+      port: 2222,
+      user: 'deploy',
+      keyPath: '/key',
+      registrySourceId: 'registry-1',
+      password: 'secret'
+    }
+  }]);
+});
+
+test('local pull sends empty target fields and rejects incomplete confirmation', async () => {
+  const calls = [];
+  mockIPC((command, args) => {
+    calls.push({ command, args });
+    return [{ reference, message: '已拉取并确认' }];
+  });
+  await pullMissingImages({ ...context, source: 'pull', target: null }, () => {});
+  assert.deepEqual(calls[0].args, {
+    bundleDir: '/bundle',
+    references: [reference],
+    host: null,
+    port: null,
+    user: null,
+    keyPath: null,
+    registrySourceId: null,
+    password: null
+  });
+
+  mockIPC(() => [{ reference: 'demo/other:1', message: '已拉取并确认' }]);
+  await assert.rejects(
+    pullMissingImages({ ...context, source: 'pull' }, () => {}),
+    /未确认镜像/
+  );
 });

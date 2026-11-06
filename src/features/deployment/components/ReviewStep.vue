@@ -103,23 +103,61 @@
       <div v-if="review.missingImages?.length" class="image-preparation">
         <h4>准备缺失镜像</h4>
         <el-radio-group
-          v-if="isRemote"
           :model-value="imageSource"
           :disabled="busy"
           aria-label="镜像来源"
           @update:model-value="(value) => emit('update:image-source', value)"
         >
-          <el-radio-button value="docker">本机 Docker</el-radio-button>
+          <el-radio-button value="pull">镜像仓库</el-radio-button>
+          <el-radio-button v-if="isRemote" value="docker">本机 Docker</el-radio-button>
           <el-radio-button value="offline">离线镜像包</el-radio-button>
         </el-radio-group>
-        <p v-if="isRemote && imageSource === 'docker'" class="field-hint">
+        <p v-if="imageSource === 'pull'" class="field-hint">
+          按清单中的镜像地址拉取 {{ review.missingImages.length }} 个缺失镜像到{{ isRemote ? '目标主机' : '本机' }} Docker，拉取完成后自动重新比对。
+        </p>
+        <p v-else-if="isRemote && imageSource === 'docker'" class="field-hint">
           从本机 Docker 导出 {{ review.missingImages.length }} 个缺失镜像，传输到 {{ targetLabel }} 后解压并导入。请先在本机准备与目标主机架构一致的镜像。
         </p>
         <p v-else class="field-hint">
           选择本机离线镜像包目录{{ isRemote ? '，仅传输缺失镜像对应的镜像包，随后在目标主机解压并导入。' : '（含 images/），将其中的镜像包导入本机。' }}导入后会重新比对。
         </p>
+        <div v-if="imageSource === 'pull'" class="registry-pull-fields">
+          <el-select
+            :model-value="imageRegistrySourceId"
+            :disabled="busy"
+            clearable
+            :placeholder="loginStateLabel"
+            aria-label="登录镜像源"
+            @update:model-value="(value) => emit('update:image-registry-source-id', value || '')"
+          >
+            <el-option :label="loginStateLabel" value="" />
+            <el-option
+              v-for="source in imageRegistryOptions"
+              :key="source.id"
+              :label="`${source.name}（${source.address}）`"
+              :value="source.id"
+            />
+          </el-select>
+          <el-input
+            v-if="imageRegistryNeedsPassword"
+            :model-value="imageRegistryPassword"
+            :disabled="busy"
+            type="password"
+            show-password
+            autocomplete="new-password"
+            placeholder="本次使用的密码或令牌"
+            aria-label="镜像源密码"
+            @update:model-value="(value) => emit('update:image-registry-password', value)"
+          />
+          <p v-if="imageRegistryLoadError" class="field-hint">
+            {{ imageRegistryLoadError }}；仍可按清单地址尝试公开拉取。
+          </p>
+          <p v-else class="field-hint">
+            {{ registryHint }}
+          </p>
+        </div>
         <div class="input-row wrap">
-          <template v-if="!isRemote || imageSource === 'offline'">
+          <template v-if="imageSource === 'offline'">
             <el-input
               :model-value="imageMediaDir"
               :disabled="busy"
@@ -135,7 +173,7 @@
             :disabled="busy"
             @click="emit('prepare-images')"
           >
-            {{ isRemote ? '传输并导入缺失镜像' : '导入镜像并比对' }}
+            {{ prepareButtonText }}
           </el-button>
         </div>
       </div>
@@ -156,7 +194,7 @@
 </template>
 
 <script setup>
-import { ref, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { ArrowRight } from '@element-plus/icons-vue';
 import ConfigDiffDialog from './ConfigDiffDialog.vue';
 import { changeLabel, stateLabel } from '../domain/review.js';
@@ -172,7 +210,13 @@ const props = defineProps({
   bundleDir: { type: String, default: '' },
   isRemote: { type: Boolean, default: false },
   imageMediaDir: { type: String, default: '' },
-  imageSource: { type: String, default: 'docker' },
+  imageSource: { type: String, default: 'pull' },
+  imageRegistrySourceId: { type: String, default: '' },
+  imageRegistryPassword: { type: String, default: '' },
+  imageRegistryOptions: { type: Array, default: () => [] },
+  imageRegistryNeedsPassword: { type: Boolean, default: false },
+  imageRegistryMixed: { type: Boolean, default: false },
+  imageRegistryLoadError: { type: String, default: '' },
   imagePhase: { type: String, default: '' },
   imageProgress: { type: Object, default: null },
   imageDiagnostics: { type: String, default: '' },
@@ -186,6 +230,8 @@ const emit = defineEmits([
   'update:review-tab',
   'update:image-media-dir',
   'update:image-source',
+  'update:image-registry-source-id',
+  'update:image-registry-password',
   'pick-image-directory',
   'prepare-images',
   'previous',
@@ -194,6 +240,22 @@ const emit = defineEmits([
 
 const configDiffOpen = ref(false);
 const configDiffService = ref('');
+const loginStateLabel = computed(() =>
+  props.isRemote ? '使用目标机已有登录状态' : '使用本机已有登录状态'
+);
+const registryHint = computed(() => {
+  if (props.imageRegistryMixed) {
+    return `缺失镜像来自多个镜像仓库，当前只能${loginStateLabel.value}或公开访问；私有镜像请先在各仓库完成登录，或改用离线镜像包。`;
+  }
+  if (props.imageRegistryOptions.length) {
+    return '仅列出与缺失镜像仓库地址一致的镜像源；公开镜像可留空。凭据只用于本次拉取。';
+  }
+  return '未找到与缺失镜像仓库地址一致的镜像源。公开镜像可直接拉取；私有镜像请先在“设置 > 镜像设置”中配置对应镜像源。';
+});
+const prepareButtonText = computed(() => {
+  if (props.imageSource === 'pull') return '拉取缺失镜像';
+  return props.isRemote ? '传输并导入缺失镜像' : '导入镜像并比对';
+});
 
 function openConfigDiff(serviceName = '') {
   configDiffService.value = serviceName;
@@ -296,6 +358,21 @@ h3 {
 }
 .image-preparation .el-radio-group {
   margin-top: 14px;
+}
+.registry-pull-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 14px;
+}
+.registry-pull-fields .el-select,
+.registry-pull-fields .el-input {
+  flex: 1;
+  min-width: 220px;
+}
+.registry-pull-fields .field-hint {
+  width: 100%;
+  margin-top: 0;
 }
 .image-progress {
   margin-top: 16px;

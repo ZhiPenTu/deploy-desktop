@@ -3,6 +3,7 @@ import {
   importRemoteImageBundle,
   inspectDeploymentReview,
   loadOfflineImages,
+  pullDeploymentImages,
   scanLocalImageBundle,
   uploadRemoteImageBundle
 } from '../../../api/tauri.js';
@@ -67,4 +68,25 @@ export async function importImagePackages(context, packages, onPhase) {
     const imported = await loadOfflineImages(packages.root);
     if (!Array.isArray(imported) || !imported.length) throw new Error('镜像导入结果未确认，请重新比对');
   }
+}
+
+export async function pullMissingImages(context, onPhase) {
+  if (!Array.isArray(context.references) || !context.references.length) {
+    throw new Error('没有需要拉取的缺失镜像，请重新比对');
+  }
+  onPhase(context.target ? '正在目标主机拉取缺失镜像' : '正在本机拉取缺失镜像');
+  const pulled = await pullDeploymentImages(
+    context.bundleDir,
+    context.references,
+    context.target,
+    context.registrySourceId,
+    context.password
+  );
+  if (!Array.isArray(pulled) || pulled.length !== context.references.length) {
+    throw new Error('镜像拉取结果不完整，请重新比对');
+  }
+  const confirmed = new Set(pulled.map((item) => item?.reference).filter(Boolean));
+  const missing = context.references.find((reference) => !confirmed.has(reference));
+  if (missing) throw new Error(`未确认镜像 ${missing} 的拉取结果，请重新比对`);
+  return pulled;
 }

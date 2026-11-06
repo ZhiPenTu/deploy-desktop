@@ -342,14 +342,16 @@ async function setupImageTransfer(page, options = {}) {
     activeProjectId: project.id, remoteEnv: localEnv,
     dialogPath: demoPreparedBundle.dir, preparedBundle: demoPreparedBundle,
     bundlePlan: demoBundlePlan,
-    deploymentReview: { ...demoDeploymentReview, ready: false, canIncrementalUpdate: false }
+    deploymentReview: { ...demoDeploymentReview, ready: false, canIncrementalUpdate: false },
+    registrySources: options.registrySources || []
   });
   await page.addInitScript(({ initialReview, options }) => {
     const original = window.__TAURI_INTERNALS__.invoke;
     let imported = false;
+    let pulled = false;
     window.__TAURI_INTERNALS__.invoke = async (command, args = {}) => {
       const handled = ['export_deployment_images', 'upload_remote_image_bundle',
-        'import_remote_image_bundle', 'scan_local_image_bundle'];
+        'import_remote_image_bundle', 'scan_local_image_bundle', 'pull_deployment_images'];
       if (handled.includes(command)) {
         window.__deployTestCalls.push({ command, args });
         if (command === options.failCommand) throw '测试操作失败，请重新比对。';
@@ -362,11 +364,15 @@ async function setupImageTransfer(page, options = {}) {
         }];
         if (command === 'scan_local_image_bundle') return { files: [{ name: 'api.tar.gz' }, { name: 'other.tar' }] };
         if (command === 'import_remote_image_bundle') imported = true;
+        if (command === 'pull_deployment_images') {
+          pulled = true;
+          return [{ reference: 'demo/api:1.4.0', message: '已在目标主机拉取并确认' }];
+        }
         return ['完成'];
       }
-      if (command === 'inspect_deployment_review' && (imported || options.offline)) {
+      if (command === 'inspect_deployment_review' && (imported || pulled || options.offline)) {
         window.__deployTestCalls.push({ command, args });
-        const ready = imported && !options.stillMissing;
+        const ready = (imported || pulled) && !options.stillMissing;
         return {
           ...initialReview, ready, canIncrementalUpdate: ready,
           missingImages: ready ? [] : ['demo/api:1.4.0'],
@@ -374,6 +380,51 @@ async function setupImageTransfer(page, options = {}) {
             status: ready ? 'ready' : image.status,
             localFile: image.imageRef === 'demo/api:1.4.0' ? 'api.tar.gz' : image.localFile
           }))
+        };
+      }
+      return original(command, args);
+    };
+  }, { initialReview: demoDeploymentReview, options });
+  await openReviewStep(page);
+  await page.getByRole('tab', { name: '镜像核对' }).click();
+  await page.locator('.image-preparation')
+    .getByText(options.pull ? '镜像仓库' : '本机 Docker', { exact: true })
+    .click();
+}
+
+async function setupLocalImagePull(page, options = {}) {
+  await useDesktopBackend(page, {
+    hosts: [localHost],
+    projects: [localProject],
+    activeProjectId: localProject.id,
+    localEnv,
+    dialogPath: demoPreparedBundle.dir,
+    preparedBundle: demoPreparedBundle,
+    bundlePlan: demoBundlePlan,
+    deploymentReview: { ...demoDeploymentReview, ready: false, canIncrementalUpdate: false },
+    registrySources: options.registrySources || []
+  });
+  await page.addInitScript(({ initialReview, options }) => {
+    const original = window.__TAURI_INTERNALS__.invoke;
+    let pulled = false;
+    window.__TAURI_INTERNALS__.invoke = async (command, args = {}) => {
+      if (command === 'pull_deployment_images') {
+        window.__deployTestCalls.push({ command, args });
+        if (options.failPull) throw '拉取镜像失败，请检查网络和仓库权限。';
+        pulled = true;
+        return [{ reference: 'demo/api:1.4.0', message: '已拉取并确认' }];
+      }
+      if (command === 'inspect_deployment_review' && pulled) {
+        window.__deployTestCalls.push({ command, args });
+        const ready = !options.stillMissingAfterPull;
+        return {
+          ...initialReview,
+          ready,
+          canIncrementalUpdate: ready,
+          missingImages: ready ? [] : initialReview.missingImages,
+          images: initialReview.images.map((image) => image.imageRef === 'demo/api:1.4.0' && ready
+            ? { ...image, dockerPresent: true, status: 'ready' }
+            : image)
         };
       }
       return original(command, args);
@@ -414,6 +465,127 @@ test('缺失镜像可从本机传输并导入，核对通过后才能继续', as
     user: sshCredential.username, localDir: '/offline', files: ['api.tar'], overwrite: false });
   expect(writes[2].args.remoteBundleDir).toBe(writes[1].args.remoteBundleDir);
   await page.screenshot({ path: '/tmp/deploy-missing-images-complete.png', fullPage: true, animations: 'disabled' });
+  expect(problems).toEqual([]);
+});
+
+test('本机可按清单从镜像仓库拉取缺失镜像并重新核对', async ({ page }) => {
+  const problems = [];
+  page.on('pageerror', (error) => problems.push(error.message));
+  page.on('console', (message) => { if (['error', 'warning'].includes(message.type())) problems.push(message.text()); });
+  await setupLocalImagePull(page);
+
+  const preparation = page.locator('.image-preparation');
+  await expect(page.getByRole('radio', { name: '镜像仓库', exact: true })).toBeChecked();
+  await expect(preparation).toContainText('按清单中的镜像地址拉取 1 个缺失镜像到本机 Docker');
+  await expect(preparation).toContainText('未找到与缺失镜像仓库地址一致的镜像源');
+  await expect(preparation.getByRole('button', { name: '拉取缺失镜像' })).toBeVisible();
+  await page.screenshot({ path: '/tmp/deploy-image-pull-local.png', fullPage: true, animations: 'disabled' });
+
+  await preparation.getByRole('button', { name: '拉取缺失镜像' }).click();
+  const dialog = page.getByRole('dialog', { name: '确认拉取镜像' });
+  await expect(dialog).toContainText('按清单地址拉取 1 个缺失镜像到本机 Docker');
+  await expect(dialog).toContainText('运行中的服务不会重启');
+  await dialog.getByRole('button', { name: '开始拉取', exact: true }).click();
+
+  await expect(page.getByText('缺失镜像已拉取，目标镜像核对通过。', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '下一步：选择更新' })).toBeEnabled();
+  const calls = await page.evaluate(() => window.__deployTestCalls);
+  const pull = calls.find((item) => item.command === 'pull_deployment_images');
+  expect(pull.args).toMatchObject({
+    bundleDir: demoPreparedBundle.dir,
+    references: ['demo/api:1.4.0'],
+    host: null,
+    port: null,
+    user: null,
+    keyPath: null,
+    registrySourceId: null,
+    password: null
+  });
+  expect(problems).toEqual([]);
+});
+
+test('镜像拉取失败时保留缺失状态并允许重试', async ({ page }) => {
+  await setupLocalImagePull(page, { failPull: true });
+  await page.getByRole('button', { name: '拉取缺失镜像' }).click();
+  await page.getByRole('dialog', { name: '确认拉取镜像' })
+    .getByRole('button', { name: '开始拉取', exact: true })
+    .click();
+
+  await expect(page.locator('.step-card .el-alert--error')).toBeVisible();
+  await expect(page.locator('.step-card .el-alert--error')).toContainText('拉取镜像失败');
+  await expect(page.locator('.step-card .el-alert--error')).not.toContainText('Error:');
+  await expect(page.getByRole('button', { name: '下一步：选择更新' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: '拉取缺失镜像' })).toBeEnabled();
+  await expect(page.getByText('缺失镜像已拉取，目标镜像核对通过。', { exact: true })).toBeHidden();
+  await page.getByText('查看镜像处理详情', { exact: true }).click();
+  await expect(page.locator('.image-diagnostics pre')).not.toBeEmpty();
+});
+
+test('拉取成功但复核仍缺失时不显示成功', async ({ page }) => {
+  await setupLocalImagePull(page, { stillMissingAfterPull: true });
+  await page.getByRole('button', { name: '拉取缺失镜像' }).click();
+  await page.getByRole('dialog', { name: '确认拉取镜像' })
+    .getByRole('button', { name: '开始拉取', exact: true })
+    .click();
+
+  await expect(page.locator('.step-card .el-alert--error')).toContainText(
+    '拉取后仍有镜像缺失或未确认'
+  );
+  await expect(page.getByRole('button', { name: '下一步：选择更新' })).toBeDisabled();
+  await expect(page.getByText('缺失镜像已拉取，目标镜像核对通过。', { exact: true })).toBeHidden();
+});
+
+test('远程拉取只显示匹配的镜像源并使用本次凭据', async ({ page }) => {
+  const problems = [];
+  page.on('pageerror', (error) => problems.push(error.message));
+  page.on('console', (message) => { if (['error', 'warning'].includes(message.type())) problems.push(message.text()); });
+  await setupImageTransfer(page, {
+    pull: true,
+    registrySources: [
+      {
+        id: 'registry-docker',
+        name: 'Docker Hub',
+        address: 'docker.io',
+        namespace: '',
+        username: 'reader',
+        hasPassword: false
+      },
+      {
+        id: 'registry-unrelated',
+        name: '其他仓库',
+        address: 'registry.example.com',
+        namespace: '',
+        username: 'reader',
+        hasPassword: true
+      }
+    ]
+  });
+
+  await expect(page.getByRole('radio', { name: '镜像仓库', exact: true })).toBeChecked();
+  const sourceSelect = page.locator('.registry-pull-fields .el-select');
+  await sourceSelect.click();
+  await expect(page.getByRole('option', { name: /Docker Hub/ })).toBeVisible();
+  await expect(page.getByRole('option', { name: /其他仓库/ })).toHaveCount(0);
+  await page.getByRole('option', { name: /Docker Hub/ }).click();
+  await page.getByRole('textbox', { name: '镜像源密码' }).fill('secret');
+  await page.screenshot({ path: '/tmp/deploy-image-pull-remote.png', fullPage: true, animations: 'disabled' });
+
+  await page.getByRole('button', { name: '拉取缺失镜像' }).click();
+  const dialog = page.getByRole('dialog', { name: '确认拉取镜像' });
+  await expect(dialog).toContainText(`到${remoteHost.name}`);
+  await dialog.getByRole('button', { name: '开始拉取', exact: true }).click();
+
+  await expect(page.getByText('缺失镜像已拉取，目标镜像核对通过。', { exact: true })).toBeVisible();
+  const calls = await page.evaluate(() => window.__deployTestCalls);
+  const pull = calls.find((item) => item.command === 'pull_deployment_images');
+  expect(pull.args).toMatchObject({
+    references: ['demo/api:1.4.0'],
+    host: remoteHost.address,
+    port: remoteHost.port,
+    user: sshCredential.username,
+    registrySourceId: 'registry-docker',
+    password: 'secret'
+  });
   expect(problems).toEqual([]);
 });
 
@@ -524,7 +696,8 @@ test('清单比对步骤展示服务、镜像与配置差异', async ({ page }) 
   await expect(activeRows().nth(1)).toContainText('缺失');
 
   await expect(review.locator('.image-preparation')).toContainText('准备缺失镜像');
-  await expect(review.getByRole('button', { name: '导入镜像并比对' })).toBeVisible();
+  await expect(review.getByRole('radio', { name: '镜像仓库', exact: true })).toBeChecked();
+  await expect(review.getByRole('button', { name: '拉取缺失镜像' })).toBeVisible();
   await expect(review.getByRole('button', { name: '下一步：选择更新' })).toBeEnabled();
 
   await review.getByRole('button', { name: '查看配置对比' }).click();
