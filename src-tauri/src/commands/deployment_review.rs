@@ -1282,10 +1282,43 @@ fn compare_with_artifacts(
     target: TargetSnapshot,
     artifacts: &[ArtifactProbe],
 ) -> Result<DeploymentReview, String> {
-    let has_deployment = !target.compose_file.is_empty();
-    let current_services = if has_deployment {
+    let compose_present = !target.compose_file.is_empty();
+    let compose_working_dir = if !target.compose_working_dir.is_empty() {
+        target.compose_working_dir.clone()
+    } else if compose_present {
+        Path::new(&target.compose_file)
+            .parent()
+            .unwrap_or_else(|| Path::new(install))
+            .to_string_lossy()
+            .to_string()
+    } else {
+        format!("{install}/deploy")
+    };
+    let compose_services = if compose_present {
         parse_services(&target.compose)
             .map_err(|_| "目标部署目录的 Docker Compose 清单无法解析，请检查现有部署".to_string())?
+    } else {
+        Vec::new()
+    };
+    // 同一目录可能存在其他 Compose 项目的残留容器，只有归属于当前清单服务的容器才算已有部署。
+    // Compose 文件也可能来自中断的首次部署或人工拷贝；Docker 状态未知时仍按文件判断，
+    // 避免在无法核对时误开放首次部署。
+    let deployment_containers = target
+        .containers
+        .iter()
+        .filter(|container| {
+            same_directory(&container.working_dir, &compose_working_dir)
+                && compose_services.iter().any(|service| {
+                    container.service == service.name
+                        || (!service.container_name.is_empty()
+                            && container.name == service.container_name)
+                })
+        })
+        .count();
+    let has_deployment = compose_present
+        && (!target.docker_running || !target.containers_checked || deployment_containers > 0);
+    let current_services = if has_deployment {
+        compose_services
     } else {
         Vec::new()
     };
@@ -1319,7 +1352,7 @@ fn compare_with_artifacts(
     while expected_compose_dir.len() > 1 && expected_compose_dir.ends_with('/') {
         expected_compose_dir.pop();
     }
-    let supported_update_layout = !has_deployment
+    let supported_update_layout = !compose_present
         || Path::new(&target.compose_file)
             .parent()
             .map(|parent| same_directory(&parent.to_string_lossy(), &expected_compose_dir))
@@ -1332,18 +1365,6 @@ fn compare_with_artifacts(
             compose_file,
         ));
     }
-    let compose_working_dir = if !target.compose_working_dir.is_empty() {
-        target.compose_working_dir.clone()
-    } else if has_deployment {
-        Path::new(&target.compose_file)
-            .parent()
-            .unwrap_or_else(|| Path::new(install))
-            .to_string_lossy()
-            .to_string()
-    } else {
-        format!("{install}/deploy")
-    };
-
     let mut service_reviews = Vec::new();
     for service in services {
         let old = current_services.iter().find(|old| old.name == service.name);
@@ -1701,7 +1722,28 @@ fn install_root_hint(actual_dir: &str, relative: &str) -> Option<String> {
 }
 
 fn same_directory(left: &str, right: &str) -> bool {
-    left.replace('\\', "/").trim_end_matches('/') == right.replace('\\', "/").trim_end_matches('/')
+    normalize_directory(left) == normalize_directory(right)
+}
+
+/// 统一 Docker 标签与本机路径的写法：Windows 扩展前缀、分隔符与大小写。
+fn normalize_directory(value: &str) -> String {
+    let mut normalized = value.replace('\\', "/");
+    if normalized
+        .get(..8)
+        .map(|prefix| prefix.eq_ignore_ascii_case("//?/UNC/"))
+        .unwrap_or(false)
+    {
+        normalized = format!("//{}", &normalized[8..]);
+    } else if let Some(rest) = normalized.strip_prefix("//?/") {
+        normalized = rest.to_string();
+    }
+    while normalized.len() > 1 && normalized.ends_with('/') {
+        normalized.pop();
+    }
+    if cfg!(windows) {
+        normalized.make_ascii_lowercase();
+    }
+    normalized
 }
 
 #[cfg(test)]
@@ -1709,7 +1751,7 @@ mod tests {
     use super::*;
 
     fn snapshot(compose: &str, statuses: &[(usize, &str)]) -> TargetSnapshot {
-        TargetSnapshot {
+        let mut target = TargetSnapshot {
             checked: true,
             docker_running: true,
             compose_available: true,
@@ -1718,6 +1760,11 @@ mod tests {
                 String::new()
             } else {
                 "/srv/demo/deploy/docker-compose.yml".to_string()
+            },
+            compose_working_dir: if compose.is_empty() {
+                String::new()
+            } else {
+                "/srv/demo/deploy".to_string()
             },
             compose: compose.to_string(),
             image_states: statuses
@@ -1734,7 +1781,21 @@ mod tests {
                 .collect(),
             target_platform: "linux/amd64".to_string(),
             ..TargetSnapshot::default()
+        };
+        if let Some(service) = parse_services(compose)
+            .ok()
+            .and_then(|items| items.into_iter().next())
+        {
+            target.containers.push(TargetContainer {
+                name: format!("demo-{}-1", service.name),
+                image: service.image,
+                state: "running".to_string(),
+                health: "healthy".to_string(),
+                service: service.name,
+                working_dir: target.compose_working_dir.clone(),
+            });
         }
+        target
     }
 
     fn file_probe(target: &Path, content: &[u8]) -> ArtifactProbe {
@@ -2224,6 +2285,129 @@ mod tests {
         assert!(review.can_incremental_update);
         assert!(!review.can_first_deploy);
         assert!(review.issues.is_empty());
+    }
+
+    #[test]
+    fn compose_file_without_containers_is_treated_as_first_deployment() {
+        let desired = "services:\n  web:\n    image: nginx:1.27\n";
+        let services = parse_services(desired).unwrap();
+        let mut target = snapshot(desired, &[(0, "ready")]);
+        target.containers.clear();
+        let review = compare(
+            "deploy/docker-compose.yml",
+            "/srv/demo",
+            desired,
+            &services,
+            &unique_images(&services),
+            target,
+        )
+        .unwrap();
+        assert!(review.ready);
+        assert!(!review.has_deployment);
+        assert!(review.can_first_deploy);
+        assert!(!review.can_incremental_update);
+    }
+
+    #[test]
+    fn stopped_container_still_counts_as_an_existing_deployment() {
+        let desired = "services:\n  web:\n    image: nginx:1.27\n";
+        let services = parse_services(desired).unwrap();
+        let mut target = snapshot(desired, &[(0, "ready")]);
+        target.containers[0].state = "exited".to_string();
+        let review = compare(
+            "deploy/docker-compose.yml",
+            "/srv/demo",
+            desired,
+            &services,
+            &unique_images(&services),
+            target,
+        )
+        .unwrap();
+        assert!(review.ready);
+        assert!(review.has_deployment);
+        assert!(review.can_incremental_update);
+        assert!(!review.can_first_deploy);
+    }
+
+    #[test]
+    fn containers_from_other_services_do_not_count_as_the_current_deployment() {
+        let desired = "services:\n  web:\n    image: nginx:1.27\n";
+        let services = parse_services(desired).unwrap();
+        let mut target = snapshot(desired, &[(0, "ready")]);
+        target.containers[0].name = "other-api-1".to_string();
+        target.containers[0].service = "api".to_string();
+        let review = compare(
+            "deploy/docker-compose.yml",
+            "/srv/demo",
+            desired,
+            &services,
+            &unique_images(&services),
+            target,
+        )
+        .unwrap();
+        assert!(review.ready);
+        assert!(!review.has_deployment);
+        assert!(review.can_first_deploy);
+        assert!(!review.can_incremental_update);
+    }
+
+    #[test]
+    fn zero_container_layout_mismatch_blocks_first_deployment() {
+        let desired = "services:\n  web:\n    image: nginx:1.27\n";
+        let services = parse_services(desired).unwrap();
+        let mut target = snapshot(desired, &[(0, "ready")]);
+        target.containers.clear();
+        let review = compare(
+            "deploy/docker-compose.yml",
+            "/srv/demo/deploy",
+            desired,
+            &services,
+            &unique_images(&services),
+            target,
+        )
+        .unwrap();
+        assert!(!review.ready);
+        assert!(!review.can_first_deploy);
+        assert!(!review.can_incremental_update);
+        assert!(review
+            .issues
+            .iter()
+            .any(|issue| issue.contains("部署目录改为 /srv/demo")));
+    }
+
+    #[test]
+    fn unconfirmed_docker_state_keeps_compose_as_an_existing_deployment() {
+        let desired = "services:\n  web:\n    image: nginx:1.27\n";
+        let services = parse_services(desired).unwrap();
+        let mut target = snapshot(desired, &[(0, "ready")]);
+        target.containers.clear();
+        target.docker_running = false;
+        target.containers_checked = false;
+        let review = compare(
+            "deploy/docker-compose.yml",
+            "/srv/demo",
+            desired,
+            &services,
+            &unique_images(&services),
+            target,
+        )
+        .unwrap();
+        assert!(!review.ready);
+        assert!(review.has_deployment);
+        assert!(!review.can_first_deploy);
+        assert!(!review.can_incremental_update);
+    }
+
+    #[test]
+    fn directory_comparison_handles_windows_extended_paths() {
+        assert!(same_directory(
+            r"\\?\C:\demo\deploy\",
+            r"C:\demo\deploy"
+        ));
+        assert!(same_directory(
+            r"\\?\UNC\server\share\deploy",
+            r"\\server\share\deploy"
+        ));
     }
 
     #[test]
