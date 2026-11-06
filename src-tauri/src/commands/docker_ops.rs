@@ -164,29 +164,57 @@ pub fn artifact_containers() -> Vec<String> {
 pub async fn load_offline_images(
     window: tauri::Window,
     bundle_dir: String,
+    files: Option<Vec<String>>,
 ) -> Result<Vec<String>, String> {
     let images_dir = Path::new(&bundle_dir).join("images");
     if !images_dir.exists() {
         return Err(format!("镜像目录不存在: {}", images_dir.display()));
     }
 
-    let mut tar_files = Vec::new();
-    if let Ok(entries) = fs::read_dir(&images_dir) {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if let Some(ext) = p.extension() {
-                if ext == "tar" || ext == "tgz" || p.to_string_lossy().ends_with(".tar.gz") {
-                    tar_files.push(p);
+    let mut tar_files = if let Some(files) = files {
+        let mut selected = Vec::new();
+        for raw in files {
+            let name = raw.trim();
+            let path = Path::new(name);
+            let lowercase = name.to_ascii_lowercase();
+            if name.is_empty()
+                || name == "."
+                || name == ".."
+                || path.components().count() != 1
+                || !(lowercase.ends_with(".tar")
+                    || lowercase.ends_with(".tgz")
+                    || lowercase.ends_with(".tar.gz"))
+            {
+                return Err(format!("镜像包文件名无效: {name}"));
+            }
+            let file = images_dir.join(name);
+            if !file.is_file() {
+                return Err(format!("镜像包文件不存在: {}", file.display()));
+            }
+            selected.push(file);
+        }
+        selected
+    } else {
+        let mut found = Vec::new();
+        if let Ok(entries) = fs::read_dir(&images_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Some(ext) = path.extension() {
+                    if ext == "tar" || ext == "tgz" || path.to_string_lossy().ends_with(".tar.gz") {
+                        found.push(path);
+                    }
                 }
             }
         }
-    }
+        found
+    };
 
     if tar_files.is_empty() {
         return Err("镜像目录中未找到任何 .tar 镜像文件".to_string());
     }
 
     tar_files.sort();
+    tar_files.dedup();
     let total = tar_files.len();
     let mut loaded = Vec::new();
 
@@ -207,8 +235,9 @@ pub async fn load_offline_images(
             },
         );
 
-        let output = Command::new(find_binary("docker"))
-            .args(["load", "-i", &tar_path.to_string_lossy()])
+        let output = super::docker_setup::docker_command()
+            .args(["load", "-i"])
+            .arg(tar_path)
             .output();
 
         match output {
@@ -351,6 +380,17 @@ pub(crate) fn docker_compose_action_blocking(
     }
     args.push("-f".to_string());
     args.push(compose_file.to_string_lossy().to_string());
+
+    // 离线镜像按摘要绑定为不可变 ID；原 Compose 始终是首个 -f，项目目录保持不变。
+    if action == "up" {
+        let install = super::deployment_image_bindings::active_install_root(&deploy_dir);
+        if let Some(override_file) =
+            super::deployment_image_bindings::local_override(Path::new(&install), &compose_file)?
+        {
+            args.push("-f".to_string());
+            args.push(override_file.display().to_string());
+        }
+    }
 
     match action.as_str() {
         "up" => {

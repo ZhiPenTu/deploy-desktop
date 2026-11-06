@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -129,11 +130,90 @@ pub(crate) fn find_docker_binary() -> Option<PathBuf> {
     binaries.into_iter().find(|path| path.is_file())
 }
 
+/// Docker 桌面版把凭据助手放在应用资源目录或用户目录中；
+/// GUI 进程继承到的 PATH 往往不含这些目录，导致 `docker pull` 找不到
+/// `docker-credential-*`。子进程统一使用补全后的 PATH。
+fn docker_path_candidates() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(binary) = find_docker_binary() {
+        if let Some(parent) = binary.parent() {
+            paths.push(parent.to_path_buf());
+        }
+    }
+    for directory in [
+        "/usr/local/bin",
+        "/opt/homebrew/bin",
+        "/usr/bin",
+        "/bin",
+        "/snap/bin",
+        "/opt/docker-desktop/bin",
+    ] {
+        paths.push(PathBuf::from(directory));
+    }
+    if let Some(home) = dirs::home_dir() {
+        paths.push(home.join(".docker/bin"));
+        paths.push(home.join(".orbstack/bin"));
+        #[cfg(target_os = "macos")]
+        {
+            paths.push(home.join("Applications/Docker.app/Contents/Resources/bin"));
+            paths.push(home.join("Applications/OrbStack.app/Contents/MacOS/xbin"));
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        paths.push(PathBuf::from(
+            "/Applications/Docker.app/Contents/Resources/bin",
+        ));
+        paths.push(PathBuf::from(
+            "/Applications/OrbStack.app/Contents/MacOS/xbin",
+        ));
+    }
+    #[cfg(target_os = "windows")]
+    {
+        for variable in ["ProgramW6432", "ProgramFiles", "LOCALAPPDATA"] {
+            if let Some(root) = std::env::var_os(variable) {
+                let root = PathBuf::from(root);
+                paths.push(root.join("Docker/Docker/resources/bin"));
+                paths.push(root.join("Programs/Docker/Docker/resources/bin"));
+                paths.push(root.join("Programs/DockerDesktop/resources/bin"));
+            }
+        }
+        if let Some(home) = dirs::home_dir() {
+            paths.push(home.join(".docker/bin"));
+        }
+    }
+    paths.extend(
+        std::env::var_os("PATH")
+            .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
+            .unwrap_or_default(),
+    );
+    let mut seen = std::collections::HashSet::new();
+    paths.retain(|path| path.is_dir() && seen.insert(path.clone()));
+    paths
+}
+
+pub(crate) fn docker_path_env() -> Option<OsString> {
+    let paths = docker_path_candidates();
+    if paths.is_empty() {
+        None
+    } else {
+        std::env::join_paths(paths).ok()
+    }
+}
+
 pub(crate) fn docker_command() -> Command {
     let binary = find_docker_binary().unwrap_or_else(|| {
-        PathBuf::from(if cfg!(windows) { "docker.exe" } else { "docker" })
+        PathBuf::from(if cfg!(windows) {
+            "docker.exe"
+        } else {
+            "docker"
+        })
     });
-    Command::new(binary)
+    let mut command = Command::new(binary);
+    if let Some(path) = docker_path_env() {
+        command.env("PATH", path);
+    }
+    command
 }
 
 fn inspect_installation(
@@ -189,6 +269,23 @@ fn run_docker_check(command: Command, timeout: Duration) -> Result<std::process:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn docker_path_keeps_helper_directories_and_existing_entries() {
+        let path = docker_path_env().expect("PATH should be available");
+        let directories: Vec<PathBuf> = std::env::split_paths(&path).collect();
+        assert!(directories.iter().any(|directory| {
+            directory == Path::new("/usr/local/bin")
+                || directory == Path::new("/opt/homebrew/bin")
+                || directory == Path::new("/usr/bin")
+        }));
+        for directory in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .filter(|directory| directory.is_dir())
+        {
+            assert!(directories.contains(&directory));
+        }
+    }
 
     #[test]
     fn installation_guides_match_the_operating_system() {

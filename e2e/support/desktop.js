@@ -264,6 +264,8 @@ export async function useDesktopBackend(
             };
           case 'log_client_event':
             return null;
+          case 'register_deployment_image_bindings':
+            return null;
           default:
             throw '当前操作暂不可用，请在桌面应用中重试。';
         }

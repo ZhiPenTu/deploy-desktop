@@ -9,7 +9,13 @@ if [ ! -f "$COMPOSE_FILE" ]; then
   exit 4
 fi
 if docker compose version >/dev/null 2>&1; then COMPOSE=(docker compose); else COMPOSE=(docker-compose); fi
-compose() { "${COMPOSE[@]}" -f "$COMPOSE_FILE" "$@"; }
+compose() {
+  if [ -n "${DEPLOY_IMAGE_OVERRIDE:-}" ]; then
+    "${COMPOSE[@]}" -f "$COMPOSE_FILE" -f "$DEPLOY_IMAGE_OVERRIDE" "$@"
+  else
+    "${COMPOSE[@]}" -f "$COMPOSE_FILE" "$@"
+  fi
+}
 RESTART_SERVICES=()
 for ((index=0; index<RESTART_COUNT; index++)); do RESTART_SERVICES+=("$1"); shift; done
 WAIT_SERVICES=("$@")

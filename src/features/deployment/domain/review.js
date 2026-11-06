@@ -17,3 +17,18 @@ export function stateLabel(value) {
     }[value] || '未运行'
   );
 }
+
+export function artifactStatusLabel(status, hasDeployment) {
+  if (status === 'present') return '已存在';
+  if (status === 'missing') return hasDeployment ? '缺失' : '待写入';
+  if (status === 'incomplete') return '不完整';
+  if (status === 'invalid') return '路径异常';
+  return '未核对';
+}
+
+export function artifactStatusTone(status, hasDeployment) {
+  if (status === 'present') return 'success';
+  if (status === 'missing') return hasDeployment ? 'warning' : 'info';
+  if (status === 'incomplete' || status === 'invalid') return 'warning';
+  return 'info';
+}

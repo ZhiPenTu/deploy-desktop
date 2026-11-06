@@ -44,6 +44,8 @@ export {
   loadOfflineImages,
   exportDeploymentImages,
   pullDeploymentImages,
+  prepareLocalDeploymentImages,
+  registerDeploymentImageBindings,
   inspectBundlePlan,
   inspectBundleConfig,
   inspectDeploymentReview,

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 import { mockIPC, clearMocks } from '@tauri-apps/api/mocks';
 import { validInstallDir, createDeploymentContext, contextTarget } from '../src/features/deployment/domain/context.js';
-import { deploymentComponents, servicesAreReady, requireSuccessfulResult } from '../src/features/deployment/domain/components.js';
+import { deploymentComponents, servicesAreReady, requireSuccessfulResult, missingArtifactIssue } from '../src/features/deployment/domain/components.js';
 import { safeText, failureText } from '../src/features/deployment/domain/errors.js';
 import { invokeIncremental } from '../src/features/deployment/services/operations.js';
 
@@ -17,6 +17,30 @@ afterEach(() => {
   if (globalThis.window) clearMocks();
   delete globalThis.window;
   delete globalThis.isTauri;
+});
+
+test('缺失制品必须由本次选择的组件覆盖，首次部署允许待写入', () => {
+  const plan = {
+    components: [
+      { key: 'api', artifacts: [{ key: 'server' }] },
+      { key: 'web', artifacts: [{ key: 'site' }] }
+    ]
+  };
+  const review = {
+    hasDeployment: true,
+    artifacts: [{ key: 'server', label: '服务程序', status: 'missing' }]
+  };
+  assert.match(missingArtifactIssue(plan, review, ['web']), /服务程序/);
+  assert.equal(missingArtifactIssue(plan, review, ['api']), '');
+  assert.equal(missingArtifactIssue(plan, { ...review, hasDeployment: false }, []), '');
+  assert.equal(missingArtifactIssue(plan, {
+    ...review, artifacts: [{ key: 'server', status: 'incomplete' }]
+  }, ['web']), '');
+  assert.equal(servicesAreReady({
+    ...review,
+    targetChecked: true,
+    services: [{ containerState: 'running', containerHealth: 'healthy' }]
+  }), false);
 });
 
 test('deployment paths reject roots, traversal and control characters on both platforms', () => {

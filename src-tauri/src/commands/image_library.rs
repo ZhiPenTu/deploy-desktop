@@ -4,15 +4,14 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, UNIX_EPOCH};
 
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::core::process;
 
+use super::docker_setup::docker_command;
 use super::registry_sources::{reference_from_source, source_access, source_credentials};
-use super::remote_ssh::find_binary;
 
 const SETTINGS_FILE: &str = "image-library-settings.json";
 const MANIFEST_FILE: &str = "images.json";
@@ -255,7 +254,7 @@ pub async fn pull_local_docker_image(
         }
 
         emit_progress(&window, "pull", 1, 1, &reference, 20, "正在拉取镜像", false);
-        let mut command = Command::new(find_binary("docker"));
+        let mut command = docker_command();
         command.args(["pull", &reference]);
         if let Some(config) = &temp_config {
             command.env("DOCKER_CONFIG", &config.path);
@@ -746,7 +745,7 @@ pub(super) fn login_docker(
     password: &str,
     docker_config: &Path,
 ) -> Result<(), String> {
-    let mut command = Command::new(find_binary("docker"));
+    let mut command = docker_command();
     command
         .args(["login", registry, "-u", username, "--password-stdin"])
         .env("DOCKER_CONFIG", docker_config);
@@ -785,7 +784,8 @@ impl TempDockerConfig {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o700));
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
+                .map_err(|error| format!("设置临时 Docker 配置权限失败：{error}"))?;
         }
         Ok(Self { path })
     }
@@ -824,7 +824,7 @@ fn copy_docker_context(source: &Path, target: &Path) -> Result<(), String> {
             let value: Value = serde_json::from_slice(&bytes)
                 .map_err(|_| String::from("无法读取本机 Docker 配置中的当前上下文，请检查 Docker 配置后重试"))?;
             let mut minimal = serde_json::Map::new();
-            for key in ["currentContext", "HttpHeaders"] {
+            for key in ["currentContext", "HttpHeaders", "proxies"] {
                 if let Some(value) = value.get(key) {
                     minimal.insert(key.to_owned(), value.clone());
                 }
@@ -846,7 +846,8 @@ fn write_private_file(path: &Path, content: &[u8]) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("设置 Docker 配置权限失败：{error}"))?;
     }
     Ok(())
 }
@@ -958,7 +959,7 @@ pub(super) fn export_images_blocking(
         let temp = dir.join(format!(".{file_name}.part"));
         let _ = fs::remove_file(&temp);
 
-        let mut command = Command::new(find_binary("docker"));
+        let mut command = docker_command();
         command
             .arg("save")
             .arg("--output")

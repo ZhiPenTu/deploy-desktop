@@ -2,17 +2,16 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 use tauri::{AppHandle, Emitter};
 
+use super::docker_setup::docker_command;
 use super::image_library::{login_docker, TempDockerConfig};
 use super::registry_sources::{source_access, source_credentials, RegistrySourceAccess};
 
-use super::remote_ssh::{
-    find_binary, resolve_existing_key, run_ssh_script, shell_quote,
-};
+use super::remote_ssh::{resolve_existing_key, run_ssh_script, shell_quote};
 
 const MANIFEST_API_VERSION: &str = "deploy.desktop/v1";
 const MANIFEST_MAX_BYTES: u64 = 5 * 1024 * 1024;
@@ -705,7 +704,6 @@ fn pull_local_blocking(
 
     let config = login_local(&registry, username, password)?;
 
-    let docker = find_binary("docker");
     let total = selected.len();
     let mut results = Vec::with_capacity(total);
     for (index, image) in selected.iter().enumerate() {
@@ -726,17 +724,16 @@ fn pull_local_blocking(
             args.push(platform.to_string());
         }
         args.push(image.reference.clone());
-        run_local(&docker, &args, config.as_ref().map(|config| config.path.as_path()))
+        run_local(&args, config.as_ref().map(|config| config.path.as_path()))
             .map_err(|_| format!("拉取镜像 {} 失败，请检查镜像摘要、仓库权限和网络", image.name))?;
 
-        verify_local_digest(&docker, image)?;
+        verify_local_digest(image)?;
 
         if let Some(dir) = export_dir.as_deref().map(str::trim).filter(|dir| !dir.is_empty()) {
             fs::create_dir_all(dir).map_err(|e| format!("创建导出目录失败: {e}"))?;
             let file_name = format!("{}.tar", safe_file_name(&image.name));
             let target = PathBuf::from(dir).join(file_name);
             run_local(
-                &docker,
                 &[
                     "save".to_string(),
                     "-o".to_string(),
@@ -823,8 +820,8 @@ fn login_local(
     Ok(Some(config))
 }
 
-fn verify_local_digest(docker: &str, image: &ResolvedImage) -> Result<(), String> {
-    let output = Command::new(docker)
+fn verify_local_digest(image: &ResolvedImage) -> Result<(), String> {
+    let output = docker_command()
         .args([
             "image",
             "inspect",
@@ -848,8 +845,8 @@ fn verify_local_digest(docker: &str, image: &ResolvedImage) -> Result<(), String
     Ok(())
 }
 
-fn run_local(docker: &str, args: &[String], config: Option<&Path>) -> Result<String, String> {
-    let mut command = Command::new(docker);
+fn run_local(args: &[String], config: Option<&Path>) -> Result<String, String> {
+    let mut command = docker_command();
     command.args(args);
     if let Some(config) = config {
         command.env("DOCKER_CONFIG", config);

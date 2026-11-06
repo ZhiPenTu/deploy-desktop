@@ -3,7 +3,9 @@ import {
   importRemoteImageBundle,
   inspectDeploymentReview,
   loadOfflineImages,
+  prepareLocalDeploymentImages,
   pullDeploymentImages,
+  registerDeploymentImageBindings,
   scanLocalImageBundle,
   uploadRemoteImageBundle
 } from '../../../api/tauri.js';
@@ -12,25 +14,7 @@ export async function prepareImagePackages(context, onPhase) {
   if (context.source === 'docker') {
     onPhase('正在从本机导出缺失镜像');
     const exported = await exportDeploymentImages(context.bundleDir, [...context.references], context.target);
-    if (!Array.isArray(exported)) throw new Error('镜像导出结果未确认，请检查本机离线包后重试');
-    const failed = exported.find((item) => item.success !== true);
-    if (failed) throw new Error(`导出镜像失败：${failed.message || '请检查本机 Docker 后重试'}`);
-    if (!Array.isArray(exported) || exported.length !== context.references.length ||
-        context.references.some((reference) => !exported.some((item) => item.reference === reference))) {
-      throw new Error('镜像导出结果不完整，请检查本机离线包后重试');
-    }
-    const packages = exported.map((item) => {
-      const path = String(item.path || '').replace(/\\/g, '/');
-      const separator = path.lastIndexOf('/');
-      if (separator < 0 || !item.fileName || path.slice(separator + 1) !== item.fileName) {
-        throw new Error('镜像包保存位置未确认，请重新导出');
-      }
-      return { root: path.slice(0, separator), name: item.fileName };
-    });
-    if (new Set(packages.map((item) => item.root)).size !== 1) {
-      throw new Error('镜像包保存位置不一致，请重新导出');
-    }
-    return { root: packages[0].root, files: packages.map((item) => item.name) };
+    return packagePaths(exported, context.references);
   }
   onPhase('正在检查离线镜像包');
   const [scan, checked] = await Promise.all([
@@ -49,6 +33,48 @@ export async function prepareImagePackages(context, onPhase) {
   return { root: context.imageDir, files: [...files] };
 }
 
+export async function prepareRelayImagePackages(context, onPhase) {
+  onPhase('正在本机按目标架构准备镜像');
+  const exported = await prepareLocalDeploymentImages(
+    context.bundleDir,
+    [...context.references],
+    context.target,
+    context.credentials || []
+  );
+  const packages = packagePaths(exported, context.references);
+  packages.bindings = exported
+    .map((item) => item.binding)
+    .filter((binding) => binding && binding.reference && binding.imageId)
+    .map((binding) => ({
+      reference: binding.reference,
+      imageId: binding.imageId,
+      platform: binding.platform
+    }));
+  return packages;
+}
+
+function packagePaths(exported, references) {
+  if (!Array.isArray(exported)) throw new Error('未返回镜像导出结果，请检查本机离线包后重试');
+  const failed = exported.find((item) => item.success !== true);
+  if (failed) throw new Error(`导出镜像失败：${failed.message || '请检查本机 Docker 后重试'}`);
+  if (exported.length !== references.length ||
+      references.some((reference) => !exported.some((item) => item.reference === reference))) {
+    throw new Error('镜像导出结果不完整，请检查本机离线包后重试');
+  }
+  const packages = exported.map((item) => {
+    const path = String(item.path || '').replace(/\\/g, '/');
+    const separator = path.lastIndexOf('/');
+    if (separator < 0 || !item.fileName || path.slice(separator + 1) !== item.fileName) {
+      throw new Error('无法确认镜像包保存位置，请重新导出');
+    }
+    return { root: path.slice(0, separator), name: item.fileName };
+  });
+  if (new Set(packages.map((item) => item.root)).size !== 1) {
+    throw new Error('镜像包保存位置不一致，请重新导出');
+  }
+  return { root: packages[0].root, files: packages.map((item) => item.name) };
+}
+
 export async function importImagePackages(context, packages, onPhase) {
   if (context.target) {
     const { host, port, user, keyPath } = context.target;
@@ -65,28 +91,51 @@ export async function importImagePackages(context, packages, onPhase) {
     }
   } else {
     onPhase('正在本机导入镜像');
-    const imported = await loadOfflineImages(packages.root);
-    if (!Array.isArray(imported) || !imported.length) throw new Error('镜像导入结果未确认，请重新比对');
+    const imported = await loadOfflineImages(packages.root, packages.files);
+    if (!Array.isArray(imported) || !imported.length) throw new Error('未返回镜像导入结果，请重新比对');
   }
+}
+
+export async function registerTransferredImages(context, packages, onPhase) {
+  const references = (context.references || []).filter((reference) =>
+    String(reference || '').includes('@sha256:')
+  );
+  if (!references.length) return;
+  const bindings = packages?.bindings || [];
+  if (references.some((reference) =>
+    !bindings.some((binding) => binding.reference === reference && binding.imageId)
+  )) {
+    throw new Error('未取得源端摘要镜像的内容核对结果，请重新在本机拉取并传入');
+  }
+  onPhase('正在核对目标机镜像内容');
+  await registerDeploymentImageBindings(
+    context.bundleDir,
+    context.installDir,
+    [...references],
+    bindings,
+    context.target
+  );
 }
 
 export async function pullMissingImages(context, onPhase) {
   if (!Array.isArray(context.references) || !context.references.length) {
-    throw new Error('没有需要拉取的缺失镜像，请重新比对');
+    throw new Error('没有需要拉取的镜像，请重新比对');
   }
-  onPhase(context.target ? '正在目标主机拉取缺失镜像' : '正在本机拉取缺失镜像');
+  onPhase(context.target ? '正在目标主机拉取镜像' : '正在本机拉取镜像');
   const pulled = await pullDeploymentImages(
     context.bundleDir,
     context.references,
     context.target,
+    context.credentials || [],
     context.registrySourceId,
-    context.password
+    context.password,
+    context.installDir
   );
   if (!Array.isArray(pulled) || pulled.length !== context.references.length) {
     throw new Error('镜像拉取结果不完整，请重新比对');
   }
   const confirmed = new Set(pulled.map((item) => item?.reference).filter(Boolean));
   const missing = context.references.find((reference) => !confirmed.has(reference));
-  if (missing) throw new Error(`未确认镜像 ${missing} 的拉取结果，请重新比对`);
+  if (missing) throw new Error(`未完成镜像 ${missing} 的拉取，请重新核对`);
   return pulled;
 }

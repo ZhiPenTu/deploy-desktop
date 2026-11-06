@@ -3,7 +3,7 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">部署向导</h2>
-        <p class="page-subtitle">选择项目与制品，核对服务和镜像后执行首次部署或增量更新</p>
+      <p class="page-subtitle">选择项目与制品，核对目标环境的服务、镜像与制品文件后执行首次部署或增量更新</p>
       </div>
     </div>
     <DeploymentStepper :steps="steps" :active-step="activeStep" />
@@ -95,11 +95,12 @@
       :is-remote="isRemote"
       :image-media-dir="imageMediaDir"
       v-model:image-source="imageSource"
-      :image-registry-source-id="imageRegistrySourceId"
-      :image-registry-password="imageRegistryPassword"
-      :image-registry-options="imageRegistryOptions"
-      :image-registry-needs-password="imageRegistryNeedsPassword"
-      :image-registry-mixed="imageRegistryMixed"
+      :image-pull-groups="imagePullGroups"
+      :image-counts="imageCounts"
+      :image-pending-count="imagePending.length"
+      :image-digest-refs="pendingDigestImages.map((image) => image.imageRef)"
+      :image-blocked-count="imageBlockedCount"
+      :image-next-blocked-reason="imageNextBlockedReason"
       :image-registry-load-error="imageRegistryLoadError"
       :image-phase="imagePhase"
       :image-progress="imageProgress"
@@ -110,8 +111,8 @@
       @recheck="loadReview"
       @update:review-tab="reviewTab = $event"
       @update:image-media-dir="imageMediaDir = $event"
-      @update:image-registry-source-id="imageRegistrySourceId = $event"
-      @update:image-registry-password="imageRegistryPassword = $event"
+      @update:image-pull-source="setImagePullSelection($event.registry, { sourceId: $event.sourceId })"
+      @update:image-pull-credential="setImagePullSelection($event.registry, { credential: $event.credential })"
       @pick-image-directory="pickImageDirectory"
       @prepare-images="prepareImages"
       @previous="previousStep"
@@ -129,6 +130,7 @@
       :review="review"
       :busy="busy"
       :can-execute="canExecute"
+      :artifact-selection-issue="artifactSelectionIssue"
       :preflighting="preflighting"
       :preflight-passed="preflightPassed"
       :executing="executing"
@@ -214,11 +216,12 @@ const {
   reviewTab,
   imageMediaDir,
   imageSource,
-  imageRegistrySourceId,
-  imageRegistryPassword,
-  imageRegistryOptions,
-  imageRegistryNeedsPassword,
-  imageRegistryMixed,
+  imagePullGroups,
+  imagePending,
+  pendingDigestImages,
+  imageCounts,
+  imageBlockedCount,
+  imageNextBlockedReason,
   imageRegistryLoadError,
   imagePhase,
   imageProgress,
@@ -239,6 +242,7 @@ const {
   environmentReady,
   componentOptions,
   canExecute,
+  artifactSelectionIssue,
   artifactChosen,
   artifactPrepared,
   testConnection,
@@ -250,6 +254,7 @@ const {
   loadReview,
   pickImageDirectory,
   prepareImages,
+  setImagePullSelection,
   runPreflight,
   executeDeployment,
   progressStep,

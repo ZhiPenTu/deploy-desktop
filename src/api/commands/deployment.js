@@ -26,8 +26,11 @@ export async function downloadDockerOfflinePackage(item = {}, savePath, onProgre
   );
 }
 
-export async function loadOfflineImages(bundleDir) {
-  return await invokeDesktop("load_offline_images", { bundleDir });
+export async function loadOfflineImages(bundleDir, files = null) {
+  return await invokeDesktop("load_offline_images", {
+    bundleDir,
+    files: Array.isArray(files) ? files : null
+  });
 }
 
 export async function exportDeploymentImages(bundleDir, references, target) {
@@ -41,7 +44,15 @@ export async function exportDeploymentImages(bundleDir, references, target) {
   });
 }
 
-export async function pullDeploymentImages(bundleDir, references, target = null, registrySourceId = null, password = null) {
+export async function pullDeploymentImages(
+  bundleDir,
+  references,
+  target = null,
+  registryCredentials = [],
+  registrySourceId = null,
+  password = null,
+  installDir = null
+) {
   return await invokeDesktop('pull_deployment_images', {
     bundleDir,
     references,
@@ -50,7 +61,50 @@ export async function pullDeploymentImages(bundleDir, references, target = null,
     user: target?.user || null,
     keyPath: target?.keyPath || null,
     registrySourceId: registrySourceId || null,
-    password: password || null
+    password: password || null,
+    installDir: installDir || null,
+    registryCredentials: registryCredentials.map((item) => ({
+      registrySourceId: item.registrySourceId,
+      password: item.credential || null
+    }))
+  });
+}
+
+export async function prepareLocalDeploymentImages(bundleDir, references, target, registryCredentials = []) {
+  return await invokeDesktop('prepare_local_deployment_images', {
+    bundleDir,
+    references,
+    host: target?.host || '',
+    port: target?.port ?? 22,
+    user: target?.user || '',
+    keyPath: target?.keyPath || null,
+    registryCredentials: registryCredentials.map((item) => ({
+      registrySourceId: item.registrySourceId,
+      password: item.credential || null
+    }))
+  });
+}
+
+export async function registerDeploymentImageBindings(
+  bundleDir,
+  installDir,
+  references,
+  expected = [],
+  target = null
+) {
+  return await invokeDesktop('register_deployment_image_bindings', {
+    bundleDir,
+    installDir,
+    references,
+    expected: expected.map((item) => ({
+      reference: item.reference,
+      imageId: item.imageId,
+      platform: item.platform
+    })),
+    host: target?.host || null,
+    port: target?.port ?? 22,
+    user: target?.user || null,
+    keyPath: target?.keyPath || null
   });
 }
 

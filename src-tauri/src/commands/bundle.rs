@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::core::path_guard::{self, RelativeIssue};
@@ -776,6 +777,27 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+pub fn sha256_path(path: &Path) -> Result<String, String> {
+    let mut file = fs::File::open(path)
+        .map_err(|_| String::from("无法读取文件内容，请检查文件权限"))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|_| String::from("读取文件内容失败，请检查文件权限"))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
 }
 
 fn compare_versions(left: &str, right: &str) -> i32 {

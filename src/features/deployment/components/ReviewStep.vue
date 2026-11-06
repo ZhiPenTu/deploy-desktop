@@ -2,10 +2,14 @@
   <div class="step-card" v-loading="checkingReview">
     <div class="section-heading">
       <div>
-        <h3>核对服务清单与镜像</h3>
-        <p class="desc">对比所选制品与 {{ targetLabel }} 上的现有部署，确认所需镜像是否已具备。</p>
+        <h3>核对目标环境</h3>
+        <p class="desc">
+          检查目标机器是否已有部署、所需镜像和制品文件；缺什么就在这里补齐，再进入部署。
+        </p>
       </div>
-      <el-button :loading="checkingReview" :disabled="busy" @click="emit('recheck')"> 重新比对 </el-button>
+      <el-button :loading="checkingReview" :disabled="busy" @click="emit('recheck')">
+        重新检查
+      </el-button>
     </div>
     <el-alert v-if="reviewError" :title="reviewError" type="error" :closable="false" show-icon />
     <el-alert v-if="imageResult" :title="imageResult" type="success" :closable="false" show-icon />
@@ -16,11 +20,15 @@
     </el-collapse>
     <template v-if="review">
       <div class="status-row">
+        <span v-if="targetLabel">目标 {{ targetLabel }}</span>
         <el-tag :type="review.hasDeployment ? 'primary' : 'info'">
           {{ review.hasDeployment ? '检测到现有部署' : '未检测到现有部署' }}
         </el-tag>
         <span>制品版本 {{ version || '未标记' }}</span>
-        <span>{{ review.services?.filter((s) => s.change !== 'removed').length }} 个服务</span>
+        <span>{{ review.services?.filter((service) => service.change !== 'removed').length }} 个服务</span>
+        <span v-if="review.targetPlatform">目标架构 {{ review.targetPlatform }}</span>
+        <span v-if="totalImageCount">镜像 {{ readyImageCount }} / {{ totalImageCount }} 已就绪</span>
+        <span v-if="artifactProblemCount">制品 {{ artifactProblemCount }} 项待处理</span>
       </div>
       <div class="section-heading compose-review-heading">
         <p class="field-hint">部署清单：{{ review.composeFile }}</p>
@@ -68,24 +76,231 @@
             </el-table-column>
           </el-table>
         </el-tab-pane>
-        <el-tab-pane label="镜像核对" name="images">
+        <el-tab-pane label="制品文件" name="artifacts">
+          <p class="field-hint tab-hint">{{ artifactHint }}</p>
+          <el-alert
+            v-for="issue in review.artifactIssues || []"
+            :key="issue"
+            :title="issue"
+            type="warning"
+            :closable="false"
+            show-icon
+            class="artifact-alert"
+          />
+          <el-table :data="review.artifacts || []" size="small" empty-text="交付包未声明制品文件">
+            <el-table-column label="制品" min-width="150">
+              <template #default="{ row }">
+                {{ row.label || row.key }}
+                <span class="muted">（{{ row.kind === 'dir' ? '目录' : '文件' }}）</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="目标位置" min-width="280">
+              <template #default="{ row }">
+                <code>{{ row.target }}</code>
+              </template>
+            </el-table-column>
+            <el-table-column label="状态" width="100">
+              <template #default="{ row }">
+                <el-tag size="small" :type="artifactStatusTone(row.status, review.hasDeployment)">
+                  {{ artifactStatusLabel(row.status, review.hasDeployment) }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="大小或文件数" width="170">
+              <template #default="{ row }">
+                <template v-if="row.kind === 'dir'">
+                  {{ row.actualFiles || 0 }} / {{ row.expectedFiles || 0 }} 个文件
+                </template>
+                <template v-else>
+                  {{ formatSize(row.actualBytes) }} / {{ formatSize(row.expectedBytes) }}
+                </template>
+              </template>
+            </el-table-column>
+          </el-table>
+          <div v-if="artifactFixableCount || artifactBlockedCount" class="input-row wrap artifact-actions">
+            <el-button
+              v-if="artifactFixableCount"
+              type="primary"
+              :disabled="busy || !review.ready"
+              @click="emit('next')"
+            >
+              下一步：选择并写入制品
+            </el-button>
+            <el-button v-if="artifactBlockedCount" :disabled="busy" @click="emit('recheck')">
+              重新检查
+            </el-button>
+            <p class="field-hint">
+              {{
+                artifactBlockedCount
+                  ? '先处理无法核对的路径并重新检查，才能继续。'
+                  : '下一步会写入所选组件；缺失或不一致的文件会随组件一并替换。'
+              }}
+            </p>
+          </div>
+        </el-tab-pane>
+        <el-tab-pane label="镜像与修复" name="images">
+          <div class="image-summary">
+            <span>待处理 {{ imagePendingCount }} 个</span>
+            <span v-if="imageCounts.missing">缺失 {{ imageCounts.missing }} 个</span>
+            <span v-if="imageCounts.mismatch">架构不匹配 {{ imageCounts.mismatch }} 个</span>
+            <span v-if="imageCounts.failed">检查失败 {{ imageCounts.failed }} 个</span>
+            <span v-if="imageCounts.invalid">地址无效 {{ imageCounts.invalid }} 个</span>
+          </div>
+          <el-alert
+            v-if="!review.dockerRunning"
+            title="目标 Docker 未运行，当前无法检查或拉取镜像。请返回环境检测启动 Docker 后重新检查。"
+            type="warning"
+            :closable="false"
+            show-icon
+          />
           <el-table :data="review.images || []" size="small" empty-text="清单中没有镜像">
-            <el-table-column label="所需镜像" min-width="280">
+            <el-table-column label="所需镜像" min-width="260">
               <template #default="{ row }">
                 <code>{{ row.imageRef }}</code>
               </template>
             </el-table-column>
-            <el-table-column label="服务" min-width="150">
+            <el-table-column label="服务" min-width="130">
               <template #default="{ row }">{{ row.services?.join('、') }}</template>
             </el-table-column>
-            <el-table-column label="目标主机" width="115">
+            <el-table-column label="状态" width="115">
               <template #default="{ row }">
-                <el-tag size="small" :type="row.status === 'ready' ? 'success' : 'warning'">
-                  {{ row.status === 'ready' ? '已具备' : row.status === 'unconfirmed' ? '未确认' : '缺失' }}
+                <el-tag size="small" :type="imageStatusTone(row.status)">
+                  {{ imageStatusLabel(row.status) }}
                 </el-tag>
               </template>
             </el-table-column>
+            <el-table-column label="原因与处理" min-width="280">
+              <template #default="{ row }">{{ imageStatusDetail(row) }}</template>
+            </el-table-column>
           </el-table>
+          <el-alert
+            v-if="imageBlockedCount"
+            :title="`有 ${imageBlockedCount} 个镜像不能直接批量拉取，请按原因重新检查、更换交付包或使用离线镜像包。`"
+            type="warning"
+            :closable="false"
+            show-icon
+          />
+          <div v-if="imagePendingCount" class="image-preparation">
+            <h4>准备待处理镜像</h4>
+            <p class="field-hint">{{ imageSummary }}</p>
+            <el-radio-group
+              :model-value="imageSource"
+              :disabled="busy"
+              aria-label="镜像来源"
+              @update:model-value="(value) => emit('update:image-source', value)"
+            >
+              <el-radio-button value="pull">从镜像仓库拉取</el-radio-button>
+              <el-radio-button v-if="isRemote" value="relay">本机拉取后传入</el-radio-button>
+              <el-radio-button value="offline">离线镜像包</el-radio-button>
+            </el-radio-group>
+            <p v-if="imageSource === 'pull'" class="field-hint">
+              在{{ isRemote ? '目标主机' : '本机' }}拉取镜像。公开镜像无需登录；私有镜像请选择对应镜像源。
+            </p>
+            <p v-else-if="imageSource === 'relay'" class="field-hint">
+              先在本机按目标架构拉取，再通过 SSH 传入目标机导入。适用于目标机无法访问镜像仓库的局域网环境。
+            </p>
+            <p v-else class="field-hint">
+              选择本机离线镜像包目录{{ isRemote ? '，仅传输待处理镜像对应的镜像包，随后在目标主机解压并导入。' : '（含 images/），将其中的镜像包导入本机。' }}
+            </p>
+            <el-alert
+              v-if="digestTransferNotice"
+              :title="digestTransferNotice"
+              type="warning"
+              :closable="false"
+              show-icon
+              class="digest-alert"
+            />
+            <div v-if="imageSource !== 'offline' && imagePullGroups.length" class="registry-groups">
+              <div v-for="group in imagePullGroups" :key="group.registry" class="registry-group">
+                <div class="registry-group-title">
+                  <span>{{ group.label }}</span>
+                  <span class="field-hint">{{ group.count }} 个镜像</span>
+                </div>
+                <el-select
+                  :model-value="group.sourceId"
+                  :disabled="busy"
+                  placeholder="使用已有登录状态"
+                  aria-label="登录镜像源"
+                  @update:model-value="(value) => emit('update:image-pull-source', {
+                    registry: group.registry,
+                    sourceId: value || ''
+                  })"
+                >
+                  <el-option label="使用已有登录状态" value="" />
+                  <el-option
+                    v-for="source in group.sources || []"
+                    :key="source.id"
+                    :label="`${source.name}（${source.address}）`"
+                    :value="source.id"
+                  />
+                </el-select>
+                <el-input
+                  v-if="group.hasUsername"
+                  :model-value="group.credential"
+                  :disabled="busy"
+                  type="password"
+                  show-password
+                  autocomplete="new-password"
+                  :placeholder="group.needsPassword ? '本次使用的密码或令牌' : '留空使用已保存的密码'"
+                  aria-label="镜像源密码"
+                  @update:model-value="(value) => emit('update:image-pull-credential', {
+                    registry: group.registry,
+                    credential: value
+                  })"
+                />
+                <p v-if="!(group.sources || []).length" class="field-hint">
+                  未找到匹配的镜像源。公开镜像可直接拉取；私有镜像请先在“设置 &gt; 镜像设置”中配置对应镜像源。
+                </p>
+                <p v-else-if="group.needsPassword" class="field-hint">
+                  请填写本次使用的密码或令牌，凭据只用于本次拉取。
+                </p>
+                <p v-else-if="group.hasUsername" class="field-hint">
+                  留空时使用该镜像源已保存的密码；填写后只用于本次拉取。
+                </p>
+                <p v-else class="field-hint">
+                  留空时使用当前 Docker 登录状态。
+                </p>
+              </div>
+            </div>
+            <p v-else-if="imageSource !== 'offline' && !pullableCount" class="field-hint">
+              当前没有可通过拉取修复的镜像，请改用离线镜像包或检查交付包。
+            </p>
+            <p v-if="imageSource !== 'offline' && imageRegistryLoadError" class="field-hint">
+              {{ imageRegistryLoadError }}；仍可按清单地址尝试公开拉取。
+            </p>
+            <div v-if="imageSource === 'offline'" class="input-row wrap offline-row">
+              <el-input
+                :model-value="imageMediaDir"
+                :disabled="busy"
+                :placeholder="bundleDir || '本机离线介质目录'"
+                aria-label="镜像介质目录"
+                @update:model-value="(value) => emit('update:image-media-dir', value)"
+              />
+              <el-button :disabled="busy" @click="emit('pick-image-directory')">选择目录</el-button>
+            </div>
+            <div class="input-row wrap">
+              <el-button
+                v-if="canPrepare"
+                type="primary"
+                :loading="importingImages"
+                :disabled="busy || !canPrepare"
+                @click="emit('prepare-images')"
+              >
+                {{ prepareButtonText }}
+              </el-button>
+              <el-button :disabled="busy" @click="emit('recheck')">重新检查</el-button>
+            </div>
+          </div>
+          <div v-else class="image-preparation image-ready">
+            <h4>镜像已就绪</h4>
+            <p class="field-hint">目标 Docker 已具备清单中的全部镜像，可以直接继续。</p>
+            <el-button :disabled="busy" @click="emit('recheck')">重新检查</el-button>
+          </div>
+          <div v-if="importingImages && imagePhase" class="image-progress" role="status">
+            <p>{{ imagePhase }}</p>
+            <el-progress v-if="imageProgress" :percentage="imageProgress.percent" />
+            <p v-if="imageProgress?.message" class="field-hint">{{ imageProgress.message }}</p>
+          </div>
         </el-tab-pane>
       </el-tabs>
       <ConfigDiffDialog
@@ -100,95 +315,18 @@
           {{ safeText(issue) }}
         </li>
       </ul>
-      <div v-if="review.missingImages?.length" class="image-preparation">
-        <h4>准备缺失镜像</h4>
-        <el-radio-group
-          :model-value="imageSource"
-          :disabled="busy"
-          aria-label="镜像来源"
-          @update:model-value="(value) => emit('update:image-source', value)"
-        >
-          <el-radio-button value="pull">镜像仓库</el-radio-button>
-          <el-radio-button v-if="isRemote" value="docker">本机 Docker</el-radio-button>
-          <el-radio-button value="offline">离线镜像包</el-radio-button>
-        </el-radio-group>
-        <p v-if="imageSource === 'pull'" class="field-hint">
-          按清单中的镜像地址拉取 {{ review.missingImages.length }} 个缺失镜像到{{ isRemote ? '目标主机' : '本机' }} Docker，拉取完成后自动重新比对。
-        </p>
-        <p v-else-if="isRemote && imageSource === 'docker'" class="field-hint">
-          从本机 Docker 导出 {{ review.missingImages.length }} 个缺失镜像，传输到 {{ targetLabel }} 后解压并导入。请先在本机准备与目标主机架构一致的镜像。
-        </p>
-        <p v-else class="field-hint">
-          选择本机离线镜像包目录{{ isRemote ? '，仅传输缺失镜像对应的镜像包，随后在目标主机解压并导入。' : '（含 images/），将其中的镜像包导入本机。' }}导入后会重新比对。
-        </p>
-        <div v-if="imageSource === 'pull'" class="registry-pull-fields">
-          <el-select
-            :model-value="imageRegistrySourceId"
-            :disabled="busy"
-            clearable
-            :placeholder="loginStateLabel"
-            aria-label="登录镜像源"
-            @update:model-value="(value) => emit('update:image-registry-source-id', value || '')"
-          >
-            <el-option :label="loginStateLabel" value="" />
-            <el-option
-              v-for="source in imageRegistryOptions"
-              :key="source.id"
-              :label="`${source.name}（${source.address}）`"
-              :value="source.id"
-            />
-          </el-select>
-          <el-input
-            v-if="imageRegistryNeedsPassword"
-            :model-value="imageRegistryPassword"
-            :disabled="busy"
-            type="password"
-            show-password
-            autocomplete="new-password"
-            placeholder="本次使用的密码或令牌"
-            aria-label="镜像源密码"
-            @update:model-value="(value) => emit('update:image-registry-password', value)"
-          />
-          <p v-if="imageRegistryLoadError" class="field-hint">
-            {{ imageRegistryLoadError }}；仍可按清单地址尝试公开拉取。
-          </p>
-          <p v-else class="field-hint">
-            {{ registryHint }}
-          </p>
-        </div>
-        <div class="input-row wrap">
-          <template v-if="imageSource === 'offline'">
-            <el-input
-              :model-value="imageMediaDir"
-              :disabled="busy"
-              :placeholder="bundleDir || '本机离线介质目录'"
-              aria-label="镜像介质目录"
-              @update:model-value="(value) => emit('update:image-media-dir', value)"
-            />
-            <el-button :disabled="busy" @click="emit('pick-image-directory')"> 选择目录 </el-button>
-          </template>
-          <el-button
-            type="primary"
-            :loading="importingImages"
-            :disabled="busy"
-            @click="emit('prepare-images')"
-          >
-            {{ prepareButtonText }}
-          </el-button>
-        </div>
-      </div>
-      <div v-if="importingImages && imagePhase" class="image-progress" role="status">
-        <p>{{ imagePhase }}</p>
-        <el-progress v-if="imageProgress" :percentage="imageProgress.percent" />
-        <p v-if="imageProgress?.message" class="field-hint">{{ imageProgress.message }}</p>
-      </div>
     </template>
     <div class="step-footer">
-      <el-button :disabled="busy" @click="emit('previous')"> 上一步 </el-button>
-      <el-button type="primary" :disabled="busy || !review?.ready" @click="emit('next')">
-        下一步：选择更新
-        <el-icon class="el-icon--right"><ArrowRight /></el-icon>
-      </el-button>
+      <el-button :disabled="busy" @click="emit('previous')">上一步</el-button>
+      <div class="footer-actions">
+        <p v-if="imageNextBlockedReason" class="next-blocked" role="status">
+          {{ imageNextBlockedReason }}
+        </p>
+        <el-button type="primary" :disabled="busy || !review?.ready" @click="emit('next')">
+          下一步：选择更新
+          <el-icon class="el-icon--right"><ArrowRight /></el-icon>
+        </el-button>
+      </div>
     </div>
   </div>
 </template>
@@ -197,7 +335,14 @@
 import { computed, ref, watch } from 'vue';
 import { ArrowRight } from '@element-plus/icons-vue';
 import ConfigDiffDialog from './ConfigDiffDialog.vue';
-import { changeLabel, stateLabel } from '../domain/review.js';
+import {
+  artifactStatusLabel,
+  artifactStatusTone,
+  changeLabel,
+  stateLabel
+} from '../domain/review.js';
+import { imageStatusDetail, imageStatusLabel, imageStatusTone } from '../domain/images.js';
+import { formatSize } from '../../../shared/format.js';
 import { safeText } from '../domain/errors.js';
 
 const props = defineProps({
@@ -211,18 +356,19 @@ const props = defineProps({
   isRemote: { type: Boolean, default: false },
   imageMediaDir: { type: String, default: '' },
   imageSource: { type: String, default: 'pull' },
-  imageRegistrySourceId: { type: String, default: '' },
-  imageRegistryPassword: { type: String, default: '' },
-  imageRegistryOptions: { type: Array, default: () => [] },
-  imageRegistryNeedsPassword: { type: Boolean, default: false },
-  imageRegistryMixed: { type: Boolean, default: false },
+  imagePullGroups: { type: Array, default: () => [] },
+  imageCounts: { type: Object, default: () => ({}) },
+  imagePendingCount: { type: Number, default: 0 },
+  imageDigestRefs: { type: Array, default: () => [] },
+  imageBlockedCount: { type: Number, default: 0 },
+  imageNextBlockedReason: { type: String, default: '' },
   imageRegistryLoadError: { type: String, default: '' },
   imagePhase: { type: String, default: '' },
   imageProgress: { type: Object, default: null },
   imageDiagnostics: { type: String, default: '' },
   imageResult: { type: String, default: '' },
   importingImages: { type: Boolean, default: false },
-  reviewTab: { type: String, default: 'services' }
+  reviewTab: { type: String, default: 'images' }
 });
 
 const emit = defineEmits([
@@ -230,8 +376,8 @@ const emit = defineEmits([
   'update:review-tab',
   'update:image-media-dir',
   'update:image-source',
-  'update:image-registry-source-id',
-  'update:image-registry-password',
+  'update:image-pull-source',
+  'update:image-pull-credential',
   'pick-image-directory',
   'prepare-images',
   'previous',
@@ -240,22 +386,68 @@ const emit = defineEmits([
 
 const configDiffOpen = ref(false);
 const configDiffService = ref('');
-const loginStateLabel = computed(() =>
-  props.isRemote ? '使用目标机已有登录状态' : '使用本机已有登录状态'
+
+const totalImageCount = computed(() => props.review?.images?.length || 0);
+const readyImageCount = computed(
+  () => props.review?.images?.filter((image) => image.status === 'ready').length || 0
 );
-const registryHint = computed(() => {
-  if (props.imageRegistryMixed) {
-    return `缺失镜像来自多个镜像仓库，当前只能${loginStateLabel.value}或公开访问；私有镜像请先在各仓库完成登录，或改用离线镜像包。`;
+const pullableCount = computed(() =>
+  Math.max(0, Number(props.imagePendingCount) - Number(props.imageBlockedCount))
+);
+const transferableCount = computed(() =>
+  props.imageSource === 'offline'
+    ? Math.max(0, Number(props.imagePendingCount) - props.imageDigestRefs.length)
+    : pullableCount.value
+);
+const imageSummary = computed(() => {
+  const counts = props.imageCounts || {};
+  const parts = [];
+  if (counts.missing) parts.push(`缺失 ${counts.missing} 个`);
+  if (counts.mismatch) parts.push(`架构不匹配 ${counts.mismatch} 个`);
+  if (counts.failed) parts.push(`检查失败 ${counts.failed} 个`);
+  if (counts.invalid) parts.push(`地址无效 ${counts.invalid} 个`);
+  return parts.length ? `${parts.join('，')}。` : '所需镜像均已具备。';
+});
+const digestTransferNotice = computed(() => {
+  if (props.imageSource !== 'offline') return '';
+  if (!props.imageDigestRefs.length) return '';
+  return `离线镜像包无法核对仓库摘要，请选择“${props.isRemote ? '本机拉取后传入' : '从镜像仓库拉取'}”处理以下镜像：${props.imageDigestRefs.join('、')}`;
+});
+const artifactProblemCount = computed(() => {
+  if (!props.review?.hasDeployment) return 0;
+  return (props.review.artifacts || []).filter((artifact) => artifact.status !== 'present').length;
+});
+const artifactFixableCount = computed(
+  () =>
+    (props.review?.artifacts || []).filter((artifact) =>
+      ['missing', 'incomplete'].includes(artifact.status)
+    ).length
+);
+const artifactBlockedCount = computed(
+  () =>
+    (props.review?.artifacts || []).filter((artifact) =>
+      ['unconfirmed', 'invalid'].includes(artifact.status)
+    ).length
+);
+const artifactHint = computed(() => {
+  if (!props.review?.artifacts?.length) {
+    return '交付包没有声明需要写入目标目录的制品文件。';
   }
-  if (props.imageRegistryOptions.length) {
-    return '仅列出与缺失镜像仓库地址一致的镜像源；公开镜像可留空。凭据只用于本次拉取。';
-  }
-  return '未找到与缺失镜像仓库地址一致的镜像源。公开镜像可直接拉取；私有镜像请先在“设置 > 镜像设置”中配置对应镜像源。';
+  return props.review.hasDeployment
+    ? '这里显示目标机上实际存在的制品文件；缺失或不一致的文件会在下一步增量更新时替换。'
+    : '首次部署会在下一步把这些制品文件写入目标目录。';
 });
 const prepareButtonText = computed(() => {
-  if (props.imageSource === 'pull') return '拉取缺失镜像';
-  return props.isRemote ? '传输并导入缺失镜像' : '导入镜像并比对';
+  if (props.imageSource === 'pull') return `拉取 ${pullableCount.value} 个镜像`;
+  if (props.imageSource === 'relay') return '本机拉取并传入';
+  return props.isRemote ? '传输并导入镜像' : '导入镜像并比对';
 });
+const canPrepare = computed(
+  () =>
+    props.imagePendingCount > 0 &&
+    (props.imageSource === 'pull' ? pullableCount.value > 0 : transferableCount.value > 0) &&
+    (props.imageSource !== 'relay' || props.isRemote)
+);
 
 function openConfigDiff(serviceName = '') {
   configDiffService.value = serviceName;
@@ -284,6 +476,12 @@ h3 {
   font-weight: 650;
   letter-spacing: -0.01em;
   margin-bottom: 6px;
+  color: var(--text-main);
+}
+h4 {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 8px;
   color: var(--text-main);
 }
 .desc {
@@ -346,6 +544,26 @@ h3 {
   margin-top: 6px;
   overflow-wrap: anywhere;
 }
+.tab-hint {
+  margin: 0 0 12px;
+}
+.artifact-alert {
+  margin-bottom: 12px;
+}
+.digest-alert {
+  margin-top: 12px;
+}
+.artifact-actions {
+  margin-top: 14px;
+}
+.image-summary {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+}
 .image-preparation {
   padding: 18px 20px;
   background: var(--panel-subtle);
@@ -359,20 +577,51 @@ h3 {
 .image-preparation .el-radio-group {
   margin-top: 14px;
 }
-.registry-pull-fields {
+.image-ready {
   display: flex;
+  align-items: center;
+  gap: 16px;
   flex-wrap: wrap;
+}
+.image-ready .field-hint {
+  flex: 1;
+  min-width: 220px;
+  margin: 0;
+}
+.registry-groups {
+  display: grid;
   gap: 12px;
   margin-top: 14px;
 }
-.registry-pull-fields .el-select,
-.registry-pull-fields .el-input {
-  flex: 1;
-  min-width: 220px;
+.registry-group {
+  padding: 14px 16px;
+  background: var(--panel-bg);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
 }
-.registry-pull-fields .field-hint {
+.registry-group-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.registry-group-title .field-hint {
+  width: auto;
+  margin: 0;
+  font-weight: 400;
+}
+.registry-group .el-select,
+.registry-group .el-input {
   width: 100%;
-  margin-top: 0;
+}
+.registry-group .el-input {
+  margin-top: 10px;
+}
+.offline-row {
+  margin-top: 14px;
 }
 .image-progress {
   margin-top: 16px;
@@ -386,6 +635,13 @@ code {
   font-size: 12px;
   overflow-wrap: anywhere;
 }
+:deep(.el-table .cell) {
+  overflow-wrap: anywhere;
+}
+.muted {
+  color: var(--text-muted);
+  font-size: 12px;
+}
 .step-footer {
   display: flex;
   align-items: center;
@@ -395,6 +651,19 @@ code {
   margin-top: 26px;
   border-top: 1px solid var(--border-color);
 }
+.footer-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.next-blocked {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
 @media (max-width: 760px) {
   .step-card {
     padding: 20px;
@@ -402,6 +671,9 @@ code {
   .step-footer,
   .section-heading {
     flex-wrap: wrap;
+  }
+  .footer-actions {
+    justify-content: flex-start;
   }
 }
 </style>

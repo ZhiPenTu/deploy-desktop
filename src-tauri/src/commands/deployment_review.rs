@@ -7,7 +7,10 @@ use std::time::Duration;
 
 use crate::core::process;
 
-use super::remote_ssh::{find_binary, resolve_existing_key, run_ssh_script, shell_quote};
+use super::bundle::{ArtifactKind, ArtifactRoot, Bundle};
+use super::docker_setup::docker_command;
+use super::deployment_image_bindings::{local_bindings, remote_bindings, DeploymentImageBinding};
+use super::remote_ssh::{resolve_existing_key, run_ssh_script, shell_quote};
 use super::remote_update::{
     compose_service_views, match_tarball, normalize_image_ref, resolve_bundle_file,
     scan_image_files, ComposeServiceView,
@@ -38,9 +41,32 @@ pub struct DeploymentImageReview {
     pub image_ref: String,
     pub services: Vec<String>,
     pub docker_present: bool,
-    /// ready / missing / unconfirmed. A tarball alone never makes an image ready.
+    /// ready / missing / platform_mismatch / check_failed / unavailable / invalid.
+    /// A tarball alone never makes an image ready.
     pub status: String,
+    pub platform: String,
+    pub target_platform: String,
+    pub detail: String,
+    pub pullable: bool,
     pub local_file: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeploymentArtifactReview {
+    pub key: String,
+    pub label: String,
+    pub source: String,
+    pub root: String,
+    pub path: String,
+    pub target: String,
+    pub kind: String,
+    /// present / missing / incomplete / invalid / unconfirmed.
+    pub status: String,
+    pub expected_bytes: u64,
+    pub actual_bytes: u64,
+    pub expected_files: usize,
+    pub actual_files: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -60,7 +86,11 @@ pub struct DeploymentReview {
     pub compose_changed: bool,
     pub services: Vec<DeploymentServiceReview>,
     pub images: Vec<DeploymentImageReview>,
+    pub target_platform: String,
+    pub artifacts: Vec<DeploymentArtifactReview>,
+    pub artifact_issues: Vec<String>,
     pub missing_images: Vec<String>,
+    pub unready_images: Vec<String>,
     pub issues: Vec<String>,
     pub ready: bool,
     pub can_first_deploy: bool,
@@ -140,6 +170,8 @@ fn review_blocking(
         .as_deref()
         .map(str::trim)
         .filter(|host| !host.is_empty());
+    let artifacts = artifact_probes(&bundle, install, remote.is_some());
+    let bindings;
     let target = if let Some(host) = remote {
         let user = user
             .as_deref()
@@ -147,22 +179,43 @@ fn review_blocking(
             .filter(|user| !user.is_empty())
             .ok_or_else(|| "请选择具有 SSH 登录账号的主机".to_string())?;
         let key = resolve_existing_key(key_path, host)?;
+        bindings = remote_bindings(host, port.unwrap_or(22), user, key.as_deref(), install)?;
         let output = run_ssh_script(
             host,
             port.unwrap_or(22),
             user,
             key.as_deref(),
-            &target_script(install, &images),
+            &target_script_with_bindings(install, &images, &artifacts, &bindings),
         )
         .map_err(|_| "无法连接目标主机，请检查主机连接和 SSH 凭证后重试".to_string())?;
         if !output.status.success() {
             return Err("无法完成目标主机核对，请检查 SSH 连接与部署目录的读取权限".to_string());
         }
-        parse_target_output(&String::from_utf8_lossy(&output.stdout))?
+        let target = parse_target_output(&String::from_utf8_lossy(&output.stdout))?;
+        if !target.artifacts_checked {
+            return Err(
+                "目标主机未返回完整的制品文件核对结果，请检查连接后重新核对".to_string(),
+            );
+        }
+        target
     } else {
-        inspect_local_target(Path::new(install), &images)?
+        bindings = local_bindings(Path::new(install))?;
+        inspect_local_target(Path::new(install), &images, &artifacts, &bindings)?
     };
-    let mut review = compare(&compose_path, install, &desired, &services, &images, target)?;
+    let mut review = compare_with_artifacts(
+        &compose_path,
+        install,
+        &desired,
+        &services,
+        &images,
+        target,
+        &artifacts,
+    )?;
+    for image in &mut review.images {
+        if image.status == "ready" && bindings.iter().any(|binding| binding.reference == image.image_ref) {
+            image.detail = "目标 Docker 中的离线镜像已按源端镜像内容核对，可继续部署".to_string();
+        }
+    }
     review.image_check = if review.target_checked && review.docker_running {
         if remote.is_some() {
             "remote"
@@ -228,15 +281,134 @@ fn unique_images(services: &[ComposeServiceView]) -> Vec<String> {
     images
 }
 
-fn inspect_local_target(install: &Path, images: &[String]) -> Result<TargetSnapshot, String> {
+#[derive(Debug, Clone)]
+struct ArtifactExpectedFile {
+    relative: String,
+    size: u64,
+    sha256: String,
+}
+
+#[derive(Debug, Clone)]
+struct ArtifactProbe {
+    key: String,
+    label: String,
+    source: String,
+    root: String,
+    path: String,
+    kind: ArtifactKind,
+    target: String,
+    expected_bytes: u64,
+    expected_files: usize,
+    expected: Vec<ArtifactExpectedFile>,
+}
+
+fn posix_join(base: &str, child: &str) -> String {
+    let base = base.trim().trim_end_matches('/');
+    let child = child.trim().trim_start_matches('/');
+    if child.is_empty() {
+        base.to_string()
+    } else if base.is_empty() {
+        child.to_string()
+    } else {
+        format!("{base}/{child}")
+    }
+}
+
+fn artifact_probes(bundle: &Bundle, install: &str, remote: bool) -> Vec<ArtifactProbe> {
+    let deploy_rel = bundle.deploy_source_rel();
+    let local_install = Path::new(install);
+    let local_deploy = local_install.join(&deploy_rel);
+    let remote_install = install.trim().trim_end_matches('/');
+    let remote_deploy = posix_join(remote_install, &deploy_rel);
+    bundle
+        .descriptor
+        .artifacts
+        .iter()
+        .map(|artifact| {
+            let source = artifact.source.trim();
+            let owned: Vec<_> = match artifact.kind {
+                ArtifactKind::File => bundle
+                    .descriptor
+                    .files
+                    .iter()
+                    .filter(|file| file.path.trim() == source)
+                    .collect(),
+                ArtifactKind::Dir => {
+                    let prefix = format!("{}/", source.trim_end_matches('/'));
+                    bundle
+                        .descriptor
+                        .files
+                        .iter()
+                        .filter(|file| file.path.trim().starts_with(&prefix))
+                        .collect()
+                }
+            };
+            let (local_base, remote_base) = match artifact.root {
+                ArtifactRoot::Install => (local_install.to_path_buf(), remote_install),
+                ArtifactRoot::Deploy => (local_deploy.clone(), remote_deploy.as_str()),
+            };
+            let target = if remote {
+                posix_join(remote_base, &artifact.path)
+            } else {
+                local_base
+                    .join(artifact.path.trim())
+                    .to_string_lossy()
+                    .to_string()
+            };
+            let expected: Vec<ArtifactExpectedFile> = owned
+                .iter()
+                .map(|file| {
+                    let relative = match artifact.kind {
+                        ArtifactKind::File => String::new(),
+                        ArtifactKind::Dir => file
+                            .path
+                            .trim()
+                            .strip_prefix(source.trim_end_matches('/'))
+                            .unwrap_or("")
+                            .trim_start_matches('/')
+                            .to_string(),
+                    };
+                    ArtifactExpectedFile {
+                        relative,
+                        size: file.size,
+                        sha256: file.sha256.to_ascii_lowercase(),
+                    }
+                })
+                .collect();
+            ArtifactProbe {
+                key: artifact.key.clone(),
+                label: if artifact.label.trim().is_empty() {
+                    artifact.key.clone()
+                } else {
+                    artifact.label.clone()
+                },
+                source: source.to_string(),
+                root: artifact.root.as_str().to_string(),
+                path: artifact.path.clone(),
+                kind: artifact.kind,
+                target,
+                expected_bytes: owned.iter().map(|file| file.size).sum(),
+                expected_files: owned.len(),
+                expected,
+            }
+        })
+        .collect()
+}
+
+fn inspect_local_target(
+    install: &Path,
+    images: &[String],
+    artifacts: &[ArtifactProbe],
+    bindings: &[DeploymentImageBinding],
+) -> Result<TargetSnapshot, String> {
     check_local_endpoint()?;
     let mut target = local_compose_snapshot(install)?;
-    let mut info_command = Command::new(find_binary("docker"));
+    let mut info_command = docker_command();
     info_command.arg("info");
     target.docker_running = run_local_docker(info_command, Duration::from_secs(15))
         .map(|output| output.status.success())
         .unwrap_or(false);
-    let mut compose_command = Command::new(find_binary("docker"));
+    let mut compose_command = docker_command();
     compose_command.args(["compose", "version"]);
     target.compose_available = run_local_docker(compose_command, Duration::from_secs(15))
         .map(|output| output.status.success())
@@ -246,8 +418,9 @@ fn inspect_local_target(install: &Path, images: &[String]) -> Result<TargetSnaps
     } else {
         String::new()
     };
+    target.target_platform = target_platform.clone();
     if target.docker_running {
-        let mut ps_command = Command::new(find_binary("docker"));
+        let mut ps_command = docker_command();
         ps_command.args(["ps", "-aq"]);
         let containers = run_local_docker(ps_command, Duration::from_secs(15))
             .map_err(|_| "无法读取本机容器状态，请检查 Docker 后重试".to_string())?;
@@ -261,7 +434,7 @@ fn inspect_local_target(install: &Path, images: &[String]) -> Result<TargetSnaps
             .filter(|id| !id.is_empty())
             .collect();
         if !ids.is_empty() {
-            let mut command = Command::new(find_binary("docker"));
+            let mut command = docker_command();
             command
                 .args(["inspect", "--format", CONTAINER_FORMAT, "--"])
                 .args(&ids);
@@ -284,28 +457,59 @@ fn inspect_local_target(install: &Path, images: &[String]) -> Result<TargetSnaps
         target.containers_checked = true;
     }
     for (index, reference) in images.iter().enumerate() {
-        let state = if !target.docker_running || !valid_image_reference(reference) {
-            "unconfirmed"
+        let snapshot = if !target.docker_running || !valid_image_reference(reference) {
+            ImageSnapshot {
+                status: if target.docker_running {
+                    "invalid".to_string()
+                } else {
+                    "unavailable".to_string()
+                },
+                platform: String::new(),
+            }
         } else {
-            let mut command = Command::new(find_binary("docker"));
+            let binding = bindings.iter().find(|binding| &binding.reference == reference);
+            let inspected = binding
+                .map(|binding| binding.image_id.as_str())
+                .unwrap_or(reference);
+            let mut command = docker_command();
             command.args([
                 "image",
                 "inspect",
                 "--format",
                 "{{.Id}}|{{.Os}}/{{.Architecture}}",
                 "--",
-                reference,
+                inspected,
             ]);
             match run_local_docker(command, Duration::from_secs(15)) {
                 Ok(output) if output.status.success() => {
                     let text = String::from_utf8_lossy(&output.stdout);
                     match text.trim().split_once('|') {
                         Some((id, platform))
-                            if valid_image_id(id) && platform_matches(platform, &target_platform) =>
+                            if valid_image_id(id)
+                                && binding.map_or(true, |binding| {
+                                    binding.image_id == id
+                                        && platform_matches(platform, &binding.platform)
+                                })
+                                && platform_matches(platform, &target_platform) =>
                         {
-                            "ready"
+                            ImageSnapshot {
+                                status: "ready".to_string(),
+                                platform: platform.to_string(),
+                            }
                         }
-                        _ => "unconfirmed",
+                        Some((id, platform))
+                            if valid_image_id(id)
+                                && binding.map_or(true, |binding| {
+                                    binding.image_id == id
+                                        && platform_matches(platform, &binding.platform)
+                                }) => ImageSnapshot {
+                            status: "platform_mismatch".to_string(),
+                            platform: platform.to_string(),
+                        },
+                        _ => ImageSnapshot {
+                            status: "check_failed".to_string(),
+                            platform: String::new(),
+                        },
                     }
                 }
                 Ok(output)
@@ -313,15 +517,196 @@ fn inspect_local_target(install: &Path, images: &[String]) -> Result<TargetSnaps
                         .to_ascii_lowercase()
                         .contains("no such image") =>
                 {
-                    "missing"
+                    ImageSnapshot {
+                        status: "missing".to_string(),
+                        platform: String::new(),
+                    }
                 }
-                Ok(_) => "unconfirmed",
-                Err(_) => "unconfirmed",
+                Ok(_) => ImageSnapshot {
+                    status: "check_failed".to_string(),
+                    platform: String::new(),
+                },
+                Err(_) => ImageSnapshot {
+                    status: "check_failed".to_string(),
+                    platform: String::new(),
+                },
             }
         };
-        target.image_states.insert(index, state.to_string());
+        target.image_states.insert(index, snapshot);
     }
+    target.artifact_states = inspect_local_artifacts(artifacts);
+    target.artifacts_checked = true;
     Ok(target)
+}
+
+fn inspect_local_artifacts(probes: &[ArtifactProbe]) -> HashMap<usize, ArtifactSnapshot> {
+    probes
+        .iter()
+        .enumerate()
+        .map(|(index, probe)| (index, local_artifact_snapshot(probe)))
+        .collect()
+}
+
+fn local_artifact_snapshot(probe: &ArtifactProbe) -> ArtifactSnapshot {
+    let path = Path::new(&probe.target);
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return ArtifactSnapshot {
+                status: "missing".to_string(),
+                ..Default::default()
+            };
+        }
+        Err(_) => {
+            return ArtifactSnapshot {
+                status: "unconfirmed".to_string(),
+                ..Default::default()
+            };
+        }
+    };
+    if metadata.file_type().is_symlink() {
+        return ArtifactSnapshot {
+            status: "invalid".to_string(),
+            ..Default::default()
+        };
+    }
+    match probe.kind {
+        ArtifactKind::File if metadata.is_file() => {
+            local_file_snapshot(path, probe.expected.first())
+        }
+        ArtifactKind::Dir if metadata.is_dir() => match local_tree_unsafe(path) {
+            Ok(true) => ArtifactSnapshot {
+                status: "invalid".to_string(),
+                ..Default::default()
+            },
+            Ok(false) => match directory_stats(path) {
+                Ok((bytes, files)) => ArtifactSnapshot {
+                    status: local_directory_status(path, &probe.expected),
+                    actual_bytes: bytes,
+                    actual_files: files,
+                },
+                Err(_) => ArtifactSnapshot {
+                    status: "unconfirmed".to_string(),
+                    ..Default::default()
+                },
+            },
+            Err(_) => ArtifactSnapshot {
+                status: "unconfirmed".to_string(),
+                ..Default::default()
+            },
+        },
+        _ => ArtifactSnapshot {
+            status: "invalid".to_string(),
+            ..Default::default()
+        },
+    }
+}
+
+fn local_file_snapshot(path: &Path, expected: Option<&ArtifactExpectedFile>) -> ArtifactSnapshot {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(_) => {
+            return ArtifactSnapshot {
+                status: "unconfirmed".to_string(),
+                ..Default::default()
+            }
+        }
+    };
+    let Some(expected) = expected else {
+        return ArtifactSnapshot {
+            status: "present".to_string(),
+            actual_bytes: metadata.len(),
+            actual_files: 1,
+        };
+    };
+    if metadata.len() != expected.size {
+        return ArtifactSnapshot {
+            status: "incomplete".to_string(),
+            actual_bytes: metadata.len(),
+            actual_files: 1,
+        };
+    }
+    match crate::commands::bundle::sha256_path(path) {
+        Ok(digest) if digest == expected.sha256 => ArtifactSnapshot {
+            status: "present".to_string(),
+            actual_bytes: metadata.len(),
+            actual_files: 1,
+        },
+        Ok(_) => ArtifactSnapshot {
+            status: "incomplete".to_string(),
+            actual_bytes: metadata.len(),
+            actual_files: 1,
+        },
+        Err(_) => ArtifactSnapshot {
+            status: "unconfirmed".to_string(),
+            actual_bytes: metadata.len(),
+            actual_files: 1,
+        },
+    }
+}
+
+fn local_directory_status(path: &Path, expected: &[ArtifactExpectedFile]) -> String {
+    for file in expected {
+        let target = if file.relative.is_empty() {
+            path.to_path_buf()
+        } else {
+            path.join(&file.relative)
+        };
+        let metadata = match fs::symlink_metadata(&target) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return "invalid".to_string(),
+            Ok(metadata) if !metadata.is_file() => return "incomplete".to_string(),
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return "incomplete".to_string()
+            }
+            Err(_) => return "unconfirmed".to_string(),
+        };
+        if metadata.len() != file.size {
+            return "incomplete".to_string();
+        }
+        match crate::commands::bundle::sha256_path(&target) {
+            Ok(digest) if digest == file.sha256 => {}
+            Ok(_) => return "incomplete".to_string(),
+            Err(_) => return "unconfirmed".to_string(),
+        }
+    }
+    "present".to_string()
+}
+
+fn local_tree_unsafe(path: &Path) -> std::io::Result<bool> {
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            return Ok(true);
+        }
+        if file_type.is_dir() {
+            if local_tree_unsafe(&entry.path())? {
+                return Ok(true);
+            }
+        } else if !file_type.is_file() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn directory_stats(path: &Path) -> std::io::Result<(u64, usize)> {
+    let mut bytes = 0;
+    let mut files = 0;
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            let (child_bytes, child_files) = directory_stats(&entry.path())?;
+            bytes += child_bytes;
+            files += child_files;
+        } else if file_type.is_file() {
+            bytes += entry.metadata()?.len();
+            files += 1;
+        }
+    }
+    Ok((bytes, files))
 }
 
 fn local_compose_snapshot(install: &Path) -> Result<TargetSnapshot, String> {
@@ -350,7 +735,7 @@ fn local_compose_snapshot(install: &Path) -> Result<TargetSnapshot, String> {
 }
 
 pub(super) fn check_local_endpoint() -> Result<(), String> {
-    let mut command = Command::new(find_binary("docker"));
+    let mut command = docker_command();
     command.args([
         "context",
         "inspect",
@@ -375,10 +760,7 @@ pub(super) fn check_local_endpoint() -> Result<(), String> {
     Ok(())
 }
 
-fn run_local_docker(
-    command: Command,
-    timeout: Duration,
-) -> Result<std::process::Output, String> {
+fn run_local_docker(command: Command, timeout: Duration) -> Result<std::process::Output, String> {
     process::run(
         command,
         process::Input::Bytes(vec![]),
@@ -390,7 +772,7 @@ fn run_local_docker(
 }
 
 fn local_docker_platform() -> Result<String, String> {
-    let mut command = Command::new(find_binary("docker"));
+    let mut command = docker_command();
     command.args(["info", "--format", "{{.OSType}}/{{.Architecture}}"]);
     let output = run_local_docker(command, Duration::from_secs(15))?;
     if !output.status.success() {
@@ -408,6 +790,16 @@ fn architecture(value: &str) -> &str {
         "x86_64" | "amd64" => "amd64",
         "aarch64" | "arm64" => "arm64",
         other => other,
+    }
+}
+
+fn canonical_platform(value: &str) -> String {
+    let trimmed = value.trim();
+    match trimmed.split_once('/') {
+        Some((os, arch)) if !os.is_empty() && !arch.is_empty() => {
+            format!("{os}/{}", architecture(arch))
+        }
+        _ => trimmed.to_string(),
     }
 }
 
@@ -522,15 +914,59 @@ pub(super) fn valid_image_reference(reference: &str) -> bool {
     })
 }
 
+#[cfg(test)]
 fn target_script(install: &str, images: &[String]) -> String {
+    target_script_with_artifacts(install, images, &[])
+}
+
+#[cfg(test)]
+fn target_script_with_artifacts(
+    install: &str,
+    images: &[String],
+    artifacts: &[ArtifactProbe],
+) -> String {
+    target_script_with_bindings(install, images, artifacts, &[])
+}
+
+fn target_script_with_bindings(
+    install: &str,
+    images: &[String],
+    artifacts: &[ArtifactProbe],
+    bindings: &[DeploymentImageBinding],
+) -> String {
     let mut script = format!(
-        r#"set -eu
+        r#"set -euo pipefail
 INSTALL={install}
 normalize_arch() {{ case "$1" in x86_64|amd64) printf 'amd64';; aarch64|arm64) printf 'arm64';; *) printf '%s' "$1";; esac; }}
+artifact_stat() {{ stat -c '%s' "$1" 2>/dev/null || stat -f '%z' "$1" 2>/dev/null || printf '0'; }}
+artifact_parent_state() {{
+  dir="$1"
+  while [ -n "$dir" ] && [ "$dir" != "/" ]; do
+    if [ -d "$dir" ]; then
+      if [ -r "$dir" ] && [ -x "$dir" ]; then return 0; fi
+      return 1
+    fi
+    dir=$(dirname "$dir")
+  done
+  if [ -x "/" ]; then return 0; fi
+  return 1
+}}
+artifact_sha256() {{
+  if command -v sha256sum >/dev/null 2>&1; then
+    if hash_output=$(sha256sum "$1" 2>/dev/null); then printf '%s' "${{hash_output%% *}}"; fi
+  elif command -v shasum >/dev/null 2>&1; then
+    if hash_output=$(shasum -a 256 "$1" 2>/dev/null); then printf '%s' "${{hash_output%% *}}"; fi
+  elif command -v openssl >/dev/null 2>&1; then
+    if hash_output=$(openssl dgst -sha256 "$1" 2>/dev/null); then printf '%s' "${{hash_output##* }}"; fi
+  else
+    printf ''
+  fi
+}}
 target_platform=$(docker info --format '{{{{.OSType}}}}/{{{{.Architecture}}}}' 2>/dev/null || true)
+printf 'TARGET_PLATFORM=%s\n' "$target_platform"
 {compose_location}
-if [ -d "$INSTALL" ] && [ ! -r "$INSTALL" ]; then exit 3; fi
-if [ -d "$DEPLOY" ] && [ ! -r "$DEPLOY" ]; then exit 3; fi
+if [ -d "$INSTALL" ] && {{ [ ! -r "$INSTALL" ] || [ ! -x "$INSTALL" ]; }}; then exit 3; fi
+if [ -d "$DEPLOY" ] && {{ [ ! -r "$DEPLOY" ] || [ ! -x "$DEPLOY" ]; }}; then exit 3; fi
 printf 'TARGET_CHECKED=yes\nCOMPOSE_FILE=%s\n' "$COMPOSE_FILE"
 if docker info >/dev/null 2>&1; then
   echo 'DOCKER_RUNNING=yes'
@@ -571,12 +1007,85 @@ echo 'CONTAINERS_CHECKED=yes'
             script.push_str(&format!("echo 'IMAGE|{index}|unconfirmed'\n"));
             continue;
         }
+        let binding = bindings.iter().find(|binding| &binding.reference == reference);
+        let inspected = binding
+            .map(|binding| binding.image_id.as_str())
+            .unwrap_or(reference);
+        let inspection = format!(
+            "image_info=$(docker image inspect --format '{{{{.Id}}}}|{{{{.Os}}}}/{{{{.Architecture}}}}' -- {} 2>&1)",
+            shell_quote(inspected)
+        );
+        let identity_check = binding.map(|binding| format!(
+            "[ \"$image_id\" = {} ] && [ \"$image_os/$(normalize_arch \"$image_arch\")\" = {} ]",
+            shell_quote(&binding.image_id),
+            shell_quote(&canonical_platform(&binding.platform))
+        )).unwrap_or_else(|| "true".to_owned());
         script.push_str(&format!(
-            "if docker info >/dev/null 2>&1; then\n  if image_info=$(docker image inspect --format '{{{{.Id}}}}|{{{{.Os}}}}/{{{{.Architecture}}}}' -- {reference} 2>&1); then\n    image_id=${{image_info%%|*}}\n    image_platform=${{image_info#*|}}\n    target_os=${{target_platform%%/*}}\n    target_arch=${{target_platform#*/}}\n    image_os=${{image_platform%%/*}}\n    image_arch=${{image_platform#*/}}\n    if [ \"$image_os\" = \"$target_os\" ] && [ \"$(normalize_arch \"$image_arch\")\" = \"$(normalize_arch \"$target_arch\")\" ]; then\n      printf 'IMAGE|{index}|ready|%s\\n' \"$image_id\"\n    else\n      echo 'IMAGE|{index}|unconfirmed'\n    fi\n  else\n    case \"$image_info\" in *[Nn]o\\ such\\ image*) echo 'IMAGE|{index}|missing';; *) echo 'IMAGE|{index}|unconfirmed';; esac\n  fi\nelse\n  echo 'IMAGE|{index}|unconfirmed'\nfi\n",
-            reference = shell_quote(reference),
+            "if ! docker info >/dev/null 2>&1; then\n  echo 'IMAGE|{index}|unavailable||'\nelif {inspection}; then\n  image_id=${{image_info%%|*}}\n  image_platform=${{image_info#*|}}\n  target_os=${{target_platform%%/*}}\n  target_arch=${{target_platform#*/}}\n  image_os=${{image_platform%%/*}}\n  image_arch=${{image_platform#*/}}\n  if ! ( {identity_check} ); then\n    echo 'IMAGE|{index}|check_failed||'\n  elif [ \"$image_os\" = \"$target_os\" ] && [ \"$(normalize_arch \"$image_arch\")\" = \"$(normalize_arch \"$target_arch\")\" ]; then\n    printf 'IMAGE|{index}|ready|%s|%s\\n' \"$image_id\" \"$image_platform\"\n  else\n    printf 'IMAGE|{index}|platform_mismatch|%s|%s\\n' \"$image_id\" \"$image_platform\"\n  fi\nelse\n  case \"$image_info\" in *[Nn]o\\ such\\ image*) printf 'IMAGE|{index}|missing||\\n';; *) printf 'IMAGE|{index}|check_failed||\\n';; esac\nfi\n"
         ));
     }
+    for (index, artifact) in artifacts.iter().enumerate() {
+        script.push_str(&remote_artifact_probe_script(index, artifact));
+    }
+    script.push_str("echo 'ARTIFACTS_CHECKED=yes'\n");
     script
+}
+
+fn remote_artifact_probe_script(index: usize, probe: &ArtifactProbe) -> String {
+    let path = shell_quote(&probe.target);
+    match probe.kind {
+        ArtifactKind::File => {
+            let Some(expected) = probe.expected.first() else {
+                return format!(
+                    "ARTIFACT_PATH={path}\nif [ -L \"$ARTIFACT_PATH\" ]; then\n  printf 'ARTIFACT|{index}|invalid|0|0\\n'\nelif [ -f \"$ARTIFACT_PATH\" ]; then\n  printf 'ARTIFACT|{index}|present|%s|1\\n' \"$(artifact_stat \"$ARTIFACT_PATH\")\"\nelif [ -e \"$ARTIFACT_PATH\" ]; then\n  printf 'ARTIFACT|{index}|invalid|0|0\\n'\nelse\n  artifact_parent_state \"$(dirname \"$ARTIFACT_PATH\")\" || artifact_state=$?\n  if [ \"${{artifact_state:-0}}\" -eq 1 ]; then\n    printf 'ARTIFACT|{index}|unconfirmed|0|0\\n'\n  else\n    printf 'ARTIFACT|{index}|missing|0|0\\n'\n  fi\nfi\n"
+                );
+            };
+            format!(
+                "ARTIFACT_PATH={path}\nif [ -L \"$ARTIFACT_PATH\" ]; then\n  printf 'ARTIFACT|{index}|invalid|0|0\\n'\nelif [ -f \"$ARTIFACT_PATH\" ]; then\n  artifact_size=$(artifact_stat \"$ARTIFACT_PATH\")\n  artifact_digest=$(artifact_sha256 \"$ARTIFACT_PATH\")\n  if [ -z \"$artifact_digest\" ]; then\n    printf 'ARTIFACT|{index}|unconfirmed|%s|1\\n' \"$artifact_size\"\n  elif [ \"$artifact_size\" = {size} ] && [ \"$artifact_digest\" = {digest} ]; then\n    printf 'ARTIFACT|{index}|present|%s|1\\n' \"$artifact_size\"\n  else\n    printf 'ARTIFACT|{index}|incomplete|%s|1\\n' \"$artifact_size\"\n  fi\nelif [ -e \"$ARTIFACT_PATH\" ]; then\n  printf 'ARTIFACT|{index}|invalid|0|0\\n'\nelse\n  artifact_state=0\n  artifact_parent_state \"$(dirname \"$ARTIFACT_PATH\")\" || artifact_state=$?\n  if [ \"$artifact_state\" -eq 1 ]; then\n    printf 'ARTIFACT|{index}|unconfirmed|0|0\\n'\n  else\n    printf 'ARTIFACT|{index}|missing|0|0\\n'\n  fi\nfi\n",
+                size = expected.size,
+                digest = shell_quote(&expected.sha256)
+            )
+        }
+        ArtifactKind::Dir => {
+            let mut checks = String::new();
+            for file in &probe.expected {
+                let target = shell_quote(&posix_join(&probe.target, &file.relative));
+                checks.push_str(&format!(
+                    "    if [ \"$artifact_state\" = present ]; then\n      if [ -L {target} ] || [ ! -f {target} ]; then\n        artifact_state=incomplete\n      else\n        artifact_size=$(artifact_stat {target})\n        artifact_digest=$(artifact_sha256 {target})\n        if [ -z \"$artifact_digest\" ]; then\n          artifact_state=unconfirmed\n        elif [ \"$artifact_size\" != {size} ] || [ \"$artifact_digest\" != {digest} ]; then\n          artifact_state=incomplete\n        fi\n      fi\n    fi\n",
+                    size = file.size,
+                    digest = shell_quote(&file.sha256)
+                ));
+            }
+            format!(
+                r#"ARTIFACT_PATH={path}
+if [ -L "$ARTIFACT_PATH" ]; then
+  printf 'ARTIFACT|{index}|invalid|0|0\n'
+elif [ -d "$ARTIFACT_PATH" ]; then
+  if [ ! -r "$ARTIFACT_PATH" ] || [ ! -x "$ARTIFACT_PATH" ]; then
+    printf 'ARTIFACT|{index}|unconfirmed|0|0\n'
+  elif ! artifact_files=$(find "$ARTIFACT_PATH" -type f 2>/dev/null | wc -l | tr -d ' '); then
+    printf 'ARTIFACT|{index}|unconfirmed|0|0\n'
+  elif ! artifact_unsafe=$(find "$ARTIFACT_PATH" ! -type f ! -type d -print -quit 2>/dev/null); then
+    printf 'ARTIFACT|{index}|unconfirmed|0|%s\n' "$artifact_files"
+  elif [ -n "$artifact_unsafe" ]; then
+    printf 'ARTIFACT|{index}|invalid|0|%s\n' "$artifact_files"
+  else
+    artifact_state=present
+{checks}    printf 'ARTIFACT|{index}|%s|0|%s\n' "$artifact_state" "$artifact_files"
+  fi
+elif [ -e "$ARTIFACT_PATH" ]; then
+  printf 'ARTIFACT|{index}|invalid|0|0\n'
+else
+  if artifact_parent_state "$(dirname "$ARTIFACT_PATH")"; then
+    printf 'ARTIFACT|{index}|missing|0|0\n'
+  else
+    printf 'ARTIFACT|{index}|unconfirmed|0|0\n'
+  fi
+fi
+"#
+            )
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -589,7 +1098,23 @@ struct TargetSnapshot {
     compose: String,
     containers: Vec<TargetContainer>,
     containers_checked: bool,
-    image_states: HashMap<usize, String>,
+    target_platform: String,
+    image_states: HashMap<usize, ImageSnapshot>,
+    artifact_states: HashMap<usize, ArtifactSnapshot>,
+    artifacts_checked: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ImageSnapshot {
+    status: String,
+    platform: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ArtifactSnapshot {
+    status: String,
+    actual_bytes: u64,
+    actual_files: usize,
 }
 
 #[derive(Debug)]
@@ -638,11 +1163,42 @@ fn parse_target_output(output: &str) -> Result<TargetSnapshot, String> {
             if fields.len() >= 2 {
                 if let Ok(index) = fields[0].parse() {
                     let state = match fields[1] {
-                        "ready" if fields.len() == 3 && valid_image_id(fields[2]) => "ready",
+                        "ready" if fields.len() >= 3 && valid_image_id(fields[2]) => "ready",
                         "missing" => "missing",
+                        "platform_mismatch" => "platform_mismatch",
+                        "check_failed" => "check_failed",
+                        "unavailable" => "unavailable",
+                        "invalid" => "invalid",
+                        _ => "check_failed",
+                    };
+                    target.image_states.insert(
+                        index,
+                        ImageSnapshot {
+                            status: state.to_string(),
+                            platform: fields.get(3).copied().unwrap_or_default().to_string(),
+                        },
+                    );
+                }
+            }
+        } else if let Some(rest) = line.strip_prefix("ARTIFACT|") {
+            let fields: Vec<&str> = rest.split('|').collect();
+            if fields.len() >= 4 {
+                if let Ok(index) = fields[0].parse() {
+                    let status = match fields[1] {
+                        "present" => "present",
+                        "missing" => "missing",
+                        "incomplete" => "incomplete",
+                        "invalid" => "invalid",
                         _ => "unconfirmed",
                     };
-                    target.image_states.insert(index, state.to_string());
+                    target.artifact_states.insert(
+                        index,
+                        ArtifactSnapshot {
+                            status: status.to_string(),
+                            actual_bytes: fields[2].parse().unwrap_or(0),
+                            actual_files: fields[3].parse().unwrap_or(0),
+                        },
+                    );
                 }
             }
         } else if let Some((key, value)) = line.split_once('=') {
@@ -652,7 +1208,9 @@ fn parse_target_output(output: &str) -> Result<TargetSnapshot, String> {
                 "COMPOSE_AVAILABLE" => target.compose_available = value == "yes",
                 "COMPOSE_FILE" => target.compose_file = value.to_string(),
                 "COMPOSE_WORKING_DIR" => target.compose_working_dir = value.to_string(),
+                "TARGET_PLATFORM" => target.target_platform = value.to_string(),
                 "CONTAINERS_CHECKED" => target.containers_checked = value == "yes",
+                "ARTIFACTS_CHECKED" => target.artifacts_checked = value == "yes",
                 _ => {}
             }
         }
@@ -695,6 +1253,7 @@ fn parse_container(line: &str) -> Option<TargetContainer> {
     })
 }
 
+#[cfg(test)]
 fn compare(
     compose_file: &str,
     install: &str,
@@ -702,6 +1261,26 @@ fn compare(
     services: &[ComposeServiceView],
     images: &[String],
     target: TargetSnapshot,
+) -> Result<DeploymentReview, String> {
+    compare_with_artifacts(
+        compose_file,
+        install,
+        desired,
+        services,
+        images,
+        target,
+        &[],
+    )
+}
+
+fn compare_with_artifacts(
+    compose_file: &str,
+    install: &str,
+    desired: &str,
+    services: &[ComposeServiceView],
+    images: &[String],
+    target: TargetSnapshot,
+    artifacts: &[ArtifactProbe],
 ) -> Result<DeploymentReview, String> {
     let has_deployment = !target.compose_file.is_empty();
     let current_services = if has_deployment {
@@ -853,33 +1432,42 @@ fn compare(
             });
         }
     }
+    let target_platform = canonical_platform(&target.target_platform);
     let image_reviews: Vec<DeploymentImageReview> = images
         .iter()
         .enumerate()
         .map(|(index, reference)| {
-            let state = target
-                .image_states
-                .get(&index)
-                .map(String::as_str)
-                .unwrap_or("unconfirmed");
+            let snapshot = target.image_states.get(&index);
             let status = if !valid_image_reference(reference) {
-                "unconfirmed"
-            } else if target.docker_running && state == "ready" {
-                "ready"
-            } else if target.docker_running && state == "missing" {
-                "missing"
+                "invalid"
+            } else if !target.docker_running {
+                "unavailable"
+            } else if target.target_platform.is_empty() {
+                "check_failed"
             } else {
-                "unconfirmed"
+                snapshot
+                    .map(|value| value.status.as_str())
+                    .unwrap_or("check_failed")
             };
+            let platform = snapshot
+                .map(|value| value.platform.clone())
+                .unwrap_or_default();
+            // 摘要引用的镜像也能按目标架构重新拉取；仓库中该摘要若不含目标架构，
+            // Docker 会在拉取时明确提示找不到匹配版本。
+            let pullable = status == "missing" || status == "platform_mismatch";
             DeploymentImageReview {
                 image_ref: reference.clone(),
                 services: services
                     .iter()
-                    .filter(|s| s.image == *reference)
-                    .map(|s| s.name.clone())
+                    .filter(|service| service.image == *reference)
+                    .map(|service| service.name.clone())
                     .collect(),
-                docker_present: status == "ready",
+                docker_present: matches!(status, "ready" | "platform_mismatch"),
                 status: status.to_string(),
+                platform: platform.clone(),
+                target_platform: target_platform.clone(),
+                detail: image_detail(status, &platform, &target_platform, reference),
+                pullable,
                 local_file: String::new(),
             }
         })
@@ -889,17 +1477,114 @@ fn compare(
         .filter(|image| image.status == "missing")
         .map(|image| image.image_ref.clone())
         .collect();
-    if !missing_images.is_empty() {
+    let unready_images: Vec<String> = image_reviews
+        .iter()
+        .filter(|image| image.status != "ready")
+        .map(|image| image.image_ref.clone())
+        .collect();
+    let missing_count = image_reviews
+        .iter()
+        .filter(|image| image.status == "missing")
+        .count();
+    let mismatch_count = image_reviews
+        .iter()
+        .filter(|image| image.status == "platform_mismatch")
+        .count();
+    let failed_count = image_reviews
+        .iter()
+        .filter(|image| matches!(image.status.as_str(), "check_failed" | "unavailable"))
+        .count();
+    let invalid_count = image_reviews
+        .iter()
+        .filter(|image| image.status == "invalid")
+        .count();
+    if missing_count > 0 {
         issues.push(format!(
-            "目标主机缺少 {} 个镜像，请先导入镜像后重新核对",
-            missing_images.len()
+            "目标 Docker 缺少 {missing_count} 个镜像，可在下方拉取或导入。"
         ));
     }
-    if image_reviews
+    if mismatch_count > 0 {
+        issues.push(format!(
+            "{mismatch_count} 个镜像与目标架构不匹配，可在下方重新拉取适配版本。"
+        ));
+    }
+    if failed_count > 0 {
+        issues.push(format!(
+            "{failed_count} 个镜像状态无法读取，请重新检查；若 Docker 未运行，请先启动 Docker。"
+        ));
+    }
+    if invalid_count > 0 {
+        issues.push(format!(
+            "{invalid_count} 个镜像地址无效，需修正交付包后重新制作制品。"
+        ));
+    }
+    let artifact_reviews = artifact_reviews(artifacts, &target.artifact_states);
+    let mut artifact_issues = Vec::new();
+    if has_deployment {
+        let missing = artifact_reviews
+            .iter()
+            .filter(|artifact| artifact.status == "missing")
+            .count();
+        let incomplete = artifact_reviews
+            .iter()
+            .filter(|artifact| artifact.status == "incomplete")
+            .count();
+        let unconfirmed = artifact_reviews
+            .iter()
+            .filter(|artifact| artifact.status == "unconfirmed")
+            .count();
+        let invalid = artifact_reviews
+            .iter()
+            .filter(|artifact| artifact.status == "invalid")
+            .count();
+        if missing > 0 {
+            artifact_issues.push(format!(
+                "目标部署缺少 {missing} 个制品文件，下一步增量更新会写入所选组件，请保留对应组件的勾选。"
+            ));
+        }
+        if incomplete > 0 {
+            artifact_issues.push(format!(
+                "目标部署有 {incomplete} 个制品文件与交付包不一致，下一步增量更新会替换所选组件。"
+            ));
+        }
+        if unconfirmed > 0 {
+            artifact_issues.push(format!(
+                "有 {unconfirmed} 个制品文件无法核对，请检查目标目录权限后重新检查。"
+            ));
+        }
+        if invalid > 0 {
+            artifact_issues.push(format!(
+                "有 {invalid} 个制品路径与交付包声明的类型不一致或包含符号链接，请在目标机处理该路径后重新检查。"
+            ));
+        }
+    } else {
+        let unconfirmed = artifact_reviews
+            .iter()
+            .filter(|artifact| artifact.status == "unconfirmed")
+            .count();
+        let invalid = artifact_reviews
+            .iter()
+            .filter(|artifact| artifact.status == "invalid")
+            .count();
+        if unconfirmed > 0 {
+            artifact_issues.push(format!(
+                "有 {unconfirmed} 个制品文件无法核对，请检查目标目录权限后重新检查。"
+            ));
+        }
+        if invalid > 0 {
+            artifact_issues.push(format!(
+                "有 {invalid} 个制品路径与交付包声明的类型不一致或包含符号链接，请在目标机处理该路径后重新检查。"
+            ));
+        }
+    }
+    let artifact_blocked = artifact_reviews
         .iter()
-        .any(|image| image.status == "unconfirmed")
-    {
-        issues.push("部分镜像状态未确认，请检查目标主机后重新核对".to_string());
+        .filter(|artifact| matches!(artifact.status.as_str(), "unconfirmed" | "invalid"))
+        .count();
+    if artifact_blocked > 0 {
+        issues.push(format!(
+            "有 {artifact_blocked} 个制品文件无法核对或路径异常，请处理目标目录后重新检查。"
+        ));
     }
     let ready =
         target.checked && target.docker_running && target.compose_available && issues.is_empty();
@@ -917,12 +1602,65 @@ fn compare(
         compose_changed: desired_doc != current_doc,
         services: service_reviews,
         images: image_reviews,
+        target_platform,
+        artifacts: artifact_reviews,
+        artifact_issues,
         missing_images,
+        unready_images,
         issues,
         ready,
         can_first_deploy: ready && !has_deployment,
         can_incremental_update: ready && has_deployment && supported_update_layout,
     })
+}
+
+fn image_detail(status: &str, platform: &str, target_platform: &str, reference: &str) -> String {
+    match status {
+        "ready" => String::from("目标 Docker 已具备该镜像"),
+        "missing" => String::from("目标 Docker 中没有该镜像，可拉取或导入"),
+        "platform_mismatch" if reference.contains('@') => format!(
+            "现有镜像为 {platform}，目标为 {target_platform}；可重新拉取目标架构的版本，若该摘要不含目标架构则需更换交付包"
+        ),
+        "platform_mismatch" => {
+            format!("现有镜像为 {platform}，目标为 {target_platform}；可重新拉取适配架构的版本")
+        }
+        "check_failed" => String::from("读取镜像状态失败，可重新检查"),
+        "unavailable" => String::from("Docker 未运行或目标环境未完成检查"),
+        "invalid" => String::from("镜像地址无效，需修正交付包"),
+        _ => String::from("镜像状态无法读取，请重新检查"),
+    }
+}
+
+fn artifact_reviews(
+    probes: &[ArtifactProbe],
+    states: &HashMap<usize, ArtifactSnapshot>,
+) -> Vec<DeploymentArtifactReview> {
+    probes
+        .iter()
+        .enumerate()
+        .map(|(index, probe)| {
+            let snapshot = states.get(&index);
+            let status = match snapshot {
+                None => "unconfirmed",
+                Some(snapshot) if snapshot.status.is_empty() => "unconfirmed",
+                Some(snapshot) => snapshot.status.as_str(),
+            };
+            DeploymentArtifactReview {
+                key: probe.key.clone(),
+                label: probe.label.clone(),
+                source: probe.source.clone(),
+                root: probe.root.clone(),
+                path: probe.path.clone(),
+                target: probe.target.clone(),
+                kind: probe.kind.as_str().to_string(),
+                status: status.to_string(),
+                expected_bytes: probe.expected_bytes,
+                actual_bytes: snapshot.map(|value| value.actual_bytes).unwrap_or(0),
+                expected_files: probe.expected_files,
+                actual_files: snapshot.map(|value| value.actual_files).unwrap_or(0),
+            }
+        })
+        .collect()
 }
 
 /// 清单位置与项目部署目录不一致时，给出实际位置与可填写的安装根目录。
@@ -984,9 +1722,59 @@ mod tests {
             compose: compose.to_string(),
             image_states: statuses
                 .iter()
-                .map(|(i, status)| (*i, status.to_string()))
+                .map(|(i, status)| {
+                    (
+                        *i,
+                        ImageSnapshot {
+                            status: status.to_string(),
+                            platform: "linux/amd64".to_string(),
+                        },
+                    )
+                })
                 .collect(),
+            target_platform: "linux/amd64".to_string(),
             ..TargetSnapshot::default()
+        }
+    }
+
+    fn file_probe(target: &Path, content: &[u8]) -> ArtifactProbe {
+        ArtifactProbe {
+            key: "file".to_string(),
+            label: "文件".to_string(),
+            source: "app/file.txt".to_string(),
+            root: "deploy".to_string(),
+            path: "file.txt".to_string(),
+            kind: ArtifactKind::File,
+            target: target.to_string_lossy().to_string(),
+            expected_bytes: content.len() as u64,
+            expected_files: 1,
+            expected: vec![ArtifactExpectedFile {
+                relative: String::new(),
+                size: content.len() as u64,
+                sha256: crate::commands::bundle::sha256_hex(content),
+            }],
+        }
+    }
+
+    fn dir_probe(target: &Path, files: &[(&str, &[u8])]) -> ArtifactProbe {
+        ArtifactProbe {
+            key: "dir".to_string(),
+            label: "目录".to_string(),
+            source: "app/dir".to_string(),
+            root: "deploy".to_string(),
+            path: "dir".to_string(),
+            kind: ArtifactKind::Dir,
+            target: target.to_string_lossy().to_string(),
+            expected_bytes: files.iter().map(|(_, content)| content.len() as u64).sum(),
+            expected_files: files.len(),
+            expected: files
+                .iter()
+                .map(|(relative, content)| ArtifactExpectedFile {
+                    relative: (*relative).to_string(),
+                    size: content.len() as u64,
+                    sha256: crate::commands::bundle::sha256_hex(content),
+                })
+                .collect(),
         }
     }
 
@@ -1045,7 +1833,7 @@ mod tests {
         )
         .unwrap();
         assert!(!unknown.ready);
-        assert_eq!(unknown.images[0].status, "unconfirmed");
+        assert_eq!(unknown.images[0].status, "check_failed");
     }
 
     #[test]
@@ -1072,8 +1860,220 @@ mod tests {
     }
 
     #[test]
+    fn platform_mismatch_is_explained_and_tag_images_can_be_repaired() {
+        let digest_reference = format!("demo/db:1.4.0@sha256:{}", "a".repeat(64));
+        let desired = format!(
+            "services:\n  web:\n    image: demo/web:1.4.0\n  db:\n    image: '{digest_reference}'\n"
+        );
+        let services = parse_services(&desired).unwrap();
+        let images = unique_images(&services);
+        let mut target = snapshot("", &[]);
+        target.target_platform = "linux/arm64".to_string();
+        for index in 0..images.len() {
+            target.image_states.insert(
+                index,
+                ImageSnapshot {
+                    status: "platform_mismatch".to_string(),
+                    platform: "linux/amd64".to_string(),
+                },
+            );
+        }
+        let review = compare(
+            "deploy/docker-compose.yml",
+            "/srv/demo",
+            &desired,
+            &services,
+            &images,
+            target,
+        )
+        .unwrap();
+        assert_eq!(review.images[0].status, "platform_mismatch");
+        assert!(review.images[0].pullable);
+        assert!(review.images[0].detail.contains("可重新拉取"));
+        assert_eq!(review.images[1].status, "platform_mismatch");
+        assert!(review.images[1].pullable);
+        assert!(review.images[1].detail.contains("该摘要不含目标架构"));
+    }
+
+    #[test]
+    fn artifact_reviews_distinguish_missing_size_mismatch_and_present_files() {
+        let root = std::env::temp_dir().join(format!(
+            "deploy-review-artifacts-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("wrong.txt"), b"short").unwrap();
+        fs::write(root.join("ready.txt"), b"ready").unwrap();
+        fs::write(root.join("same-size-wrong.txt"), b"other").unwrap();
+        let probes = vec![
+            ArtifactProbe {
+                key: "missing".to_string(),
+                label: "缺失".to_string(),
+                source: "app/missing.txt".to_string(),
+                root: "deploy".to_string(),
+                path: "missing.txt".to_string(),
+                kind: ArtifactKind::File,
+                target: root.join("missing.txt").to_string_lossy().to_string(),
+                expected_bytes: 5,
+                expected_files: 1,
+                expected: vec![ArtifactExpectedFile {
+                    relative: String::new(),
+                    size: 5,
+                    sha256: crate::commands::bundle::sha256_hex(b"ready"),
+                }],
+            },
+            ArtifactProbe {
+                key: "wrong".to_string(),
+                label: "不一致".to_string(),
+                source: "app/wrong.txt".to_string(),
+                root: "deploy".to_string(),
+                path: "wrong.txt".to_string(),
+                kind: ArtifactKind::File,
+                target: root.join("wrong.txt").to_string_lossy().to_string(),
+                expected_bytes: 10,
+                expected_files: 1,
+                expected: vec![ArtifactExpectedFile {
+                    relative: String::new(),
+                    size: 10,
+                    sha256: crate::commands::bundle::sha256_hex(b"0123456789"),
+                }],
+            },
+            ArtifactProbe {
+                key: "ready".to_string(),
+                label: "就绪".to_string(),
+                source: "app/ready.txt".to_string(),
+                root: "deploy".to_string(),
+                path: "ready.txt".to_string(),
+                kind: ArtifactKind::File,
+                target: root.join("ready.txt").to_string_lossy().to_string(),
+                expected_bytes: 5,
+                expected_files: 1,
+                expected: vec![ArtifactExpectedFile {
+                    relative: String::new(),
+                    size: 5,
+                    sha256: crate::commands::bundle::sha256_hex(b"ready"),
+                }],
+            },
+            ArtifactProbe {
+                key: "same-size-wrong".to_string(),
+                label: "内容不一致".to_string(),
+                source: "app/same-size-wrong.txt".to_string(),
+                root: "deploy".to_string(),
+                path: "same-size-wrong.txt".to_string(),
+                kind: ArtifactKind::File,
+                target: root
+                    .join("same-size-wrong.txt")
+                    .to_string_lossy()
+                    .to_string(),
+                expected_bytes: 5,
+                expected_files: 1,
+                expected: vec![ArtifactExpectedFile {
+                    relative: String::new(),
+                    size: 5,
+                    sha256: crate::commands::bundle::sha256_hex(b"ready"),
+                }],
+            },
+        ];
+        let states = inspect_local_artifacts(&probes);
+        let reviews = artifact_reviews(&probes, &states);
+        assert_eq!(
+            reviews
+                .iter()
+                .map(|item| item.status.as_str())
+                .collect::<Vec<_>>(),
+            vec!["missing", "incomplete", "present", "incomplete"]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn artifact_directories_need_every_declared_file_with_the_same_content() {
+        let root = std::env::temp_dir().join(format!(
+            "deploy-review-artifact-dir-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("dir")).unwrap();
+        fs::write(root.join("dir/a.txt"), b"alpha").unwrap();
+        let probes = vec![dir_probe(&root.join("dir"), &[("a.txt", b"alpha"), ("b.txt", b"beta")])];
+        let states = inspect_local_artifacts(&probes);
+        assert_eq!(
+            artifact_reviews(&probes, &states)[0].status.as_str(),
+            "incomplete"
+        );
+
+        fs::write(root.join("dir/b.txt"), b"beta").unwrap();
+        let states = inspect_local_artifacts(&probes);
+        assert_eq!(
+            artifact_reviews(&probes, &states)[0].status.as_str(),
+            "present"
+        );
+
+        fs::write(root.join("dir/b.txt"), b"other").unwrap();
+        let states = inspect_local_artifacts(&probes);
+        assert_eq!(
+            artifact_reviews(&probes, &states)[0].status.as_str(),
+            "incomplete"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn artifact_type_conflicts_are_reported_as_invalid() {
+        let root = std::env::temp_dir().join(format!(
+            "deploy-review-artifact-type-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(root.join("conflict")).unwrap();
+        let probes = vec![file_probe(&root.join("conflict"), b"ready")];
+        let states = inspect_local_artifacts(&probes);
+        assert_eq!(
+            artifact_reviews(&probes, &states)[0].status.as_str(),
+            "invalid"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn artifact_symlinks_are_reported_as_invalid() {
+        let root = std::env::temp_dir().join(format!(
+            "deploy-review-artifact-link-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("dir")).unwrap();
+        fs::write(root.join("dir/a.txt"), b"alpha").unwrap();
+        std::os::unix::fs::symlink(root.join("dir/a.txt"), root.join("dir/link.txt")).unwrap();
+        let probes = vec![dir_probe(&root.join("dir"), &[("a.txt", b"alpha")])];
+        let states = inspect_local_artifacts(&probes);
+        assert_eq!(
+            artifact_reviews(&probes, &states)[0].status.as_str(),
+            "invalid"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn remote_artifact_targets_use_posix_paths() {
+        assert_eq!(
+            posix_join("/srv/demo", "deploy/docker-compose.yml"),
+            "/srv/demo/deploy/docker-compose.yml"
+        );
+        assert_eq!(posix_join("/srv/demo/", "/deploy/app"), "/srv/demo/deploy/app");
+        assert_eq!(posix_join("/srv/demo", ""), "/srv/demo");
+    }
+
+    #[test]
     fn parser_separates_compose_from_flags_and_container_metadata() {
-        let raw = format!("TARGET_CHECKED=yes\nDOCKER_RUNNING=yes\nCOMPOSE_AVAILABLE=yes\nCOMPOSE_FILE=/srv/demo/deploy/docker-compose.yml\n__REVIEW_COMPOSE_BEGIN__\nservices:\n  web:\n    image: nginx:1.27\n__REVIEW_COMPOSE_END__\n__REVIEW_CONTAINERS_BEGIN__\n/demo-web-1\tnginx:1.26\trunning\tweb\t/srv/demo/deploy\thealthy\n__REVIEW_CONTAINERS_END__\nCONTAINERS_CHECKED=yes\nIMAGE|0|ready|sha256:{}\n", "a".repeat(64));
+        let raw = format!("TARGET_CHECKED=yes\nDOCKER_RUNNING=yes\nCOMPOSE_AVAILABLE=yes\nTARGET_PLATFORM=linux/amd64\nCOMPOSE_FILE=/srv/demo/deploy/docker-compose.yml\n__REVIEW_COMPOSE_BEGIN__\nservices:\n  web:\n    image: nginx:1.27\n__REVIEW_COMPOSE_END__\n__REVIEW_CONTAINERS_BEGIN__\n/demo-web-1\tnginx:1.26\trunning\tweb\t/srv/demo/deploy\thealthy\n__REVIEW_CONTAINERS_END__\nCONTAINERS_CHECKED=yes\nIMAGE|0|ready|sha256:{}|linux/amd64\n", "a".repeat(64));
         let target = parse_target_output(&raw).unwrap();
         assert_eq!(target.containers.len(), 1);
         let desired = "services:\n  web:\n    image: nginx:1.27\n";
@@ -1092,6 +2092,37 @@ mod tests {
         assert_eq!(review.services[0].container_health, "healthy");
         assert!(review.ready);
         assert!(!review.can_first_deploy);
+    }
+
+    #[test]
+    fn parser_keeps_image_platform_and_artifact_probe_results() {
+        let raw = format!(
+            "TARGET_CHECKED=yes\nDOCKER_RUNNING=yes\nCOMPOSE_AVAILABLE=yes\nCONTAINERS_CHECKED=yes\nTARGET_PLATFORM=linux/arm64\nARTIFACTS_CHECKED=yes\nIMAGE|0|platform_mismatch|sha256:{}|linux/amd64\nARTIFACT|0|present|128|1\n",
+            "a".repeat(64)
+        );
+        let target = parse_target_output(&raw).unwrap();
+        assert_eq!(target.target_platform, "linux/arm64");
+        assert_eq!(
+            target
+                .image_states
+                .get(&0)
+                .map(|snapshot| snapshot.status.as_str()),
+            Some("platform_mismatch")
+        );
+        assert_eq!(
+            target
+                .image_states
+                .get(&0)
+                .map(|snapshot| snapshot.platform.as_str()),
+            Some("linux/amd64")
+        );
+        assert_eq!(
+            target
+                .artifact_states
+                .get(&0)
+                .map(|artifact| artifact.actual_bytes),
+            Some(128)
+        );
     }
 
     #[test]
@@ -1136,7 +2167,14 @@ mod tests {
         target.docker_running = true;
         target.compose_available = true;
         target.containers_checked = true;
-        target.image_states.insert(0, "ready".to_string());
+        target.target_platform = "linux/amd64".to_string();
+        target.image_states.insert(
+            0,
+            ImageSnapshot {
+                status: "ready".to_string(),
+                platform: "linux/amd64".to_string(),
+            },
+        );
         target.containers.push(TargetContainer {
             name: "demo-web-1".to_string(),
             image: "nginx:1.27".to_string(),
@@ -1291,6 +2329,15 @@ mod tests {
         )
         .unwrap();
         fs::write(root.join("deploy/docker-compose.lan.yml"), "services: {}\n").unwrap();
+        fs::write(root.join("site.txt"), b"payload").unwrap();
+        fs::create_dir_all(root.join("site-dir")).unwrap();
+        fs::write(root.join("site-dir/one.txt"), b"first").unwrap();
+        fs::create_dir_all(root.join("conflict")).unwrap();
+        fs::create_dir_all(root.join("linked")).unwrap();
+        fs::write(root.join("linked/one.txt"), b"first").unwrap();
+        std::os::unix::fs::symlink(root.join("linked/one.txt"), root.join("linked/link.txt")).unwrap();
+        fs::create_dir_all(root.join("partial")).unwrap();
+        fs::write(root.join("partial/one.txt"), b"first").unwrap();
         let binary = root.join("bin/docker");
         fs::write(
             &binary,
@@ -1315,11 +2362,109 @@ esac
         ));
         let output = Command::new("bash")
             .arg("-c")
-            .arg(target_script(
+            .arg(target_script_with_artifacts(
                 root.to_str().unwrap(),
                 &["nginx:1.27".to_string()],
+                &[ArtifactProbe {
+                    key: "site".to_string(),
+                    label: "站点".to_string(),
+                    source: "site.txt".to_string(),
+                    root: "deploy".to_string(),
+                    path: "site.txt".to_string(),
+                    kind: ArtifactKind::File,
+                    target: root.join("site.txt").to_string_lossy().to_string(),
+                    expected_bytes: 7,
+                    expected_files: 1,
+                    expected: vec![ArtifactExpectedFile {
+                        relative: String::new(),
+                        size: 7,
+                        sha256: crate::commands::bundle::sha256_hex(b"payload"),
+                    }],
+                }, ArtifactProbe {
+                    key: "site-dir".to_string(),
+                    label: "站点目录".to_string(),
+                    source: "site-dir".to_string(),
+                    root: "deploy".to_string(),
+                    path: "site-dir".to_string(),
+                    kind: ArtifactKind::Dir,
+                    target: root.join("site-dir").to_string_lossy().to_string(),
+                    expected_bytes: 5,
+                    expected_files: 1,
+                    expected: vec![ArtifactExpectedFile {
+                        relative: "one.txt".to_string(),
+                        size: 5,
+                        sha256: crate::commands::bundle::sha256_hex(b"first"),
+                    }],
+                }, ArtifactProbe {
+                    key: "missing".to_string(),
+                    label: "缺失".to_string(),
+                    source: "missing.txt".to_string(),
+                    root: "deploy".to_string(),
+                    path: "missing.txt".to_string(),
+                    kind: ArtifactKind::File,
+                    target: root.join("missing.txt").to_string_lossy().to_string(),
+                    expected_bytes: 7,
+                    expected_files: 1,
+                    expected: vec![ArtifactExpectedFile {
+                        relative: String::new(),
+                        size: 7,
+                        sha256: crate::commands::bundle::sha256_hex(b"payload"),
+                    }],
+                }, ArtifactProbe {
+                    key: "conflict".to_string(),
+                    label: "类型冲突".to_string(),
+                    source: "conflict".to_string(),
+                    root: "deploy".to_string(),
+                    path: "conflict".to_string(),
+                    kind: ArtifactKind::File,
+                    target: root.join("conflict").to_string_lossy().to_string(),
+                    expected_bytes: 7,
+                    expected_files: 1,
+                    expected: vec![ArtifactExpectedFile {
+                        relative: String::new(),
+                        size: 7,
+                        sha256: crate::commands::bundle::sha256_hex(b"payload"),
+                    }],
+                }, ArtifactProbe {
+                    key: "linked".to_string(),
+                    label: "符号链接".to_string(),
+                    source: "linked".to_string(),
+                    root: "deploy".to_string(),
+                    path: "linked".to_string(),
+                    kind: ArtifactKind::Dir,
+                    target: root.join("linked").to_string_lossy().to_string(),
+                    expected_bytes: 5,
+                    expected_files: 1,
+                    expected: vec![ArtifactExpectedFile {
+                        relative: "one.txt".to_string(),
+                        size: 5,
+                        sha256: crate::commands::bundle::sha256_hex(b"first"),
+                    }],
+                }, ArtifactProbe {
+                    key: "partial".to_string(),
+                    label: "缺少文件".to_string(),
+                    source: "partial".to_string(),
+                    root: "deploy".to_string(),
+                    path: "partial".to_string(),
+                    kind: ArtifactKind::Dir,
+                    target: root.join("partial").to_string_lossy().to_string(),
+                    expected_bytes: 10,
+                    expected_files: 2,
+                    expected: vec![
+                        ArtifactExpectedFile {
+                            relative: "one.txt".to_string(),
+                            size: 5,
+                            sha256: crate::commands::bundle::sha256_hex(b"first"),
+                        },
+                        ArtifactExpectedFile {
+                            relative: "two.txt".to_string(),
+                            size: 5,
+                            sha256: crate::commands::bundle::sha256_hex(b"other"),
+                        },
+                    ],
+                }],
             ))
-            .env("PATH", std::env::join_paths(paths).unwrap())
+            .env("PATH", std::env::join_paths(&paths).unwrap())
             .env("REVIEW_TEST_ROOT", fs::canonicalize(&root).unwrap())
             .output()
             .unwrap();
@@ -1334,10 +2479,103 @@ esac
             root.join("docker-compose.yml").to_string_lossy()
         );
         assert_eq!(
-            target.image_states.get(&0).map(String::as_str),
+            target
+                .image_states
+                .get(&0)
+                .map(|snapshot| snapshot.status.as_str()),
             Some("ready")
         );
+        assert_eq!(
+            target
+                .artifact_states
+                .get(&0)
+                .map(|artifact| artifact.status.as_str()),
+            Some("present")
+        );
+        assert_eq!(
+            target
+                .artifact_states
+                .get(&0)
+                .map(|artifact| artifact.actual_bytes),
+            Some(7)
+        );
+        assert_eq!(
+            target
+                .artifact_states
+                .get(&1)
+                .map(|artifact| artifact.status.as_str()),
+            Some("present")
+        );
+        assert_eq!(
+            target
+                .artifact_states
+                .get(&2)
+                .map(|artifact| artifact.status.as_str()),
+            Some("missing")
+        );
+        assert_eq!(
+            target
+                .artifact_states
+                .get(&3)
+                .map(|artifact| artifact.status.as_str()),
+            Some("invalid")
+        );
+        assert_eq!(
+            target
+                .artifact_states
+                .get(&4)
+                .map(|artifact| artifact.status.as_str()),
+            Some("invalid")
+        );
+        assert_eq!(
+            target
+                .artifact_states
+                .get(&5)
+                .map(|artifact| artifact.status.as_str()),
+            Some("incomplete")
+        );
+        assert!(target.artifacts_checked);
         assert_eq!(target.containers[0].health, "healthy");
+        let reference = format!("demo/web@sha256:{}", "c".repeat(64));
+        let binding = DeploymentImageBinding {
+            reference: reference.clone(),
+            image_id: format!("sha256:{}", "b".repeat(64)),
+            platform: "linux/amd64".to_owned(),
+        };
+        let script = target_script_with_bindings(
+            root.to_str().unwrap(),
+            &[reference],
+            &[],
+            &[binding],
+        );
+        let output = Command::new("bash")
+            .args(["-c", &script])
+            .env("PATH", std::env::join_paths(&paths).unwrap())
+            .env("REVIEW_TEST_ROOT", fs::canonicalize(&root).unwrap())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let target = parse_target_output(&String::from_utf8_lossy(&output.stdout)).unwrap();
+        assert_eq!(target.image_states[&0].status, "check_failed");
+
+        let hash = root.join("bin/sha256sum");
+        fs::write(&hash, "#!/bin/sh\nexit 7\n").unwrap();
+        fs::set_permissions(&hash, fs::Permissions::from_mode(0o700)).unwrap();
+        let script = target_script_with_artifacts(
+            root.to_str().unwrap(),
+            &[],
+            &[file_probe(&root.join("site.txt"), b"payload")],
+        );
+        let output = Command::new("bash")
+            .args(["-c", &script])
+            .env("PATH", std::env::join_paths(&paths).unwrap())
+            .env("REVIEW_TEST_ROOT", fs::canonicalize(&root).unwrap())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let target = parse_target_output(&String::from_utf8_lossy(&output.stdout)).unwrap();
+        assert_eq!(target.artifact_states[&0].status, "unconfirmed");
+        assert!(target.artifacts_checked);
         fs::remove_dir_all(root).unwrap();
     }
 }

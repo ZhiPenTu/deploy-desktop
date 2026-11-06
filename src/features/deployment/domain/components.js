@@ -31,11 +31,30 @@ export function deploymentComponents(plan) {
   return componentOptions(plan).map(({ key }) => key);
 }
 
+export function missingArtifactIssue(plan, review, selected = []) {
+  if (!review?.hasDeployment) return '';
+  const missing = (review.artifacts || []).filter((artifact) => artifact.status === 'missing');
+  const unselected = missing.filter((artifact) =>
+    !(plan?.components || []).some((component) =>
+      selected.includes(component.key) &&
+      (component.artifacts || []).some((item) =>
+        (typeof item === 'string' ? item : item.key) === artifact.key
+      )
+    )
+  );
+  return unselected.length
+    ? `请勾选对应的更新组件以补齐缺失制品：${unselected.map((artifact) => artifact.label || artifact.key).join('、')}`
+    : '';
+}
+
 export function servicesAreReady(review) {
   const services = Array.isArray(review?.services)
     ? review.services.filter((service) => service.change !== 'removed')
     : [];
-  return Boolean(review?.targetChecked && services.length && services.every((service) =>
+  const filesReady = !(review?.artifacts || []).some((artifact) =>
+    ['missing', 'invalid', 'unconfirmed'].includes(artifact.status)
+  );
+  return Boolean(review?.targetChecked && filesReady && services.length && services.every((service) =>
     service.containerState === 'running' && !['unhealthy', 'starting'].includes(service.containerHealth)
   ));
 }

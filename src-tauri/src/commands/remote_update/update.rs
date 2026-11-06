@@ -274,6 +274,7 @@ fn update_remote_deployment_blocking(
             port,
             &user,
             key.as_deref(),
+            &install_dir,
             &deploy_dir,
             &components,
             &bundle,
@@ -486,6 +487,7 @@ fn apply_remote_update(
     port: u16,
     user: &str,
     key: Option<&str>,
+    install_dir: &str,
     deploy_dir: &str,
     components: &[String],
     bundle: &Bundle,
@@ -495,13 +497,35 @@ fn apply_remote_update(
     let config_selected =
         is_config_selected(bundle, components) || components.iter().any(|c| c == "image");
 
+    let compose_file = compose_file_on_target(bundle);
+    let compose_target = format!(
+        "{}/{}",
+        deploy_dir.trim_end_matches('/'),
+        compose_file.trim_start_matches('/')
+    );
+    let override_file = if config_selected {
+        crate::commands::deployment_image_bindings::remote_override(
+            host,
+            port,
+            user,
+            key,
+            install_dir,
+            &compose_target,
+        )?
+    } else {
+        None
+    };
     let script = super::scripts::apply(
         deploy_dir,
-        &compose_file_on_target(bundle),
+        &compose_file,
         config_selected,
         &restart_services,
         wait_services,
     )?;
+    let script = format!(
+        "export DEPLOY_IMAGE_OVERRIDE={}\n{script}",
+        shell_quote(override_file.as_deref().unwrap_or(""))
+    );
 
     let output = run_ssh_script(host, port, user, key, &script)?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();

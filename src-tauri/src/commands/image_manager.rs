@@ -599,7 +599,12 @@ fn upload_images_blocking(
         return Err(explain_ssh_failure(&stderr, key.as_deref()));
     }
 
-    let remote_sizes = remote_image_sizes(host, port, user, key.as_deref(), &remote_dir)?;
+    // 覆盖上传不需要比对远端旧文件，跳过远端摘要计算以免大镜像包拖慢部署。
+    let remote_files = if overwrite {
+        std::collections::HashMap::new()
+    } else {
+        remote_image_files(host, port, user, key.as_deref(), &remote_dir)?
+    };
     let total = files.len();
     let mut messages = Vec::new();
 
@@ -614,9 +619,10 @@ fn upload_images_blocking(
             .map_err(|e| format!("读取本地文件失败: {e}"))?;
 
         if !overwrite {
-            if let Some(remote_size) = remote_sizes.get(&name) {
-                if *remote_size == size {
-                    let message = format!("{name} 已存在且大小一致，跳过上传");
+            if let Some(remote) = remote_files.get(&name) {
+                let digest = crate::commands::bundle::sha256_path(&local_path)?;
+                if remote.size == size && remote.sha256 == digest {
+                    let message = format!("{name} 已存在且内容一致，跳过上传");
                     messages.push(message.clone());
                     emit_progress(window, "upload", index + 1, total, &name, 100, &message, false);
                     continue;
@@ -652,15 +658,20 @@ fn upload_images_blocking(
     Ok(messages)
 }
 
-fn remote_image_sizes(
+struct RemoteImageFile {
+    size: u64,
+    sha256: String,
+}
+
+fn remote_image_files(
     host: &str,
     port: u16,
     user: &str,
     key: Option<&str>,
     remote_dir: &str,
-) -> Result<std::collections::HashMap<String, u64>, String> {
+) -> Result<std::collections::HashMap<String, RemoteImageFile>, String> {
     let script = format!(
-        "set -e\nDIR={}\nif [ -d \"$DIR\" ]; then\n  find \"$DIR\" -maxdepth 1 -type f -print | sort | while IFS= read -r f; do\n    printf 'FILE|%s|%s\\n' \"$(basename \"$f\")\" \"$(stat -c '%s' \"$f\")\"\n  done\nfi\n",
+        "set -e\nDIR={}\nhash_file() {{\n  if command -v sha256sum >/dev/null 2>&1; then sha256sum \"$1\" | awk '{{print $1}}'; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 \"$1\" | awk '{{print $1}}'; elif command -v openssl >/dev/null 2>&1; then openssl dgst -sha256 \"$1\" | awk '{{print $NF}}'; else printf ''; fi\n}}\nif [ -d \"$DIR\" ]; then\n  find \"$DIR\" -maxdepth 1 -type f -print | sort | while IFS= read -r f; do\n    printf 'FILE\\t%s\\t%s\\t%s\\n' \"$(basename \"$f\")\" \"$(stat -c '%s' \"$f\" 2>/dev/null || stat -f '%z' \"$f\" 2>/dev/null || printf '0')\" \"$(hash_file \"$f\")\"\n  done\nfi\n",
         shell_quote(remote_dir)
     );
     let output = run_ssh_script(host, port, user, key, &script)?;
@@ -668,16 +679,28 @@ fn remote_image_sizes(
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(explain_ssh_failure(&stderr, key));
     }
-    let mut sizes = std::collections::HashMap::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        if let Some(rest) = line.strip_prefix("FILE|") {
-            let parts: Vec<&str> = rest.split('|').collect();
-            if parts.len() >= 2 {
-                sizes.insert(parts[0].to_string(), parts[1].parse::<u64>().unwrap_or(0));
+    Ok(parse_remote_image_files(&String::from_utf8_lossy(&output.stdout)))
+}
+
+fn parse_remote_image_files(
+    output: &str,
+) -> std::collections::HashMap<String, RemoteImageFile> {
+    let mut files = std::collections::HashMap::new();
+    for line in output.lines() {
+        if let Some(rest) = line.strip_prefix("FILE\t") {
+            let parts: Vec<&str> = rest.split('\t').collect();
+            if parts.len() >= 3 && !parts[2].is_empty() {
+                files.insert(
+                    parts[0].to_string(),
+                    RemoteImageFile {
+                        size: parts[1].parse::<u64>().unwrap_or(0),
+                        sha256: parts[2].to_ascii_lowercase(),
+                    },
+                );
             }
         }
     }
-    Ok(sizes)
+    files
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -915,5 +938,16 @@ mod tests {
         assert!(!expectations[0].file_present);
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remote_image_files_keep_size_and_digest_for_upload_checks() {
+        let output = "FILE\tapi.tar\t1024\tabcdef0123456789\nFILE\tbroken.tar\t10\t\n";
+        let files = parse_remote_image_files(output);
+        assert_eq!(files.len(), 1);
+        let api = files.get("api.tar").unwrap();
+        assert_eq!(api.size, 1024);
+        assert_eq!(api.sha256, "abcdef0123456789");
+        assert!(!files.contains_key("broken.tar"));
     }
 }

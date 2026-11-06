@@ -6,6 +6,7 @@ pub mod connections;
 pub mod db_ops;
 pub mod deployment_review;
 pub mod deployment_images;
+pub mod deployment_image_bindings;
 pub mod docker_download;
 pub mod docker_engine;
 pub mod docker_ops;

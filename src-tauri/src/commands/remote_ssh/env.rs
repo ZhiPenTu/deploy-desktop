@@ -514,6 +514,40 @@ pub(crate) fn compose_action_error(
     }
 }
 
+/// 只读定位目标机当前使用的 Compose 清单（相对部署目录），供镜像覆盖生成使用。
+pub(crate) fn remote_compose_file(
+    host: &str,
+    port: u16,
+    user: &str,
+    key: Option<&str>,
+    deploy_dir: &str,
+    candidates: &[String],
+) -> Option<String> {
+    if candidates.is_empty() {
+        return None;
+    }
+    let list = candidates
+        .iter()
+        .map(|name| shell_quote(name))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let script = format!(
+        "DEPLOY={deploy}\ncd -- \"$DEPLOY\" 2>/dev/null || exit 0\nfor candidate in {list}; do\n  if [ -f \"$candidate\" ]; then printf '%s' \"$candidate\"; exit 0; fi\ndone\n",
+        deploy = shell_quote(deploy_dir),
+        list = list
+    );
+    let output = run_ssh_script(host, port, user, key, &script).ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path.is_empty() {
+        None
+    } else {
+        Some(path)
+    }
+}
+
 pub(crate) fn remote_compose_action(
     host: &str,
     port: u16,
@@ -557,6 +591,25 @@ pub(crate) fn remote_compose_action(
             unique.push(name);
         }
     }
+    let compose_file = if action == "up" {
+        remote_compose_file(host, port, user, key, deploy_dir, &unique)
+    } else {
+        None
+    };
+    let override_path = match compose_file.as_deref() {
+        Some(compose) => {
+            let target = format!(
+                "{}/{}",
+                deploy_dir.trim_end_matches('/'),
+                compose.trim_start_matches('/')
+            );
+            let install = crate::commands::deployment_image_bindings::active_install_root(deploy_dir);
+            crate::commands::deployment_image_bindings::remote_override(
+                host, port, user, key, &install, &target,
+            )?
+        }
+        None => None,
+    };
     let list = unique
         .iter()
         .map(|name| shell_quote(name))
@@ -585,23 +638,31 @@ if [ -z "$COMPOSE_FILE" ]; then
   echo "目标目录及其 deploy/ 子目录未找到可用的 Compose 清单" >&2
   exit 3
 fi
-ENV_ARGS=""
+ENV_ARGS=()
 for f in .env deploy/.env .env.local deploy/.env.local; do
   if [ -f "$f" ]; then
-    ENV_ARGS="$ENV_ARGS --env-file $f"
+    ENV_ARGS+=(--env-file "$f")
   fi
 done
-COMPOSE_ARGS="-f $COMPOSE_FILE"
+DEPLOY_IMAGE_OVERRIDE={override_variable}
+COMPOSE_ARGS=(-f "$COMPOSE_FILE")
+if [ -n "$DEPLOY_IMAGE_OVERRIDE" ]; then
+  COMPOSE_ARGS+=(-f "$DEPLOY_IMAGE_OVERRIDE")
+fi
 if docker compose version >/dev/null 2>&1; then
-  docker compose $ENV_ARGS $COMPOSE_ARGS {action}
+  docker compose "${{ENV_ARGS[@]}}" "${{COMPOSE_ARGS[@]}}" {action}
 else
-  docker-compose $ENV_ARGS $COMPOSE_ARGS {action}
+  docker-compose "${{ENV_ARGS[@]}}" "${{COMPOSE_ARGS[@]}}" {action}
 fi
 "#,
         deploy = shell_quote(deploy_dir),
         missing = DEPLOY_DIR_MISSING,
         list = list,
-        action = action_arg
+        action = action_arg,
+        override_variable = override_path
+            .as_deref()
+            .map(shell_quote)
+            .unwrap_or_else(|| "''".to_string())
     );
 
     let output = run_ssh_script(host, port, user, key, &script)?;

@@ -19,18 +19,32 @@ import {
   componentLabels,
   componentOptions as planComponentOptions,
   deploymentComponents,
+  missingArtifactIssue,
   servicesAreReady
 } from '../domain/components.js';
 import { safeText, failureText } from '../domain/errors.js';
+import {
+  groupPullReferences,
+  imagePreparationCounts,
+  imageStatusLabel,
+  isDigestReference,
+  pendingImages,
+  pullableImages
+} from '../domain/images.js';
 import { invokeIncremental } from '../services/operations.js';
 import {
   prepareImagePackages,
+  prepareRelayImagePackages,
   importImagePackages,
-  pullMissingImages
+  pullMissingImages,
+  registerTransferredImages
 } from '../services/imagePreparation.js';
 import { useEnvironmentCheck } from './useEnvironmentCheck.js';
 import { useExecutionFeedback } from './useExecutionFeedback.js';
 import { useHostAccess } from './useHostAccess.js';
+
+const DIGEST_TRANSFER_HINT =
+  '离线包中的镜像无法与仓库摘要核对，请从镜像仓库拉取；局域网目标可选择本机拉取后传入';
 
 export function useDeploymentWizard(config, emit) {
   const steps = ['选择项目', '检测环境', '选择制品', '解压制品', '清单比对', '选择更新'];
@@ -69,15 +83,14 @@ export function useDeploymentWizard(config, emit) {
   const review = ref(null),
     reviewError = ref(''),
     checkingReview = ref(false),
-    reviewTab = ref('services');
+    reviewTab = ref('images');
 
   const bundlePlan = ref(null),
     imageMediaDir = ref(''),
     importingImages = ref(false);
   const imageSource = ref('pull');
-  const imageRegistrySourceId = ref(''),
-    imageRegistryPassword = ref(''),
-    imageRegistrySources = ref([]),
+  const imageRegistrySources = ref([]),
+    imagePullSelections = ref({}),
     imageRegistryLoadError = ref('');
   const imageOperationRevision = ref(0);
   const imagePhase = ref(''),
@@ -85,54 +98,76 @@ export function useDeploymentWizard(config, emit) {
     imageDiagnostics = ref(''),
     imageResult = ref('');
 
-  function registryOfReference(reference) {
-    const value = String(reference || '');
-    const first = value.split('/')[0];
-    return normalizeRegistry(
-      value.includes('/') && (first.includes('.') || first.includes(':') || first === 'localhost')
-        ? first
-        : 'docker.io'
+  const imagePullGroups = computed(() =>
+    groupPullReferences(
+      review.value?.images || [],
+      imageRegistrySources.value,
+      imagePullSelections.value
+    )
+  );
+  const imagePending = computed(() => pendingImages(review.value?.images || []));
+  const imagePullable = computed(() => pullableImages(review.value?.images || []));
+  const pendingDigestImages = computed(() =>
+    imagePending.value.filter((image) => isDigestReference(image.imageRef))
+  );
+  const imageCounts = computed(() => imagePreparationCounts(review.value?.images || []));
+  const imageBlockedCount = computed(
+    () => imagePending.value.length - imagePullable.value.length
+  );
+  const imageNextBlockedReason = computed(() => {
+    if (checkingReview.value) return '正在核对目标环境，请稍候';
+    if (importingImages.value) return '正在准备镜像，请稍候';
+    if (!review.value) return '请先完成清单比对';
+    if (review.value.ready) return '';
+    if (imagePending.value.length) {
+      return `仍有 ${imagePending.value.length} 个镜像未就绪，请先在上方处理`;
+    }
+    if (!review.value.dockerRunning) return '目标 Docker 未运行，请返回环境检测启动 Docker';
+    if (!review.value.composeAvailable) return '目标缺少 Docker Compose，请先准备运行环境';
+    return review.value.issues?.[0] || '目标环境尚未就绪';
+  });
+
+  function setImagePullSelection(registry, patch) {
+    if (!registry) return;
+    const previous = imagePullSelections.value[registry] || {};
+    const next = { ...previous, ...patch };
+    if (Object.prototype.hasOwnProperty.call(patch, 'sourceId')) {
+      next.credential = '';
+    }
+    imagePullSelections.value = { ...imagePullSelections.value, [registry]: next };
+  }
+
+  function clearImageCredentials() {
+    imagePullSelections.value = Object.fromEntries(
+      Object.entries(imagePullSelections.value).map(([registry, value]) => [
+        registry,
+        { ...value, credential: '' }
+      ])
     );
   }
 
-  function normalizeRegistry(value) {
-    const registry = String(value || '').trim().toLowerCase();
-    return registry === 'registry-1.docker.io' || registry === 'index.docker.io'
-      ? 'docker.io'
-      : registry;
-  }
-
-  const missingImageRegistries = computed(() =>
-    new Set((review.value?.missingImages || []).map(registryOfReference))
-  );
-  const imageRegistryMixed = computed(() => missingImageRegistries.value.size > 1);
-  const imageRegistryOptions = computed(() =>
-    imageRegistrySources.value.filter((source) => {
-      const registries = [...missingImageRegistries.value];
-      return registries.length > 0 &&
-        registries.every((registry) => registry === normalizeRegistry(source.address));
-    })
-  );
-  const selectedImageRegistrySource = computed(
-    () => imageRegistryOptions.value.find((source) => source.id === imageRegistrySourceId.value) || null
-  );
-  const imageRegistryNeedsPassword = computed(
-    () => Boolean(selectedImageRegistrySource.value?.username && !selectedImageRegistrySource.value?.hasPassword)
-  );
-
-  watch(isRemote, () => { imageSource.value = 'pull'; });
-  watch(imageRegistryOptions, (options) => {
-    if (!options.some((source) => source.id === imageRegistrySourceId.value)) {
-      imageRegistrySourceId.value = '';
-    }
-  });
-  watch(imageRegistrySourceId, () => { imageRegistryPassword.value = ''; });
-  watch(imageSource, (value) => {
-    if (value !== 'pull') imageRegistryPassword.value = '';
+  watch(isRemote, () => {
+    imageSource.value = 'pull';
+    imagePullSelections.value = {};
   });
   watch(activeStep, (step) => {
-    if (step !== 4) imageRegistryPassword.value = '';
+    if (step !== 4) clearImageCredentials();
   });
+  watch(imageSource, (value) => {
+    if (value === 'offline') clearImageCredentials();
+  });
+  watch(
+    () => review.value?.images?.map((image) => image.imageRef).join('\n') || '',
+    () => {
+      if (!review.value) return;
+      const registries = new Set(imagePullGroups.value.map((group) => group.registry));
+      imagePullSelections.value = Object.fromEntries(
+        Object.entries(imagePullSelections.value).filter(([registry]) =>
+          registries.has(registry)
+        )
+      );
+    }
+  );
   const receiveImageProgress = (event) => {
     if (importingImages.value && event.phase !== 'done' &&
         imageOperationRevision.value !== 0) {
@@ -195,6 +230,11 @@ export function useDeploymentWizard(config, emit) {
 
   const componentOptions = computed(() => planComponentOptions(bundlePlan.value));
   const componentLabelMap = computed(() => componentLabels(bundlePlan.value));
+  const artifactSelectionIssue = computed(() =>
+    deploymentAction.value === 'incremental'
+      ? missingArtifactIssue(bundlePlan.value, review.value, selectedComponents.value)
+      : ''
+  );
 
   const canExecute = computed(
     () =>
@@ -202,6 +242,7 @@ export function useDeploymentWizard(config, emit) {
       environmentReady.value &&
       preparedBundle.value &&
       review.value?.ready &&
+      !artifactSelectionIssue.value &&
       (deploymentAction.value === 'first'
         ? review.value.canFirstDeploy
         : review.value.canIncrementalUpdate && selectedComponents.value.length > 0)
@@ -221,7 +262,7 @@ export function useDeploymentWizard(config, emit) {
     executionFeedback.stop();
     disposed = true;
     revision += 1;
-    imageRegistryPassword.value = '';
+    clearImageCredentials();
     imageOperationRevision.value = 0;
     environment.dispose();
     emit('busy-change', false);
@@ -256,7 +297,7 @@ export function useDeploymentWizard(config, emit) {
     bundlePlan.value = null;
     imageResult.value = '';
     imageDiagnostics.value = '';
-    imageRegistryPassword.value = '';
+    imagePullSelections.value = {};
     imageRegistryLoadError.value = '';
     imagePhase.value = '';
     imageProgress.value = null;
@@ -356,6 +397,7 @@ export function useDeploymentWizard(config, emit) {
       bundlePlan.value = plan;
       imageRegistrySources.value = registry.sources;
       imageRegistryLoadError.value = registry.error;
+      if (pendingImages(checked.images || []).length) reviewTab.value = 'images';
     } catch (error) {
       if (current === revision && !disposed) reviewError.value = failureText(error, '清单比对');
     } finally {
@@ -378,25 +420,64 @@ export function useDeploymentWizard(config, emit) {
   }
 
   async function prepareImages() {
-    if (busy.value || !preparedBundle.value || !review.value?.missingImages?.length) return;
-    if (imageSource.value === 'pull' && imageRegistryNeedsPassword.value && !imageRegistryPassword.value) {
-      reviewError.value = '请填写所选镜像源本次使用的密码';
+    if (busy.value || !preparedBundle.value || !review.value) return;
+    const pending = pendingImages(review.value.images || []);
+    const pullable = pullableImages(review.value.images || []);
+    const source = imageSource.value;
+    const transferable =
+      source === 'offline'
+        ? pending.filter((image) => !isDigestReference(image.imageRef))
+        : pullable;
+    const references = transferable.map((image) => image.imageRef);
+    if (!references.length) {
+      reviewError.value = pendingDigestImages.value.length
+        ? `${DIGEST_TRANSFER_HINT}：${pendingDigestImages.value
+            .map((image) => image.imageRef)
+            .join('、')}`
+        : source === 'offline'
+          ? '没有需要导入的镜像，请先重新检查目标环境'
+          : '当前没有可通过拉取修复的镜像；请查看镜像原因，或改用离线镜像包';
       imageDiagnostics.value = '';
       imageResult.value = '';
       return;
     }
+    if (source === 'relay' && !isRemote.value) {
+      reviewError.value = '本机拉取后传入仅适用于远程目标主机';
+      imageDiagnostics.value = '';
+      imageResult.value = '';
+      return;
+    }
+    const missingCredentials = imagePullGroups.value.filter(
+      (group) => group.needsPassword && !group.credential
+    );
+    if (source !== 'offline' && missingCredentials.length) {
+      reviewError.value = `请填写 ${missingCredentials
+        .map((group) => group.label)
+        .join('、')} 的镜像仓库密码`;
+      imageDiagnostics.value = '';
+      imageResult.value = '';
+      return;
+    }
+    const credentials =
+      source === 'offline'
+        ? []
+        : imagePullGroups.value
+            .filter((group) => group.sourceId)
+            .map((group) => ({
+              registrySourceId: group.sourceId,
+              credential: group.credential
+            }));
     const operation = ++imageOperationSequence;
     imageOperationRevision.value = operation;
     const context = Object.freeze({
-      source: imageSource.value,
+      source,
       bundleDir: preparedBundle.value.dir,
       imageDir: imageMediaDir.value.trim() || preparedBundle.value.dir,
       installDir: config.installDir,
       label: targetLabel.value,
       target: target() ? Object.freeze({ ...target() }) : null,
-      references: Object.freeze([...new Set(review.value.missingImages)]),
-      registrySourceId: imageSource.value === 'pull' ? imageRegistrySourceId.value : '',
-      password: imageSource.value === 'pull' ? imageRegistryPassword.value : '',
+      references: Object.freeze([...new Set(references)]),
+      credentials: Object.freeze(credentials.map((item) => Object.freeze({ ...item }))),
       remoteDir: `${config.installDir.replace(/\/+$/, '')}/bundle-images-${crypto.randomUUID()}`
     });
     importingImages.value = true;
@@ -416,30 +497,46 @@ export function useDeploymentWizard(config, emit) {
       desktopGuard();
       try {
         const sourceText =
-          context.source === 'docker'
-            ? '从本机 Docker 导出'
+          context.source === 'relay'
+            ? '先在本机按目标架构拉取并导出'
             : context.source === 'offline'
               ? '从离线目录读取'
-              : '按清单地址拉取';
+              : context.target
+                ? '在目标主机按清单地址拉取'
+                : '在本机按清单地址拉取';
         const destinationText =
           context.source === 'pull'
             ? context.target
               ? `到${context.label}的 Docker`
               : '到本机 Docker'
+            : context.source === 'relay'
+              ? `，再通过 SSH 传输到 ${context.remoteDir}/images 后导入`
             : context.target
               ? `，传输到 ${context.remoteDir}/images 后解压并导入 Docker`
               : '并导入本机 Docker';
         const retentionText =
           context.source === 'pull'
             ? '拉取完成后会重新核对，运行中的服务不会重启。'
-            : '镜像包会保留并占用磁盘空间，运行中的服务不会重启。';
+            : context.source === 'relay'
+              ? '目标机无需访问镜像仓库；镜像包会保留并占用本机磁盘空间，运行中的服务不会重启。'
+              : '镜像包会保留并占用磁盘空间，运行中的服务不会重启。';
         await ElMessageBox.confirm(
-          `目标：${context.label}。将${sourceText} ${context.references.length} 个缺失镜像${destinationText}。${retentionText}是否继续？`,
-          context.source === 'pull' ? '确认拉取镜像' : '确认导入镜像',
+          `目标：${context.label}。将${sourceText} ${context.references.length} 个可处理镜像${destinationText}。${retentionText}是否继续？`,
+          context.source === 'pull'
+            ? '确认拉取镜像'
+            : context.source === 'relay'
+              ? '确认本机拉取并传入'
+              : '确认导入镜像',
           {
             type: 'warning',
             confirmButtonText:
-              context.source === 'pull' ? '开始拉取' : context.target ? '传输并导入' : '导入',
+              context.source === 'pull'
+                ? '开始拉取'
+                : context.source === 'relay'
+                  ? '拉取并传入'
+                  : context.target
+                    ? '传输并导入'
+                    : '导入',
             cancelButtonText: '取消',
             closeOnClickModal: false
           }
@@ -450,26 +547,41 @@ export function useDeploymentWizard(config, emit) {
       if (disposed || imageOperationRevision.value !== operation) return;
       if (context.source === 'pull') {
         await pullMissingImages(context, setImagePhase);
+      } else if (context.source === 'relay') {
+        const packages = await prepareRelayImagePackages(context, setImagePhase);
+        await importImagePackages(context, packages, setImagePhase);
+        await registerTransferredImages(context, packages, setImagePhase);
       } else {
         const packages = await prepareImagePackages(context, setImagePhase);
         await importImagePackages(context, packages, setImagePhase);
+        await registerTransferredImages(context, packages, setImagePhase);
       }
       setImagePhase('正在重新核对目标镜像');
       await loadReview();
       if (!review.value) throw new Error('镜像准备后未能确认目标状态，请重新比对');
-      if (review.value.images?.some((image) => image.status !== 'ready') ||
-          context.references.some((reference) => !review.value.images?.some((image) =>
-            image.imageRef === reference && image.status === 'ready'))) {
+      const remaining = pendingImages(review.value.images || []);
+      if (remaining.length) {
+        const details = remaining
+          .slice(0, 3)
+          .map((image) => `${image.imageRef}（${imageStatusLabel(image.status)}）`)
+          .join('、');
+        const remainingDigest = remaining.filter((image) =>
+          isDigestReference(image.imageRef)
+        );
         throw new Error(
-          context.source === 'pull'
-            ? '拉取后仍有镜像缺失或未确认，请检查镜像地址、仓库权限与目标主机网络后重新比对'
-            : '导入后仍有镜像缺失或未确认，请确认镜像包包含清单要求的完整镜像地址与摘要后重新比对'
+          `仍有 ${remaining.length} 个镜像未就绪：${details}。${
+            context.source === 'offline' && remainingDigest.length
+              ? `${DIGEST_TRANSFER_HINT}。`
+              : '请查看镜像原因后重试。'
+          }`
         );
       }
       imageResult.value =
         context.source === 'pull'
-          ? '缺失镜像已拉取，目标镜像核对通过。'
-          : `缺失镜像已导入，${context.target ? '目标主机' : '目标'}镜像核对通过。`;
+          ? '待处理镜像已拉取，目标镜像核对通过。'
+          : context.source === 'relay'
+            ? '本机镜像已按目标架构传入并导入，目标镜像核对通过。'
+            : `待处理镜像已导入，${context.target ? '目标主机' : '目标'}镜像核对通过。`;
     } catch (error) {
       if (imageOperationRevision.value === operation && !disposed) {
         const message = safeText(error?.message || error);
@@ -480,7 +592,7 @@ export function useDeploymentWizard(config, emit) {
       importingImages.value = false;
       imagePhase.value = '';
       imageProgress.value = null;
-      imageRegistryPassword.value = '';
+      clearImageCredentials();
       imageOperationRevision.value = 0;
     }
   }
@@ -495,6 +607,10 @@ export function useDeploymentWizard(config, emit) {
       context.imageDir
     );
     review.value = checked;
+    if (context.action === 'incremental') {
+      const issue = missingArtifactIssue(bundlePlan.value, checked, context.components);
+      if (issue) throw new Error(issue);
+    }
     if (
       !checked.ready ||
       (context.action === 'first' ? !checked.canFirstDeploy : !checked.canIncrementalUpdate)
@@ -604,6 +720,16 @@ export function useDeploymentWizard(config, emit) {
         contextTarget(context),
         context.imageDir
       );
+      const unavailableFiles = (verified.artifacts || []).filter((artifact) =>
+        ['missing', 'invalid', 'unconfirmed'].includes(artifact.status)
+      );
+      if (unavailableFiles.length) {
+        throw new Error(
+          `部署后的制品文件尚未就绪：${unavailableFiles
+            .map((artifact) => artifact.label || artifact.key)
+            .join('、')}。请返回清单比对检查。`
+        );
+      }
       const ready = servicesAreReady(verified);
       result.value = {
         success: ready,
@@ -639,5 +765,5 @@ export function useDeploymentWizard(config, emit) {
 
   const { progressStep, progressPercent, progressMessage, elapsedText } = executionFeedback;
 
-  return { steps, activeStep, selectedHost, isRemote, targetLabel, hostReady, testingSsh, settingKey, sshMessage, sshOk, envData, envError, checkingEnv, installingDocker, artifactPicker, candidate, preparedBundle, artifactBusy, review, reviewError, checkingReview, reviewTab, imageMediaDir, imageSource, imageRegistrySourceId, imageRegistryPassword, imageRegistryOptions, imageRegistryNeedsPassword, imageRegistryMixed, imageRegistryLoadError, imagePhase, imageProgress, imageDiagnostics, imageResult, importingImages, deploymentAction, selectedComponents, backup, executing, preflighting, preflightPassed, phase, operationError, diagnostics, result, busy, environmentReady, componentOptions, canExecute, artifactChosen, artifactPrepared, testConnection, setupAccess, checkEnvironment, installDocker, nextStep, previousStep, loadReview, pickImageDirectory, prepareImages, runPreflight, executeDeployment, progressStep, progressPercent, progressMessage, elapsedText };
+  return { steps, activeStep, selectedHost, isRemote, targetLabel, hostReady, testingSsh, settingKey, sshMessage, sshOk, envData, envError, checkingEnv, installingDocker, artifactPicker, candidate, preparedBundle, artifactBusy, review, reviewError, checkingReview, reviewTab, imageMediaDir, imageSource, imagePullGroups, imagePending, imagePullable, pendingDigestImages, imageCounts, imageBlockedCount, imageNextBlockedReason, imageRegistryLoadError, imagePhase, imageProgress, imageDiagnostics, imageResult, importingImages, deploymentAction, selectedComponents, backup, executing, preflighting, preflightPassed, phase, operationError, diagnostics, result, busy, environmentReady, componentOptions, canExecute, artifactSelectionIssue, artifactChosen, artifactPrepared, testConnection, setupAccess, checkEnvironment, installDocker, nextStep, previousStep, loadReview, pickImageDirectory, prepareImages, setImagePullSelection, runPreflight, executeDeployment, progressStep, progressPercent, progressMessage, elapsedText };
 }

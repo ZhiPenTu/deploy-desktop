@@ -41,6 +41,13 @@
       </el-form-item>
     </el-form>
     <el-alert
+      v-if="artifactSelectionIssue"
+      :title="artifactSelectionIssue"
+      type="warning"
+      :closable="false"
+      show-icon
+    />
+    <el-alert
       v-if="preflightPassed && !result"
       title="预检通过，可以开始执行。"
       type="success"
@@ -120,6 +127,7 @@ const props = defineProps({
   review: { type: Object, default: null },
   busy: { type: Boolean, default: false },
   canExecute: { type: Boolean, default: false },
+  artifactSelectionIssue: { type: String, default: '' },
   preflighting: { type: Boolean, default: false },
   preflightPassed: { type: Boolean, default: false },
   executing: { type: Boolean, default: false },

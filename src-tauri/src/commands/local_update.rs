@@ -142,7 +142,7 @@ fn run_update(
     if backup {
         check_backup_space(&plan)?;
     }
-    if !plan.image_selected {
+    if plan.config_selected && !plan.image_selected {
         check_images_available(effective_config)?;
     }
     let compose_for_env = if plan.config_selected {
@@ -201,7 +201,9 @@ fn run_update(
             plan.compose.clone()
         };
         ensure_compose_env(&plan.root, &plan.deploy_dir, &effective)?;
-        check_images_available(&compose_config(&plan, &effective)?)?;
+        if plan.config_selected || plan.image_selected {
+            check_images_available(&compose_config(&plan, &effective)?)?;
+        }
         progress(
             window,
             "应用更新",
@@ -634,7 +636,11 @@ fn check_local_docker() -> Result<(), String> {
     Ok(())
 }
 
-fn compose_command(plan: &UpdatePlan, compose: &Path, action: &[&str]) -> Result<Command, String> {
+fn compose_command(
+    plan: &UpdatePlan,
+    compose: &Path,
+    action: &[&str],
+) -> Result<(Command, Option<String>), String> {
     let mut command = Command::new(find_binary("docker"));
     command
         .arg("compose")
@@ -645,14 +651,30 @@ fn compose_command(plan: &UpdatePlan, compose: &Path, action: &[&str]) -> Result
         command.arg("--env-file").arg(env);
     }
     command.arg("-f").arg(compose);
+    let needs_images = plan.config_selected || plan.image_selected;
+    let override_document = if needs_images
+        && matches!(action.first(), Some(&"config") | Some(&"up"))
+    {
+        super::deployment_image_bindings::local_override_document(
+            &plan.root,
+            compose,
+            action.first() == Some(&"up"),
+        )?
+    } else {
+        None
+    };
+    if override_document.is_some() {
+        command.args(["-f", "-"]);
+    }
     command.args(action).current_dir(&plan.deploy_dir);
-    Ok(command)
+    Ok((command, override_document))
 }
 
 fn compose_output(plan: &UpdatePlan, compose: &Path, action: &[&str]) -> Result<String, String> {
+    let (command, override_document) = compose_command(plan, compose, action)?;
     let output = process::run(
-        compose_command(plan, compose, action)?,
-        process::Input::Bytes(vec![]),
+        command,
+        process::Input::Bytes(override_document.unwrap_or_default().into_bytes()),
         process::Options::default(),
     )?;
     if !output.status.success() {

@@ -3,8 +3,10 @@ import { afterEach, beforeEach, test } from 'node:test';
 import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import {
   prepareImagePackages,
+  prepareRelayImagePackages,
   importImagePackages,
-  pullMissingImages
+  pullMissingImages,
+  registerTransferredImages
 } from '../src/features/deployment/services/imagePreparation.js';
 
 const reference = `demo/api@sha256:${'a'.repeat(64)}`;
@@ -101,6 +103,23 @@ test('import failure or missing result is not reported as complete', async () =>
   }
 });
 
+test('本机离线导入只处理本次需要的镜像包', async () => {
+  const calls = [];
+  mockIPC((command, args) => {
+    calls.push({ command, args });
+    return ['api.tar: Loaded image'];
+  });
+  await importImagePackages(
+    { ...context, target: null },
+    { root: '/offline', files: ['api.tar'] },
+    () => {}
+  );
+  assert.deepEqual(calls, [{
+    command: 'load_offline_images',
+    args: { bundleDir: '/offline', files: ['api.tar'] }
+  }]);
+});
+
 test('pull source requests exact missing references for a remote target', async () => {
   const calls = [];
   mockIPC((command, args) => {
@@ -128,7 +147,9 @@ test('pull source requests exact missing references for a remote target', async 
       user: 'deploy',
       keyPath: '/key',
       registrySourceId: 'registry-1',
-      password: 'secret'
+      password: 'secret',
+      installDir: '/srv/demo',
+      registryCredentials: []
     }
   }]);
 });
@@ -148,12 +169,71 @@ test('local pull sends empty target fields and rejects incomplete confirmation',
     user: null,
     keyPath: null,
     registrySourceId: null,
-    password: null
+    password: null,
+    installDir: '/srv/demo',
+    registryCredentials: []
   });
 
   mockIPC(() => [{ reference: 'demo/other:1', message: '已拉取并确认' }]);
   await assert.rejects(
     pullMissingImages({ ...context, source: 'pull' }, () => {}),
-    /未确认镜像/
+    /未完成镜像/
   );
+});
+
+test('LAN relay pulls on the local Docker before exporting and importing', async () => {
+  const calls = [];
+  const binding = {
+    reference,
+    imageId: `sha256:${'b'.repeat(64)}`,
+    platform: 'linux/amd64'
+  };
+  mockIPC((command, args) => {
+    calls.push({ command, args });
+    if (command === 'prepare_local_deployment_images') return [{ ...exported, binding }];
+    return ['完成'];
+  });
+  const relayContext = {
+    ...context,
+    source: 'relay',
+    credentials: [{ registrySourceId: 'registry-docker', credential: 'secret' }]
+  };
+  const packages = await prepareRelayImagePackages(relayContext, () => {});
+  assert.deepEqual(packages, { root: '/offline', files: ['api.tar'], bindings: [binding] });
+  await importImagePackages(relayContext, packages, () => {});
+  await registerTransferredImages(relayContext, packages, () => {});
+  assert.deepEqual(calls.map((item) => item.command), [
+    'prepare_local_deployment_images',
+    'upload_remote_image_bundle',
+    'import_remote_image_bundle',
+    'register_deployment_image_bindings'
+  ]);
+  assert.deepEqual(calls[0].args, {
+    bundleDir: '/bundle',
+    references: [reference],
+    host: 'host.example.com',
+    port: 2222,
+    user: 'deploy',
+    keyPath: '/key',
+    registryCredentials: [{ registrySourceId: 'registry-docker', password: 'secret' }]
+  });
+  assert.deepEqual(calls[3].args, {
+    bundleDir: '/bundle',
+    installDir: '/srv/demo',
+    references: [reference],
+    expected: [binding],
+    ...context.target
+  });
+});
+
+test('摘要镜像缺少源端内容核对结果时不登记为已就绪', async () => {
+  const calls = [];
+  mockIPC((command) => { calls.push(command); });
+  await assert.rejects(
+    registerTransferredImages(context, { files: ['api.tar'], bindings: [] }, () => {}),
+    /源端摘要镜像/
+  );
+  assert.deepEqual(calls, []);
+  await registerTransferredImages({ ...context, references: ['demo/api:1.0'] }, {}, () => {});
+  assert.deepEqual(calls, []);
 });
