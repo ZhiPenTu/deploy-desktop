@@ -50,6 +50,7 @@ struct UpdatePlan {
 }
 
 struct ComponentBinding {
+    component: String,
     services: Vec<String>,
     paths: Vec<PathBuf>,
 }
@@ -558,6 +559,7 @@ fn build_plan(
             services.insert(service.clone());
         }
         bindings.push(ComponentBinding {
+            component: key.clone(),
             services: component.services.clone(),
             paths: targets,
         });
@@ -795,40 +797,62 @@ fn validate_effective_configs(
         return Err("交付包的 Compose 项目名称与当前部署不同，请确认制品与目标".to_string());
     }
     for binding in &plan.bindings {
+        if binding.paths.is_empty() || binding.services.is_empty() {
+            continue;
+        }
         let configurations: Vec<&Value> = if plan.config_selected {
             vec![incoming, current]
         } else {
             vec![current]
         };
-        for service in &binding.services {
+        for config in configurations {
+            for service in &binding.services {
+                let bound = binding
+                    .paths
+                    .iter()
+                    .any(|path| service_binds_path(config, service, path));
+                if !bound {
+                    return Err(format!(
+                        "服务 {service} 未挂载组件 {} 的产物，无法安全增量更新，请检查部署清单",
+                        binding.component
+                    ));
+                }
+            }
             for path in &binding.paths {
-                for config in &configurations {
-                    let bound = config
-                        .get("services")
-                        .and_then(|value| value.get(service))
-                        .and_then(|value| value.get("volumes"))
-                        .and_then(Value::as_array)
-                        .map(|volumes| {
-                            volumes.iter().any(|volume| {
-                                volume.get("type").and_then(Value::as_str) == Some("bind")
-                                    && volume
-                                        .get("source")
-                                        .and_then(Value::as_str)
-                                        .map(|source| path.starts_with(Path::new(source)))
-                                        .unwrap_or(false)
-                            })
-                        })
-                        .unwrap_or(false);
-                    if !bound {
-                        return Err(format!(
-                            "服务 {service} 未挂载所选产物目录，无法安全增量更新，请检查部署清单"
-                        ));
-                    }
+                let bound = binding
+                    .services
+                    .iter()
+                    .any(|service| service_binds_path(config, service, path));
+                if !bound {
+                    return Err(format!(
+                        "组件 {} 的产物 {} 未被所选服务挂载，无法安全增量更新，请检查部署清单",
+                        binding.component,
+                        path.display()
+                    ));
                 }
             }
         }
     }
     Ok(())
+}
+
+fn service_binds_path(config: &Value, service: &str, path: &Path) -> bool {
+    config
+        .get("services")
+        .and_then(|value| value.get(service))
+        .and_then(|value| value.get("volumes"))
+        .and_then(Value::as_array)
+        .map(|volumes| {
+            volumes.iter().any(|volume| {
+                volume.get("type").and_then(Value::as_str) == Some("bind")
+                    && volume
+                        .get("source")
+                        .and_then(Value::as_str)
+                        .map(|source| path.starts_with(Path::new(source)))
+                        .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
 }
 
 fn check_images_available(config: &Value) -> Result<(), String> {
@@ -1460,6 +1484,7 @@ mod tests {
             services: vec!["frontend".to_string()],
             all_services: Vec::new(),
             bindings: vec![ComponentBinding {
+                component: "frontend".to_string(),
                 services: vec!["frontend".to_string()],
                 paths: vec![destination.clone()],
             }],
@@ -1496,6 +1521,151 @@ mod tests {
         let without_bind =
             serde_json::json!({ "name": "same-project", "services": { "frontend": {} } });
         assert!(validate_effective_configs(&plan, &without_bind, &current).is_err());
+    }
+
+    #[test]
+    fn accepts_component_artifacts_split_across_services() {
+        let fixture = Fixture::new();
+        let root = fs::canonicalize(&fixture.0).unwrap();
+        let classes = root.join("backend-java/gateway-app/target/classes");
+        let lib = root.join("backend-java/gateway-app/target/lib");
+        let udp_lb = root.join("backend-java/udp-lb/target/tt-net-manager-udp-lb.jar");
+        let plan = UpdatePlan {
+            deploy_dir: root.join("deploy"),
+            root,
+            compose: PathBuf::new(),
+            bundle_compose: PathBuf::new(),
+            variant: None,
+            components: vec!["gateway".to_string()],
+            replacements: Vec::new(),
+            images: Vec::new(),
+            services: vec!["gateway-shard-1".to_string(), "udp-lb".to_string()],
+            all_services: Vec::new(),
+            bindings: vec![ComponentBinding {
+                component: "gateway".to_string(),
+                services: vec!["gateway-shard-1".to_string(), "udp-lb".to_string()],
+                paths: vec![classes.clone(), lib.clone(), udp_lb.clone()],
+            }],
+            config_selected: false,
+            image_selected: false,
+        };
+        let current = serde_json::json!({
+            "name": "same-project",
+            "services": {
+                "gateway-shard-1": {
+                    "volumes": [
+                        { "type": "bind", "source": classes },
+                        { "type": "bind", "source": lib }
+                    ]
+                },
+                "udp-lb": {
+                    "volumes": [{ "type": "bind", "source": udp_lb }]
+                }
+            }
+        });
+        assert!(validate_effective_configs(&plan, &current, &current).is_ok());
+
+        let missing_udp_lb = serde_json::json!({
+            "name": "same-project",
+            "services": {
+                "gateway-shard-1": {
+                    "volumes": [
+                        { "type": "bind", "source": classes },
+                        { "type": "bind", "source": lib }
+                    ]
+                },
+                "udp-lb": {}
+            }
+        });
+        let error = validate_effective_configs(&plan, &missing_udp_lb, &current).unwrap_err();
+        assert!(error.contains("gateway"), "{error}");
+        assert!(error.contains("udp-lb"), "{error}");
+
+        let missing_gateway_lib = serde_json::json!({
+            "name": "same-project",
+            "services": {
+                "gateway-shard-1": {
+                    "volumes": [{ "type": "bind", "source": classes }]
+                },
+                "udp-lb": {
+                    "volumes": [{ "type": "bind", "source": udp_lb }]
+                }
+            }
+        });
+        assert!(validate_effective_configs(&plan, &missing_gateway_lib, &current).is_err());
+
+        let named_volume_only = serde_json::json!({
+            "name": "same-project",
+            "services": {
+                "gateway-shard-1": {
+                    "volumes": [
+                        { "type": "bind", "source": classes },
+                        { "type": "bind", "source": lib }
+                    ]
+                },
+                "udp-lb": {
+                    "volumes": [{ "type": "volume", "source": "udp-lb-data" }]
+                }
+            }
+        });
+        assert!(validate_effective_configs(&plan, &named_volume_only, &current).is_err());
+    }
+
+    #[test]
+    fn config_components_without_services_skip_mount_checks() {
+        let fixture = Fixture::new();
+        let root = fs::canonicalize(&fixture.0).unwrap();
+        let plan = UpdatePlan {
+            deploy_dir: root.join("deploy"),
+            root: root.clone(),
+            compose: PathBuf::new(),
+            bundle_compose: PathBuf::new(),
+            variant: None,
+            components: vec!["config".to_string()],
+            replacements: Vec::new(),
+            images: Vec::new(),
+            services: Vec::new(),
+            all_services: Vec::new(),
+            bindings: vec![ComponentBinding {
+                component: "config".to_string(),
+                services: Vec::new(),
+                paths: vec![root.join("deploy/nginx")],
+            }],
+            config_selected: true,
+            image_selected: false,
+        };
+        let config = serde_json::json!({ "name": "same-project", "services": {} });
+        assert!(validate_effective_configs(&plan, &config, &config).is_ok());
+    }
+
+    #[test]
+    fn service_components_without_artifacts_skip_mount_checks() {
+        let fixture = Fixture::new();
+        let root = fs::canonicalize(&fixture.0).unwrap();
+        let plan = UpdatePlan {
+            deploy_dir: root.join("deploy"),
+            root,
+            compose: PathBuf::new(),
+            bundle_compose: PathBuf::new(),
+            variant: None,
+            components: vec!["restart-only".to_string()],
+            replacements: Vec::new(),
+            images: Vec::new(),
+            services: vec!["frontend".to_string()],
+            all_services: Vec::new(),
+            bindings: vec![ComponentBinding {
+                component: "restart-only".to_string(),
+                services: vec!["frontend".to_string()],
+                paths: Vec::new(),
+            }],
+            config_selected: false,
+            image_selected: false,
+        };
+        let config = serde_json::json!({
+            "name": "same-project",
+            "services": { "frontend": {} }
+        });
+        assert!(validate_effective_configs(&plan, &config, &config).is_ok());
     }
 
     #[test]
