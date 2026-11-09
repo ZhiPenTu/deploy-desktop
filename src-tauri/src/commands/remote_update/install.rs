@@ -152,6 +152,21 @@ fn install_bundle_blocking(
         }
     }
 
+    let deploy_dir = deploy_root.to_string_lossy().to_string();
+    emit_progress(
+        window,
+        "写入环境变量",
+        97,
+        "running",
+        "同步项目环境变量文件...",
+    );
+    if mode == "local" {
+        projects::write_active_project_env_to_dir(&deploy_root)?;
+    } else {
+        let key = resolve_existing_key(key_path.map(str::to_string), host)?;
+        projects::upload_active_project_env(host, port, user, key.as_deref(), &deploy_dir)?;
+    }
+
     let project_id = projects::active_project()
         .map(|project| project.id)
         .unwrap_or_default();
@@ -164,7 +179,7 @@ fn install_bundle_blocking(
     Ok(InstallBundleResult {
         success: true,
         install_dir: install_dir.clone(),
-        deploy_dir: deploy_root.to_string_lossy().to_string(),
+        deploy_dir,
         uploaded: uploaded.clone(),
         output: format!(
             "交付包已分发到 {install_dir}，共写入 {} 个位置。下一步可启动容器栈。",

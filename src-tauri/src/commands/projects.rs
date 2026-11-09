@@ -8,9 +8,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
 use super::bundle::{Bundle, BundleDescriptor};
+use super::remote_ssh::{base64_encode, run_ssh_script, shell_quote};
 use crate::core::path_guard;
 
 const PROJECTS_FILE: &str = "projects.json";
+const PROJECT_ENV_DIR: &str = "project-envs";
+const MAX_ENV_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -341,6 +344,33 @@ pub fn set_active_project(id: String) -> Result<ProjectStore, String> {
 }
 
 #[tauri::command]
+pub fn get_project_env(project_id: String) -> Result<String, String> {
+    if !project_exists(&project_id) {
+        return Err("所选项目不存在，请刷新后重试".to_string());
+    }
+    let path = project_env_path(&project_id)?;
+    match fs::read_to_string(&path) {
+        Ok(content) => Ok(content),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(error) => Err(format!("读取项目环境变量失败：{error}")),
+    }
+}
+
+#[tauri::command]
+pub fn save_project_env(project_id: String, content: String) -> Result<(), String> {
+    if !project_exists(&project_id) {
+        return Err("所选项目不存在，请刷新后重试".to_string());
+    }
+    let content = normalize_env_content(&content)?;
+    let path = project_env_path(&project_id)?;
+    if content.trim().is_empty() {
+        let _ = fs::remove_file(path);
+        return Ok(());
+    }
+    write_private_env(&path, &content)
+}
+
+#[tauri::command]
 pub fn create_project(input: ProjectInput) -> Result<ProjectStore, String> {
     let name = validate_name(&input.name)?;
     let install_dir = validate_install_dir(&input.install_dir)?;
@@ -405,7 +435,7 @@ pub fn update_project(input: ProjectInput) -> Result<ProjectStore, String> {
 
 #[tauri::command]
 pub fn delete_project(id: String) -> Result<ProjectStore, String> {
-    mutate_store(|current| {
+    let store = mutate_store(|current| {
         let before = current.projects.len();
         current.projects.retain(|project| project.id != id);
         if current.projects.len() == before {
@@ -420,7 +450,54 @@ pub fn delete_project(id: String) -> Result<ProjectStore, String> {
         }
         log::info!(target: "project", "删除项目：{id}");
         Ok(())
-    })
+    })?;
+    if let Ok(path) = project_env_path(&id) {
+        let _ = fs::remove_file(path);
+    }
+    Ok(store)
+}
+
+#[tauri::command]
+pub async fn open_local_directory(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || open_local_directory_blocking(path))
+        .await
+        .map_err(|_| "打开部署目录任务未完成".to_string())?
+}
+
+fn open_local_directory_blocking(raw: String) -> Result<(), String> {
+    let path = validate_open_directory(&raw)?;
+    #[cfg(target_os = "macos")]
+    let mut command = std::process::Command::new("open");
+    #[cfg(target_os = "windows")]
+    let mut command = std::process::Command::new("explorer");
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = std::process::Command::new("xdg-open");
+    command.arg(&path);
+    command
+        .spawn()
+        .map_err(|error| format!("打开部署目录失败：{error}"))?;
+    Ok(())
+}
+
+fn validate_open_directory(raw: &str) -> Result<PathBuf, String> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return Err("请填写部署目录".to_string());
+    }
+    if value.contains(['\n', '\r', '\0']) {
+        return Err("部署目录包含不支持的字符".to_string());
+    }
+    if !path_guard::is_absolute(value) {
+        return Err("部署目录必须填写绝对路径".to_string());
+    }
+    if path_guard::has_parent_dir(Path::new(value)) {
+        return Err("部署目录不能包含上级目录".to_string());
+    }
+    let path = PathBuf::from(value);
+    if !path.is_dir() {
+        return Err("部署目录不存在或不可访问，请检查项目配置后重试".to_string());
+    }
+    Ok(path)
 }
 
 #[tauri::command]
@@ -454,6 +531,116 @@ pub fn activate_project_bundle(
         project.last_bundle_dir = bundle_dir.trim().to_string();
         Ok(())
     })
+}
+
+fn project_exists(project_id: &str) -> bool {
+    let id = project_id.trim();
+    !id.is_empty() && snapshot().projects.iter().any(|project| project.id == id)
+}
+
+fn project_env_path(project_id: &str) -> Result<PathBuf, String> {
+    let id = project_id.trim();
+    if id.is_empty()
+        || !id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return Err("项目标识无效，请刷新后重试".to_string());
+    }
+    let dir = CONFIG_DIR
+        .get()
+        .ok_or_else(|| "应用配置目录不可用".to_string())?;
+    Ok(dir.join(PROJECT_ENV_DIR).join(format!("{id}.env")))
+}
+
+fn normalize_env_content(raw: &str) -> Result<String, String> {
+    if raw.as_bytes().len() > MAX_ENV_BYTES {
+        return Err("环境变量文件不能超过 256 KB".to_string());
+    }
+    if raw.contains('\0') {
+        return Err("环境变量文件不能包含空字符".to_string());
+    }
+    let mut content = raw.replace("\r\n", "\n");
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+    Ok(content)
+}
+
+fn write_private_env(path: &Path, content: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("创建项目环境变量目录失败：{error}"))?;
+    }
+    let stamp = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|value| value.as_nanos())
+        .unwrap_or(0);
+    let temporary = path.with_extension(format!("tmp-{}-{stamp}", std::process::id()));
+    fs::write(&temporary, content)
+        .map_err(|error| format!("写入项目环境变量失败：{error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("设置项目环境变量权限失败：{error}"))?;
+    }
+    fs::rename(&temporary, path)
+        .map_err(|error| format!("保存项目环境变量失败：{error}"))?;
+    Ok(())
+}
+
+pub(crate) fn read_active_project_env() -> Option<String> {
+    let project = active_project()?;
+    let path = project_env_path(&project.id).ok()?;
+    let content = fs::read_to_string(path).ok()?;
+    (!content.trim().is_empty()).then_some(content)
+}
+
+pub(crate) fn write_active_project_env_to_dir(deploy_dir: &Path) -> Result<bool, String> {
+    let Some(content) = read_active_project_env() else {
+        return Ok(false);
+    };
+    let path = deploy_dir.join(".env");
+    write_private_env(&path, &content)?;
+    log::info!(target: "deploy", "已写入项目环境变量：{}", path.display());
+    Ok(true)
+}
+
+pub(crate) fn upload_active_project_env(
+    host: &str,
+    port: u16,
+    user: &str,
+    key: Option<&str>,
+    deploy_dir: &str,
+) -> Result<bool, String> {
+    let Some(content) = read_active_project_env() else {
+        return Ok(false);
+    };
+    let dir = deploy_dir.trim().trim_end_matches('/');
+    if dir.is_empty() {
+        return Err("目标部署目录为空，无法写入环境变量文件".to_string());
+    }
+    let script = env_upload_script(dir, &content)?;
+    let output = run_ssh_script(host, port, user, key, &script)?;
+    if !output.status.success() {
+        return Err(String::from("上传项目环境变量失败，请检查目标部署目录权限后重试"));
+    }
+    log::info!(target: "deploy", "已上传项目环境变量：{dir}/.env");
+    Ok(true)
+}
+
+fn env_upload_script(dir: &str, content: &str) -> Result<String, String> {
+    let target = format!("{dir}/.env");
+    let temporary = format!("{dir}/.env.tmp.$$");
+    let encoded = base64_encode(content)?;
+    Ok(format!(
+        "set -e\numask 077\nmkdir -p {dir}\nprintf '%s' {encoded} | base64 -d > {temporary}\nmv {temporary} {target}\n",
+        dir = shell_quote(dir),
+        encoded = shell_quote(&encoded),
+        temporary = shell_quote(&temporary),
+        target = shell_quote(&target)
+    ))
 }
 
 fn validate_name(raw: &str) -> Result<String, String> {
@@ -528,4 +715,66 @@ fn next_id(current: &ProjectStore) -> String {
         index += 1;
     }
     candidate
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn open_directory_rejects_unsafe_paths() {
+        assert!(validate_open_directory("").is_err());
+        assert!(validate_open_directory("relative/path").is_err());
+        assert!(validate_open_directory("/tmp/../etc").is_err());
+        assert!(validate_open_directory("/path/that/does/not/exist").is_err());
+    }
+
+    #[test]
+    fn open_directory_accepts_existing_directory() {
+        let dir = std::env::temp_dir();
+        assert!(validate_open_directory(dir.to_str().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn project_env_is_normalized_and_written_privately() {
+        assert_eq!(
+            normalize_env_content("A=1\r\nB=2").unwrap(),
+            "A=1\nB=2\n"
+        );
+        assert!(normalize_env_content("A=\0").is_err());
+        assert!(normalize_env_content(&"x".repeat(MAX_ENV_BYTES + 1)).is_err());
+
+        let dir = std::env::temp_dir().join(format!(
+            "deploy-project-env-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|value| value.as_nanos())
+                .unwrap_or(0)
+        ));
+        let path = dir.join(".env");
+        write_private_env(&path, "A=1\n").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "A=1\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn project_env_path_rejects_traversal_and_remote_upload_hides_content() {
+        assert!(project_env_path("../outside").is_err());
+        assert!(project_env_path("p/../../x").is_err());
+
+        let script = env_upload_script("/srv/demo/deploy", "DB_PASSWORD=secret\n").unwrap();
+        assert!(script.contains("/srv/demo/deploy/.env"));
+        assert!(script.contains("base64 -d"));
+        assert!(script.contains("umask 077"));
+        assert!(!script.contains("DB_PASSWORD=secret"));
+    }
 }

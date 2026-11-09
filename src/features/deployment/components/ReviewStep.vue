@@ -290,6 +290,18 @@
               </el-button>
               <el-button :disabled="busy" @click="emit('recheck')">重新检查</el-button>
             </div>
+            <div v-if="imageSource === 'pull' && manualPullCommands.length" class="manual-pull">
+              <div class="manual-pull-head">
+                <h4>手动拉取</h4>
+                <el-button size="small" :disabled="busy" @click="copyManualPullCommands">
+                  复制指令
+                </el-button>
+              </div>
+              <p class="field-hint">
+                自动拉取仍失败时，请打开{{ isRemote ? '目标主机' : '本机' }}终端执行以下指令，完成后点击“重新检查”。
+              </p>
+              <pre>{{ manualPullCommands.join('\n') }}</pre>
+            </div>
           </div>
           <div v-else class="image-preparation image-ready">
             <h4>镜像已就绪</h4>
@@ -333,6 +345,7 @@
 
 <script setup>
 import { computed, ref, watch } from 'vue';
+import { ElMessage } from 'element-plus';
 import { ArrowRight } from '@element-plus/icons-vue';
 import ConfigDiffDialog from './ConfigDiffDialog.vue';
 import {
@@ -341,7 +354,12 @@ import {
   changeLabel,
   stateLabel
 } from '../domain/review.js';
-import { imageStatusDetail, imageStatusLabel, imageStatusTone } from '../domain/images.js';
+import {
+  imageStatusDetail,
+  imageStatusLabel,
+  imageStatusTone,
+  pullableImages
+} from '../domain/images.js';
 import { formatSize } from '../../../shared/format.js';
 import { safeText } from '../domain/errors.js';
 
@@ -442,12 +460,29 @@ const prepareButtonText = computed(() => {
   if (props.imageSource === 'relay') return '本机拉取并传入';
   return props.isRemote ? '传输并导入镜像' : '导入镜像并比对';
 });
+const manualPullCommands = computed(() =>
+  pullableImages(props.review?.images || []).map((image) => {
+    const platform = image.targetPlatform || props.review?.targetPlatform;
+    return image.status === 'platform_mismatch' && platform
+      ? `docker pull --platform ${platform} ${image.imageRef}`
+      : `docker pull ${image.imageRef}`;
+  })
+);
 const canPrepare = computed(
   () =>
     props.imagePendingCount > 0 &&
     (props.imageSource === 'pull' ? pullableCount.value > 0 : transferableCount.value > 0) &&
     (props.imageSource !== 'relay' || props.isRemote)
 );
+
+async function copyManualPullCommands() {
+  try {
+    await navigator.clipboard.writeText(manualPullCommands.value.join('\n'));
+    ElMessage.success('拉取指令已复制');
+  } catch {
+    ElMessage.error('复制失败，请手动选择指令');
+  }
+}
 
 function openConfigDiff(serviceName = '') {
   configDiffService.value = serviceName;
@@ -630,6 +665,27 @@ h4 {
 .image-diagnostics pre {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+.manual-pull {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px dashed var(--border-color);
+}
+.manual-pull-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.manual-pull pre {
+  margin: 10px 0 0;
+  padding: 12px;
+  background: var(--panel-bg);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 12px;
 }
 code {
   font-size: 12px;

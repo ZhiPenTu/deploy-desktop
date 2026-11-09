@@ -257,6 +257,21 @@ fn update_remote_deployment_blocking(
                 wait_services.len()
             )
         };
+        if crate::commands::projects::upload_active_project_env(
+            &host,
+            port,
+            &user,
+            key.as_deref(),
+            &deploy_dir,
+        )? {
+            emit_progress(
+                window,
+                "写入环境变量",
+                86,
+                "running",
+                "已上传项目环境变量文件",
+            );
+        }
         emit_progress(window, "应用更新", 88, "running", &apply_message);
         let heartbeat = if wait_services.is_empty() {
             None

@@ -111,6 +111,7 @@ fn run_update(
         "检查交付包、部署目录与所选服务",
     );
     let mut plan = build_plan(bundle_dir, install_dir, &components)?;
+    crate::commands::projects::write_active_project_env_to_dir(&plan.deploy_dir)?;
     let components = plan.components.clone();
     check_local_docker()?;
     let current = compose_config(&plan, &plan.compose)?;

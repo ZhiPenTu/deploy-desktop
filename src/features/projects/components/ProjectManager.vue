@@ -51,6 +51,18 @@
             <span>日志</span>
           </el-button>
           <span class="foot-spacer"></span>
+          <el-button
+            v-if="isLocalHost(row.hostId)"
+            link
+            type="primary"
+            :aria-label="`打开部署目录 ${row.name}`"
+            @click="openDirectory(row)"
+          >
+            打开目录
+          </el-button>
+          <el-button link type="primary" :aria-label="`环境变量 ${row.name}`" @click="openEnv(row)">
+            环境变量
+          </el-button>
           <el-button link type="primary" :aria-label="`编辑 ${row.name}`" @click="openEdit(row)">编辑</el-button>
           <el-button link type="danger" :aria-label="`删除 ${row.name}`" @click="remove(row)">删除</el-button>
         </footer>
@@ -114,6 +126,28 @@
       <el-button type="primary" :loading="saving" @click="save">保存</el-button>
     </template>
   </el-dialog>
+
+  <el-dialog
+    v-model="envVisible"
+    :title="`环境变量 · ${envProjectName}`"
+    width="640px"
+    :close-on-click-modal="false"
+  >
+    <p class="dialog-tip">
+      保存后，本机部署会写入部署目录的 .env；远程部署会先上传到目标部署目录的 .env。内容不会显示在部署日志中。
+    </p>
+    <el-input
+      v-model="envContent"
+      class="env-editor"
+      type="textarea"
+      :rows="14"
+      placeholder="每行一个 KEY=VALUE，例如 DB_PASSWORD=..."
+    />
+    <template #footer>
+      <el-button @click="envVisible = false">取消</el-button>
+      <el-button type="primary" :loading="envSaving" @click="saveEnv">保存</el-button>
+    </template>
+  </el-dialog>
 </template>
 
 <script setup>
@@ -123,7 +157,10 @@ import { Document, FolderOpened, Monitor, Plus, Refresh } from '@element-plus/ic
 import {
   createProject,
   deleteProject,
+  getProjectEnv,
   listArtifactSources,
+  openLocalDirectory,
+  saveProjectEnv,
   updateProject
 } from '../../../api/tauri.js';
 import { projectState } from '../../../config/project.js';
@@ -141,6 +178,11 @@ const saving = ref(false);
 const editorVisible = ref(false);
 const editingId = ref('');
 const sources = ref([]);
+const envVisible = ref(false);
+const envSaving = ref(false);
+const envProjectId = ref('');
+const envProjectName = ref('');
+const envContent = ref('');
 
 const form = reactive({
   name: '',
@@ -163,6 +205,44 @@ function sourceText(sourceId) {
   if (!sourceId) return '';
   const source = sources.value.find((item) => item.id === sourceId);
   return source?.name || '';
+}
+
+function isLocalHost(hostId) {
+  return hosts.value.find((item) => item.id === hostId)?.kind === 'local';
+}
+
+async function openDirectory(row) {
+  try {
+    await openLocalDirectory(row.installDir);
+  } catch (error) {
+    ElMessage.error(errorText(error));
+  }
+}
+
+async function openEnv(row) {
+  envProjectId.value = row.id;
+  envProjectName.value = row.name;
+  envContent.value = '';
+  envVisible.value = true;
+  try {
+    envContent.value = await getProjectEnv(row.id);
+  } catch (error) {
+    envVisible.value = false;
+    ElMessage.error(errorText(error));
+  }
+}
+
+async function saveEnv() {
+  envSaving.value = true;
+  try {
+    await saveProjectEnv(envProjectId.value, envContent.value);
+    envVisible.value = false;
+    ElMessage.success('环境变量已保存');
+  } catch (error) {
+    ElMessage.error(errorText(error));
+  } finally {
+    envSaving.value = false;
+  }
 }
 
 async function load() {
@@ -449,5 +529,11 @@ onMounted(load);
   background: var(--panel-subtle);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-sm);
+}
+
+.env-editor :deep(.el-textarea__inner) {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
 }
 </style>
