@@ -374,7 +374,7 @@ fn pull_local_blocking(
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
             let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-            let empty_error = stderr.is_empty();
+            let mut empty_error = stderr.is_empty();
             let mut error_text = if stderr.is_empty() {
                 stdout
             } else {
@@ -384,7 +384,7 @@ fn pull_local_blocking(
             if empty_error {
                 let mut retry = docker_command();
                 retry.args(["pull", reference]);
-                if let Ok(output) = run_local_docker(
+                match run_local_docker(
                     retry,
                     if login.is_some() {
                         config.as_ref()
@@ -394,17 +394,24 @@ fn pull_local_blocking(
                     Duration::from_secs(600),
                     &format!("重新拉取镜像 {reference}"),
                 ) {
-                    retried = output.status.success();
-                    if !retried {
-                        let retry_stderr =
-                            String::from_utf8_lossy(&output.stderr).trim().to_owned();
-                        let retry_stdout =
-                            String::from_utf8_lossy(&output.stdout).trim().to_owned();
-                        if !retry_stderr.is_empty() {
-                            error_text = retry_stderr;
-                        } else if !retry_stdout.is_empty() {
-                            error_text = retry_stdout;
+                    Ok(output) => {
+                        retried = output.status.success();
+                        if !retried {
+                            let retry_stderr =
+                                String::from_utf8_lossy(&output.stderr).trim().to_owned();
+                            let retry_stdout =
+                                String::from_utf8_lossy(&output.stdout).trim().to_owned();
+                            empty_error = retry_stderr.is_empty();
+                            if !retry_stderr.is_empty() {
+                                error_text = retry_stderr;
+                            } else if !retry_stdout.is_empty() {
+                                error_text = retry_stdout;
+                            }
                         }
+                    }
+                    Err(error) => {
+                        empty_error = false;
+                        error_text = error;
                     }
                 }
             }
@@ -489,7 +496,25 @@ fn pull_via_docker_hub_mirror(
             "检测到 Docker Hub 登录配置，未自动切换加速源",
         ));
     }
-    let expected_hub_digest = docker_hub_manifest_digest(reference);
+    let expected_hub_digest = match docker_hub_manifest_digest(reference) {
+        HubManifest::Digest(digest) => Some(digest),
+        HubManifest::Denied => {
+            log::warn!(
+                target: "deployment",
+                "Docker Hub 无法读取镜像 {reference}，可能已私有化或不存在，停止自动回退"
+            );
+            return Err(String::from(
+                "Docker Hub 无法读取该镜像，可能已私有化或不存在，未自动切换加速源",
+            ));
+        }
+        HubManifest::Unavailable => {
+            log::warn!(
+                target: "deployment",
+                "Docker Hub 不可达，按加速源清单摘要校验镜像 {reference}"
+            );
+            None
+        }
+    };
     let mirrors = super::registry_sources::docker_hub_accelerators(app)
         .map_err(|_| String::from("无法读取镜像源配置"))?;
     if mirrors.is_empty() {
@@ -694,27 +719,50 @@ fn docker_hub_repository_and_tag(reference: &str) -> Option<(String, String)> {
     Some((repository, tag.to_string()))
 }
 
-fn docker_hub_manifest_digest(reference: &str) -> Option<String> {
-    let (repository, tag) = docker_hub_repository_and_tag(reference)?;
-    let client = reqwest::blocking::Client::builder()
+enum HubManifest {
+    Digest(String),
+    Denied,
+    Unavailable,
+}
+
+fn docker_hub_manifest_digest(reference: &str) -> HubManifest {
+    let Some((repository, tag)) = docker_hub_repository_and_tag(reference) else {
+        return HubManifest::Denied;
+    };
+    let Ok(client) = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(12))
         .build()
-        .ok()?;
+    else {
+        return HubManifest::Unavailable;
+    };
     let scope = format!("repository:{repository}:pull");
-    let token: Value = serde_json::from_slice(
-        &client
-            .get("https://auth.docker.io/token")
-            .query(&[("service", "registry.docker.io"), ("scope", scope.as_str())])
-            .send()
-            .ok()?
-            .error_for_status()
-            .ok()?
-            .bytes()
-            .ok()?,
-    )
-    .ok()?;
-    let token = token.get("token").and_then(Value::as_str)?;
-    let response = client
+    let Ok(token_response) = client
+        .get("https://auth.docker.io/token")
+        .query(&[("service", "registry.docker.io"), ("scope", scope.as_str())])
+        .send()
+    else {
+        return HubManifest::Unavailable;
+    };
+    if matches!(
+        token_response.status(),
+        reqwest::StatusCode::UNAUTHORIZED
+            | reqwest::StatusCode::FORBIDDEN
+            | reqwest::StatusCode::NOT_FOUND
+    ) {
+        return HubManifest::Denied;
+    }
+    if !token_response.status().is_success() {
+        return HubManifest::Unavailable;
+    }
+    let Ok(token) = serde_json::from_slice::<Value>(
+        &token_response.bytes().unwrap_or_default(),
+    ) else {
+        return HubManifest::Unavailable;
+    };
+    let Some(token) = token.get("token").and_then(Value::as_str) else {
+        return HubManifest::Unavailable;
+    };
+    let Ok(response) = client
         .head(format!(
             "https://registry-1.docker.io/v2/{repository}/manifests/{tag}"
         ))
@@ -727,21 +775,32 @@ fn docker_hub_manifest_digest(reference: &str) -> Option<String> {
             "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json",
         )
         .send()
-        .ok()?;
-    if !response.status().is_success() {
-        return None;
+    else {
+        return HubManifest::Unavailable;
+    };
+    if matches!(
+        response.status(),
+        reqwest::StatusCode::UNAUTHORIZED
+            | reqwest::StatusCode::FORBIDDEN
+            | reqwest::StatusCode::NOT_FOUND
+    ) {
+        return HubManifest::Denied;
     }
-    let digest = response
+    if !response.status().is_success() {
+        return HubManifest::Unavailable;
+    }
+    let Some(digest) = response
         .headers()
-        .get("docker-content-digest")?
-        .to_str()
-        .ok()?
-        .trim()
-        .to_owned();
+        .get("docker-content-digest")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.trim().to_owned())
+    else {
+        return HubManifest::Unavailable;
+    };
     if digest.len() == 71 && digest.starts_with("sha256:") {
-        Some(digest)
+        HubManifest::Digest(digest)
     } else {
-        None
+        HubManifest::Unavailable
     }
 }
 
@@ -999,6 +1058,7 @@ fn registry_connection_failure(stderr: &str) -> bool {
         "getaddrinfo failed",
         "i/o timeout",
         "context deadline exceeded",
+        "执行超时",
         "temporary failure in name resolution",
         "tls handshake timeout",
         "proxyconnect",
