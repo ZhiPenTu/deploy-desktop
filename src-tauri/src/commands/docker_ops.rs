@@ -149,38 +149,51 @@ fn compose_failure_hint(stderr: &str) -> String {
     "命令未执行成功，请检查部署目录与服务配置后重试".to_string()
 }
 
+fn is_compose_warning(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.starts_with("warn")
+        || lower.starts_with("warning")
+        || lower.contains("level=warning")
+}
+
 /// 在通用提示之外识别 Windows 上最常见的 Compose 启动失败原因，
-/// 并把 Compose 的首行错误带入提示，避免用户只看到一句“命令未执行成功”。
+/// 并把首条错误带入提示；Compose 的警告行不参与判断，避免掩盖真实错误。
 fn compose_failure_message(stderr: &str) -> String {
-    let first = stderr
+    let lines: Vec<&str> = stderr
         .lines()
         .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("");
-    let lower = first.to_ascii_lowercase();
-    if lower.contains("ports are not available")
-        || lower.contains("port is already allocated")
-        || lower.contains("only one usage of each socket address")
-        || (lower.contains("bind:") && lower.contains("access permissions"))
+        .filter(|line| !line.is_empty() && !is_compose_warning(line))
+        .collect();
+    let contains = |marker: &str| {
+        lines
+            .iter()
+            .any(|line| line.to_ascii_lowercase().contains(marker))
+    };
+    if contains("ports are not available")
+        || contains("port is already allocated")
+        || contains("only one usage of each socket address")
+        || (contains("bind:") && contains("access permissions"))
     {
         return String::from(
             "Docker 无法绑定服务端口：端口可能已被占用，或被 Windows 的保留端口范围占用。请调整 Compose 清单中的端口，或关闭占用该端口的程序后重试",
         );
     }
-    if lower.contains("invalid mount config")
-        || lower.contains("bind source path does not exist")
-        || (lower.contains("no such file or directory") && lower.contains("mount"))
-    {
+    if contains("invalid mount config") || contains("bind source path does not exist") {
         return String::from(
             "Compose 清单中的挂载路径在本机不存在或不可访问，请确认交付包已完整分发到部署目录后重试",
         );
     }
-    let hint = compose_failure_hint(stderr);
-    if hint.starts_with("命令未执行成功") && !first.is_empty() {
-        let detail: String = first.chars().take(240).collect();
-        return format!(
-            "命令未执行成功：{detail}。请展开执行详情查看完整输出，并检查部署目录与服务配置后重试"
-        );
+    let hint = compose_failure_hint(&lines.join("\n"));
+    if hint.starts_with("命令未执行成功") {
+        if let Some(first) = lines.first() {
+            let detail: String = first.chars().take(240).collect();
+            let detail = crate::logging::redact_message(&detail);
+            if !detail.is_empty() {
+                return format!(
+                    "命令未执行成功：{detail}。请展开执行详情查看完整输出，并检查部署目录与服务配置后重试"
+                );
+            }
+        }
     }
     hint
 }
@@ -617,6 +630,18 @@ mod tests {
         let other = compose_failure_message("unknown flag: --remove-orphans");
         assert!(other.contains("unknown flag"));
         assert!(other.contains("执行详情"));
+
+        let warned = compose_failure_message(
+            "WARN[0000] The \"OPTIONAL_X\" variable is not set. Defaulting to a blank string.\nError response from daemon: Ports are not available: exposing port TCP 0.0.0.0:9000 -> 0.0.0.0:0: listen tcp4 0.0.0.0:9000: bind: An attempt was made to access a socket in a way forbidden by its access permissions.",
+        );
+        assert!(warned.contains("端口"));
+        assert!(!warned.contains("环境变量"));
+
+        let redacted = compose_failure_message(
+            "Error response from daemon: failed https://user:demo-value@example.com/v2/",
+        );
+        assert!(!redacted.contains("demo-value"));
+        assert!(redacted.contains("***@example.com"));
 
         assert!(compose_failure_message("").contains("命令未执行成功"));
     }

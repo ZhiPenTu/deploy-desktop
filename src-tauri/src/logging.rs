@@ -109,6 +109,32 @@ fn redact_urls(message: &str) -> String {
         .join(" ")
 }
 
+/// 用户可见的错误摘要脱敏：去掉 URL 中的用户信息与查询参数，避免泄露凭据或临时签名。
+pub(crate) fn redact_message(message: &str) -> String {
+    message
+        .split_whitespace()
+        .map(|word| {
+            let mut cleaned = String::from(word);
+            if let Some(scheme) = cleaned.find("://") {
+                let rest = &cleaned[scheme + 3..];
+                if let Some(at) = rest.find('@') {
+                    if !rest[..at].contains('/') {
+                        cleaned.replace_range(scheme + 3..scheme + 3 + at, "***");
+                    }
+                }
+            }
+            if let Some(position) = cleaned.find('?') {
+                let prefix = &cleaned[..position];
+                if prefix.starts_with("http://") || prefix.starts_with("https://") {
+                    return format!("{prefix}?…");
+                }
+            }
+            cleaned
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// 日志中使用的安全地址：只保留协议、主机和路径。
 pub fn safe_url(url: &str) -> String {
     match reqwest::Url::parse(url.trim()) {
