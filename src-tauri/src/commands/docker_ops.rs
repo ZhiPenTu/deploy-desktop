@@ -149,6 +149,55 @@ fn compose_failure_hint(stderr: &str) -> String {
     "命令未执行成功，请检查部署目录与服务配置后重试".to_string()
 }
 
+fn is_compose_warning(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.starts_with("warn")
+        || lower.starts_with("warning")
+        || lower.contains("level=warning")
+}
+
+/// 在通用提示之外识别 Windows 上最常见的 Compose 启动失败原因，
+/// 并把首条错误带入提示；Compose 的警告行不参与判断，避免掩盖真实错误。
+fn compose_failure_message(stderr: &str) -> String {
+    let lines: Vec<&str> = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !is_compose_warning(line))
+        .collect();
+    let contains = |marker: &str| {
+        lines
+            .iter()
+            .any(|line| line.to_ascii_lowercase().contains(marker))
+    };
+    if contains("ports are not available")
+        || contains("port is already allocated")
+        || contains("only one usage of each socket address")
+        || (contains("bind:") && contains("access permissions"))
+    {
+        return String::from(
+            "Docker 无法绑定服务端口：端口可能已被占用，或被 Windows 的保留端口范围占用。请调整 Compose 清单中的端口，或关闭占用该端口的程序后重试",
+        );
+    }
+    if contains("invalid mount config") || contains("bind source path does not exist") {
+        return String::from(
+            "Compose 清单中的挂载路径在本机不存在或不可访问，请确认交付包已完整分发到部署目录后重试",
+        );
+    }
+    let hint = compose_failure_hint(&lines.join("\n"));
+    if hint.starts_with("命令未执行成功") {
+        if let Some(first) = lines.first() {
+            let detail: String = first.chars().take(240).collect();
+            let detail = crate::logging::redact_message(&detail);
+            if !detail.is_empty() {
+                return format!(
+                    "命令未执行成功：{detail}。请展开执行详情查看完整输出，并检查部署目录与服务配置后重试"
+                );
+            }
+        }
+    }
+    hint
+}
+
 /// 交付包通过 bind mount 替换产物，compose 不会因此重建容器；
 /// 这里返回需要重启才能加载新产物的容器名。
 pub fn artifact_containers() -> Vec<String> {
@@ -482,7 +531,7 @@ pub(crate) fn docker_compose_action_blocking(
                 Ok(ComposeActionResult {
                     success: false,
                     output: combined,
-                    error: Some(compose_failure_hint(&stderr)),
+                    error: Some(compose_failure_message(&stderr)),
                 })
             }
         }
@@ -563,6 +612,44 @@ mod tests {
             assert_eq!(lines[1], expected.parent().unwrap().to_str().unwrap());
         }
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn compose_failures_surface_actionable_reason() {
+        let port = compose_failure_message(
+            "Error response from daemon: Ports are not available: exposing port TCP 0.0.0.0:8080 -> 0.0.0.0:0: listen tcp4 0.0.0.0:8080: bind: An attempt was made to access a socket in a way forbidden by its access permissions.",
+        );
+        assert!(port.contains("端口"));
+        assert!(port.contains("Windows"));
+
+        let mount = compose_failure_message(
+            "Error response from daemon: invalid mount config for type \"bind\": bind source path does not exist: /opt/demo",
+        );
+        assert!(mount.contains("挂载路径"));
+
+        let other = compose_failure_message("unknown flag: --remove-orphans");
+        assert!(other.contains("unknown flag"));
+        assert!(other.contains("执行详情"));
+
+        let warned = compose_failure_message(
+            "WARN[0000] The \"OPTIONAL_X\" variable is not set. Defaulting to a blank string.\nError response from daemon: Ports are not available: exposing port TCP 0.0.0.0:9000 -> 0.0.0.0:0: listen tcp4 0.0.0.0:9000: bind: An attempt was made to access a socket in a way forbidden by its access permissions.",
+        );
+        assert!(warned.contains("端口"));
+        assert!(!warned.contains("环境变量"));
+
+        let redacted = compose_failure_message(
+            "Error response from daemon: failed https://user:demo-value@example.com/v2/",
+        );
+        assert!(!redacted.contains("demo-value"));
+        assert!(redacted.contains("***@example.com"));
+
+        let quoted = compose_failure_message(
+            "Get \"https://registry.example.com/v2/?token=demo-token\": dial tcp: connectex failed",
+        );
+        assert!(!quoted.contains("demo-token"));
+        assert!(quoted.contains("https://registry.example.com/v2/?…"));
+
+        assert!(compose_failure_message("").contains("命令未执行成功"));
     }
 
     #[test]
