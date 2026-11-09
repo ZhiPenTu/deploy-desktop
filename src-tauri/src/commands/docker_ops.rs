@@ -149,6 +149,42 @@ fn compose_failure_hint(stderr: &str) -> String {
     "命令未执行成功，请检查部署目录与服务配置后重试".to_string()
 }
 
+/// 在通用提示之外识别 Windows 上最常见的 Compose 启动失败原因，
+/// 并把 Compose 的首行错误带入提示，避免用户只看到一句“命令未执行成功”。
+fn compose_failure_message(stderr: &str) -> String {
+    let first = stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+    let lower = first.to_ascii_lowercase();
+    if lower.contains("ports are not available")
+        || lower.contains("port is already allocated")
+        || lower.contains("only one usage of each socket address")
+        || (lower.contains("bind:") && lower.contains("access permissions"))
+    {
+        return String::from(
+            "Docker 无法绑定服务端口：端口可能已被占用，或被 Windows 的保留端口范围占用。请调整 Compose 清单中的端口，或关闭占用该端口的程序后重试",
+        );
+    }
+    if lower.contains("invalid mount config")
+        || lower.contains("bind source path does not exist")
+        || (lower.contains("no such file or directory") && lower.contains("mount"))
+    {
+        return String::from(
+            "Compose 清单中的挂载路径在本机不存在或不可访问，请确认交付包已完整分发到部署目录后重试",
+        );
+    }
+    let hint = compose_failure_hint(stderr);
+    if hint.starts_with("命令未执行成功") && !first.is_empty() {
+        let detail: String = first.chars().take(240).collect();
+        return format!(
+            "命令未执行成功：{detail}。请展开执行详情查看完整输出，并检查部署目录与服务配置后重试"
+        );
+    }
+    hint
+}
+
 /// 交付包通过 bind mount 替换产物，compose 不会因此重建容器；
 /// 这里返回需要重启才能加载新产物的容器名。
 pub fn artifact_containers() -> Vec<String> {
@@ -482,7 +518,7 @@ pub(crate) fn docker_compose_action_blocking(
                 Ok(ComposeActionResult {
                     success: false,
                     output: combined,
-                    error: Some(compose_failure_hint(&stderr)),
+                    error: Some(compose_failure_message(&stderr)),
                 })
             }
         }
@@ -563,6 +599,26 @@ mod tests {
             assert_eq!(lines[1], expected.parent().unwrap().to_str().unwrap());
         }
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn compose_failures_surface_actionable_reason() {
+        let port = compose_failure_message(
+            "Error response from daemon: Ports are not available: exposing port TCP 0.0.0.0:8080 -> 0.0.0.0:0: listen tcp4 0.0.0.0:8080: bind: An attempt was made to access a socket in a way forbidden by its access permissions.",
+        );
+        assert!(port.contains("端口"));
+        assert!(port.contains("Windows"));
+
+        let mount = compose_failure_message(
+            "Error response from daemon: invalid mount config for type \"bind\": bind source path does not exist: /opt/demo",
+        );
+        assert!(mount.contains("挂载路径"));
+
+        let other = compose_failure_message("unknown flag: --remove-orphans");
+        assert!(other.contains("unknown flag"));
+        assert!(other.contains("执行详情"));
+
+        assert!(compose_failure_message("").contains("命令未执行成功"));
     }
 
     #[test]

@@ -710,7 +710,10 @@ export function useDeploymentWizard(config, emit) {
               'up'
             )
           : await dockerComposeAction(context.installDir, 'up');
-        if (!response.success) throw new Error(response.error || '服务启动失败');
+        if (!response.success) {
+          diagnostics.value += `\n${safeText(response.output)}`;
+          throw new Error(response.error || '服务启动失败');
+        }
       }
       diagnostics.value += `\n${safeText(response.output)}`;
       phase.value = '正在检查服务运行状态';
