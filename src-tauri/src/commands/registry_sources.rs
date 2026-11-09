@@ -141,8 +141,8 @@ pub(super) fn normalize_address(raw: &str) -> Result<String, String> {
     Ok(value.to_ascii_lowercase())
 }
 
-/// 部署向导直连 Docker Hub 失败时，只复用应用预置且地址未被修改的公共加速源。
-/// 用户删除或改了地址的源不会被自动使用，避免把镜像推送到未确认的仓库。
+/// 部署向导直连 Docker Hub 失败时，只复用应用预置且地址、命名空间未被修改的公共加速源。
+/// 用户删除或改了地址、命名空间的源不会被自动使用，避免把镜像推送到未确认的仓库。
 pub(super) fn docker_hub_accelerators(app: &AppHandle) -> Result<Vec<RegistrySource>, String> {
     let _guard = STORE_LOCK
         .lock()
@@ -156,7 +156,7 @@ pub(super) fn docker_hub_accelerators(app: &AppHandle) -> Result<Vec<RegistrySou
                 .iter()
                 .find(|source| source.id == *id && source.address == *address)
         })
-        .filter(|source| source.username.trim().is_empty())
+        .filter(|source| source.username.trim().is_empty() && source.namespace == "library")
         .cloned()
         .collect())
 }
