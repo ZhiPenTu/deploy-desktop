@@ -123,10 +123,13 @@ pub(crate) fn redact_message(message: &str) -> String {
                     }
                 }
             }
-            if let Some(position) = cleaned.find('?') {
-                let prefix = &cleaned[..position];
-                if prefix.starts_with("http://") || prefix.starts_with("https://") {
-                    return format!("{prefix}?…");
+            // URL 可能被引号、括号等包裹，按出现位置查找协议后再截断查询参数。
+            let lower = cleaned.to_ascii_lowercase();
+            if let Some(scheme) = lower.find("http://").or_else(|| lower.find("https://")) {
+                if let Some(question) = cleaned[scheme..].find('?') {
+                    let query_start = scheme + question;
+                    cleaned.truncate(query_start);
+                    cleaned.push_str("?…");
                 }
             }
             cleaned

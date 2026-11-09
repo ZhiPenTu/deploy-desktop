@@ -643,6 +643,12 @@ mod tests {
         assert!(!redacted.contains("demo-value"));
         assert!(redacted.contains("***@example.com"));
 
+        let quoted = compose_failure_message(
+            "Get \"https://registry.example.com/v2/?token=demo-token\": dial tcp: connectex failed",
+        );
+        assert!(!quoted.contains("demo-token"));
+        assert!(quoted.contains("https://registry.example.com/v2/?…"));
+
         assert!(compose_failure_message("").contains("命令未执行成功"));
     }
 
