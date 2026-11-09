@@ -25,13 +25,18 @@ pub(super) fn create_remote_backup(
     user: &str,
     key: Option<&str>,
     install_dir: &str,
-    _deploy_dir: &str,
+    deploy_dir: &str,
     artifacts: &[crate::commands::bundle::ResolvedArtifact],
 ) -> Result<String, String> {
-    let targets = artifacts
+    let mut targets = artifacts
         .iter()
         .map(|artifact| artifact.target.to_string_lossy().to_string())
         .collect::<Vec<_>>();
+    let deploy_dir = deploy_dir.trim().trim_end_matches('/');
+    if !deploy_dir.is_empty() {
+        // .env 不在产物替换列表中，但更新会重写它，备份时必须一并保留旧内容。
+        targets.push(format!("{deploy_dir}/.env"));
+    }
     let script = scripts::backup(install_dir, &targets)?;
     let output = checked(
         run_ssh_script_with_timeout(host, port, user, key, &script, TRANSFER_TIMEOUT)?,

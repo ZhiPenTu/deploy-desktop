@@ -3,12 +3,15 @@
 //! 项目拓扑（服务、数据库、产物映射）来自交付包描述符，本模块只保存定位信息。
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 use std::time::SystemTime;
 
 use super::bundle::{Bundle, BundleDescriptor};
-use super::remote_ssh::{base64_encode, run_ssh_script, shell_quote};
+use super::remote_ssh::{
+    base64_encode, ensure_known_host, run_ssh_script_strict_with_timeout, shell_quote,
+};
 use crate::core::path_guard;
 
 const PROJECTS_FILE: &str = "projects.json";
@@ -364,8 +367,11 @@ pub fn save_project_env(project_id: String, content: String) -> Result<(), Strin
     let content = normalize_env_content(&content)?;
     let path = project_env_path(&project_id)?;
     if content.trim().is_empty() {
-        let _ = fs::remove_file(path);
-        return Ok(());
+        return match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!("删除项目环境变量失败：{error}")),
+        };
     }
     write_private_env(&path, &content)
 }
@@ -373,7 +379,7 @@ pub fn save_project_env(project_id: String, content: String) -> Result<(), Strin
 #[tauri::command]
 pub fn create_project(input: ProjectInput) -> Result<ProjectStore, String> {
     let name = validate_name(&input.name)?;
-    let install_dir = validate_install_dir(&input.install_dir)?;
+    let install_dir = validate_project_install_dir(&input.host_id, &input.install_dir)?;
     validate_host(&input.host_id)?;
     mutate_store(|current| {
         let project = Project {
@@ -410,7 +416,7 @@ pub fn update_project(input: ProjectInput) -> Result<ProjectStore, String> {
         return Err("缺少项目标识，请刷新后重试".to_string());
     }
     let name = validate_name(&input.name)?;
-    let install_dir = validate_install_dir(&input.install_dir)?;
+    let install_dir = validate_project_install_dir(&input.host_id, &input.install_dir)?;
     validate_host(&input.host_id)?;
     mutate_store(|current| {
         let project = current
@@ -567,7 +573,11 @@ fn normalize_env_content(raw: &str) -> Result<String, String> {
     Ok(content)
 }
 
-fn write_private_env(path: &Path, content: &str) -> Result<(), String> {
+pub(crate) fn write_private_env(path: &Path, content: &str) -> Result<(), String> {
+    write_private_env_bytes(path, content.as_bytes())
+}
+
+pub(crate) fn write_private_env_bytes(path: &Path, content: &[u8]) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| format!("创建项目环境变量目录失败：{error}"))?;
@@ -577,31 +587,64 @@ fn write_private_env(path: &Path, content: &str) -> Result<(), String> {
         .map(|value| value.as_nanos())
         .unwrap_or(0);
     let temporary = path.with_extension(format!("tmp-{}-{stamp}", std::process::id()));
-    fs::write(&temporary, content)
-        .map_err(|error| format!("写入项目环境变量失败：{error}"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))
-            .map_err(|error| format!("设置项目环境变量权限失败：{error}"))?;
+    // 以排他方式创建临时文件，并在创建时就带上 0600（Unix），避免秘密文件
+    // 在写入权限之前短暂地以默认权限存在。
+    let write = || -> std::io::Result<()> {
+        use std::io::Write;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary)?;
+        file.write_all(content)?;
+        file.sync_all()
+    };
+    if let Err(error) = write() {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!("写入项目环境变量失败：{error}"));
     }
-    fs::rename(&temporary, path)
-        .map_err(|error| format!("保存项目环境变量失败：{error}"))?;
+    if let Err(error) = fs::rename(&temporary, path) {
+        // Windows 不允许 rename 覆盖已存在的文件，先移除目标再重试。
+        let replaced = if path.is_file() {
+            fs::remove_file(path).and_then(|_| fs::rename(&temporary, path))
+        } else {
+            Err(error)
+        };
+        if let Err(error) = replaced {
+            let _ = fs::remove_file(&temporary);
+            return Err(format!("保存项目环境变量失败：{error}"));
+        }
+    }
     Ok(())
 }
 
-pub(crate) fn read_active_project_env() -> Option<String> {
-    let project = active_project()?;
-    let path = project_env_path(&project.id).ok()?;
-    let content = fs::read_to_string(path).ok()?;
-    (!content.trim().is_empty()).then_some(content)
+pub(crate) fn read_active_project_env() -> Result<Option<String>, String> {
+    let Some(project) = active_project() else {
+        return Ok(None);
+    };
+    let path = project_env_path(&project.id)?;
+    match fs::read_to_string(path) {
+        Ok(content) => Ok((!content.trim().is_empty()).then_some(content)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("读取项目环境变量失败：{error}")),
+    }
 }
 
 pub(crate) fn write_active_project_env_to_dir(deploy_dir: &Path) -> Result<bool, String> {
-    let Some(content) = read_active_project_env() else {
+    let Some(content) = read_active_project_env()? else {
         return Ok(false);
     };
-    let path = deploy_dir.join(".env");
+    let canonical = fs::canonicalize(deploy_dir)
+        .map_err(|_| String::from("部署目录不存在或不可访问，无法写入环境变量文件"))?;
+    if canonical.parent().is_none() {
+        return Err(String::from(
+            "部署目录不能是系统根目录，请填写专用部署路径",
+        ));
+    }
+    let path = canonical.join(".env");
     write_private_env(&path, &content)?;
     log::info!(target: "deploy", "已写入项目环境变量：{}", path.display());
     Ok(true)
@@ -614,33 +657,124 @@ pub(crate) fn upload_active_project_env(
     key: Option<&str>,
     deploy_dir: &str,
 ) -> Result<bool, String> {
-    let Some(content) = read_active_project_env() else {
+    let Some(content) = read_active_project_env()? else {
         return Ok(false);
     };
+    validate_remote_env_deploy_dir(deploy_dir)?;
     let dir = deploy_dir.trim().trim_end_matches('/');
-    if dir.is_empty() {
-        return Err("目标部署目录为空，无法写入环境变量文件".to_string());
-    }
+    // 环境变量可能包含密码与令牌，上传前必须确认目标主机指纹已经在本机验证。
+    ensure_known_host(host, port)?;
     let script = env_upload_script(dir, &content)?;
-    let output = run_ssh_script(host, port, user, key, &script)?;
+    let output = run_ssh_script_strict_with_timeout(
+        host,
+        port,
+        user,
+        key,
+        &script,
+        Duration::from_secs(120),
+    )?;
     if !output.status.success() {
-        return Err(String::from("上传项目环境变量失败，请检查目标部署目录权限后重试"));
+        let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
+        if stderr.contains("host key verification failed") {
+            return Err(String::from(
+                "目标主机指纹校验失败，可能已被替换。请先在本机终端连接该主机并确认指纹后再重试",
+            ));
+        }
+        return Err(String::from(
+            "上传项目环境变量失败，请检查目标主机指纹与部署目录权限后重试",
+        ));
     }
     log::info!(target: "deploy", "已上传项目环境变量：{dir}/.env");
     Ok(true)
 }
 
+fn validate_remote_env_deploy_dir(raw: &str) -> Result<(), String> {
+    let value = raw.trim().trim_end_matches('/');
+    if value.is_empty() || value.contains(['\n', '\r', '\0']) || !value.starts_with('/') {
+        return Err(String::from("目标部署目录无效，无法写入环境变量文件"));
+    }
+    let mut has_normal = false;
+    for part in Path::new(value).components() {
+        match part {
+            Component::Normal(_) => has_normal = true,
+            Component::RootDir => {}
+            _ => return Err(String::from("目标部署目录无效，无法写入环境变量文件")),
+        }
+    }
+    if !has_normal {
+        return Err(String::from(
+            "目标部署目录不能是系统根目录，请填写专用部署路径",
+        ));
+    }
+    Ok(())
+}
+
 fn env_upload_script(dir: &str, content: &str) -> Result<String, String> {
     let target = format!("{dir}/.env");
-    let temporary = format!("{dir}/.env.tmp.$$");
+    let template = format!("{dir}/.env.XXXXXX");
     let encoded = base64_encode(content)?;
     Ok(format!(
-        "set -e\numask 077\nmkdir -p {dir}\nprintf '%s' {encoded} | base64 -d > {temporary}\nmv {temporary} {target}\n",
+        "set -e\numask 077\nmkdir -p {dir}\ntmp=$(mktemp {template})\ntrap 'rm -f \"$tmp\"' EXIT\nprintf '%s' {encoded} | base64 -d > \"$tmp\"\nmv \"$tmp\" {target}\ntrap - EXIT\n",
         dir = shell_quote(dir),
         encoded = shell_quote(&encoded),
-        temporary = shell_quote(&temporary),
+        template = shell_quote(&template),
         target = shell_quote(&target)
     ))
+}
+
+/// 记录部署目录 `.env` 的原始内容，在预检失败或只做预检时恢复，避免误改部署文件。
+pub(crate) struct ProjectEnvGuard {
+    deploy_dir: PathBuf,
+    previous: Option<Vec<u8>>,
+    armed: bool,
+}
+
+impl ProjectEnvGuard {
+    pub(crate) fn capture(deploy_dir: &Path) -> Result<Self, String> {
+        let deploy_dir = fs::canonicalize(deploy_dir)
+            .map_err(|_| String::from("部署目录不存在或不可访问，无法读取环境变量"))?;
+        let path = deploy_dir.join(".env");
+        let previous = match fs::read(&path) {
+            Ok(content) => Some(content),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(format!("读取部署目录环境变量失败：{error}")),
+        };
+        Ok(Self {
+            deploy_dir,
+            previous,
+            armed: true,
+        })
+    }
+
+    pub(crate) fn previous_content(&self) -> Option<&[u8]> {
+        self.previous.as_deref()
+    }
+
+    pub(crate) fn restore(&self) -> Result<(), String> {
+        let path = self.deploy_dir.join(".env");
+        match self.previous.as_deref() {
+            Some(content) => write_private_env_bytes(&path, content),
+            None => match fs::remove_file(&path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(format!("恢复部署目录环境变量失败：{error}")),
+            },
+        }
+    }
+
+    pub(crate) fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ProjectEnvGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            if let Err(error) = self.restore() {
+                log::warn!(target: "deploy", "恢复部署目录环境变量失败：{error}");
+            }
+        }
+    }
 }
 
 fn validate_name(raw: &str) -> Result<String, String> {
@@ -672,6 +806,53 @@ fn validate_install_dir(raw: &str) -> Result<String, String> {
         return Err("部署目录不能包含上级目录".to_string());
     }
     Ok(value.to_string())
+}
+
+fn validate_project_install_dir(host_id: &str, raw: &str) -> Result<String, String> {
+    let value = validate_install_dir(raw)?;
+    if host_is_local(host_id)? {
+        validate_local_install_dir(&value)?;
+    } else {
+        validate_remote_env_deploy_dir(&value)?;
+    }
+    Ok(value)
+}
+
+pub(crate) fn validate_local_install_dir(value: &str) -> Result<(), String> {
+    let path = Path::new(value);
+    let has_normal = path
+        .components()
+        .any(|part| matches!(part, Component::Normal(_)));
+    if !path.is_absolute() || !has_normal || path_guard::has_parent_dir(path) {
+        return Err(String::from(
+            "部署目录必须是当前系统可用的绝对路径，且不能是系统根目录",
+        ));
+    }
+    Ok(())
+}
+
+fn host_is_local(host_id: &str) -> Result<bool, String> {
+    let id = host_id.trim();
+    let dir = CONFIG_DIR
+        .get()
+        .ok_or_else(|| String::from("应用配置目录不可用"))?;
+    let text = fs::read_to_string(dir.join("connections.json")).unwrap_or_default();
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+    let local = value
+        .get("hosts")
+        .and_then(|hosts| hosts.as_array())
+        .and_then(|hosts| {
+            hosts
+                .iter()
+                .find(|host| host.get("id").and_then(serde_json::Value::as_str) == Some(id))
+        })
+        .map(|host| {
+            host.get("kind")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|kind| kind == "local")
+        })
+        .unwrap_or(false);
+    Ok(local)
 }
 
 fn validate_host(host_id: &str) -> Result<(), String> {
@@ -764,6 +945,67 @@ mod tests {
             );
         }
         fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn project_env_guard_restores_previous_state() {
+        let dir = std::env::temp_dir().join(format!(
+            "deploy-project-env-guard-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|value| value.as_nanos())
+                .unwrap_or(0)
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".env");
+        fs::write(&path, "OLD=1\n").unwrap();
+        {
+            let _guard = ProjectEnvGuard::capture(&dir).unwrap();
+            write_private_env(&path, "NEW=2\n").unwrap();
+        }
+        assert_eq!(fs::read_to_string(&path).unwrap(), "OLD=1\n");
+
+        fs::remove_file(&path).unwrap();
+        {
+            let _guard = ProjectEnvGuard::capture(&dir).unwrap();
+            write_private_env(&path, "NEW=2\n").unwrap();
+        }
+        assert!(!path.exists());
+
+        {
+            let mut guard = ProjectEnvGuard::capture(&dir).unwrap();
+            write_private_env(&path, "KEEP=1\n").unwrap();
+            guard.disarm();
+        }
+        assert_eq!(fs::read_to_string(&path).unwrap(), "KEEP=1\n");
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn deploy_dir_validation_rejects_root_and_cross_platform_paths() {
+        assert!(validate_local_install_dir("/").is_err());
+        assert!(validate_local_install_dir("/.").is_err());
+        assert!(validate_local_install_dir("///").is_err());
+        assert!(validate_local_install_dir("relative/path").is_err());
+        #[cfg(unix)]
+        {
+            assert!(validate_local_install_dir("/opt/demo").is_ok());
+            assert!(validate_local_install_dir("C:\\deploy").is_err());
+            assert!(validate_local_install_dir("\\\\server\\share").is_err());
+        }
+        #[cfg(windows)]
+        {
+            assert!(validate_local_install_dir("C:\\deploy\\demo").is_ok());
+            assert!(validate_local_install_dir("\\\\server\\share").is_err());
+        }
+
+        assert!(validate_remote_env_deploy_dir("/").is_err());
+        assert!(validate_remote_env_deploy_dir("/.").is_err());
+        assert!(validate_remote_env_deploy_dir("///").is_err());
+        assert!(validate_remote_env_deploy_dir("C:\\deploy").is_err());
+        assert!(validate_remote_env_deploy_dir("\\\\server\\share").is_err());
+        assert!(validate_remote_env_deploy_dir("/opt/demo").is_ok());
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use super::bundle::{install_components, normalize_install_dir};
+use super::bundle::{install_components, normalize_install_dir, validate_install_dir};
 use super::progress::emit_progress;
 use super::transfer::{upload_dir_replace, upload_file_replace};
 use crate::commands::bundle::{write_deployed_record, ArtifactKind, Bundle};
@@ -64,6 +64,13 @@ fn install_bundle_blocking(
     bundle.verify_payload()?;
 
     let install_dir = normalize_install_dir(install_dir);
+    if !install_dir.is_empty() {
+        if mode == "local" {
+            projects::validate_local_install_dir(&install_dir)?;
+        } else {
+            validate_install_dir(&install_dir)?;
+        }
+    }
     if install_dir.is_empty() {
         return Err("请先为当前项目填写部署目录".to_string());
     }

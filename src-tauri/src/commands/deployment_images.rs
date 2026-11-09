@@ -374,14 +374,15 @@ fn pull_local_blocking(
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
             let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-            let mut empty_error = stderr.is_empty();
             let mut error_text = if stderr.is_empty() {
                 stdout
             } else {
                 stderr
             };
             let mut retried = false;
-            if empty_error {
+            // 仅在完全拿不到任何输出时重试；若 stdout/stderr 已给出拒绝信息，
+            // 重试没有意义，也不能据此放行加速源回退。
+            if error_text.trim().is_empty() {
                 let mut retry = docker_command();
                 retry.args(["pull", reference]);
                 match run_local_docker(
@@ -401,7 +402,6 @@ fn pull_local_blocking(
                                 String::from_utf8_lossy(&output.stderr).trim().to_owned();
                             let retry_stdout =
                                 String::from_utf8_lossy(&output.stdout).trim().to_owned();
-                            empty_error = retry_stderr.is_empty();
                             if !retry_stderr.is_empty() {
                                 error_text = retry_stderr;
                             } else if !retry_stdout.is_empty() {
@@ -410,7 +410,6 @@ fn pull_local_blocking(
                         }
                     }
                     Err(error) => {
-                        empty_error = false;
                         error_text = error;
                     }
                 }
@@ -420,7 +419,7 @@ fn pull_local_blocking(
             } else {
                 let mirror = if login.is_none()
                     && is_docker_hub_tag(reference)
-                    && (empty_error || registry_connection_failure(&error_text))
+                    && should_try_docker_hub_mirror(&error_text)
                 {
                     Some(pull_via_docker_hub_mirror(
                         window,
@@ -507,12 +506,21 @@ fn pull_via_docker_hub_mirror(
                 "Docker Hub 无法读取该镜像，可能已私有化或不存在，未自动切换加速源",
             ));
         }
-        HubManifest::Unavailable => {
+        HubManifest::Unreachable => {
             log::warn!(
                 target: "deployment",
                 "Docker Hub 不可达，按加速源清单摘要校验镜像 {reference}"
             );
             None
+        }
+        HubManifest::Indeterminate => {
+            log::warn!(
+                target: "deployment",
+                "Docker Hub 返回异常状态，无法确认镜像 {reference} 是否存在，停止自动回退"
+            );
+            return Err(String::from(
+                "Docker Hub 返回异常状态，无法确认镜像是否存在，未自动切换加速源",
+            ));
         }
     };
     let mirrors = super::registry_sources::docker_hub_accelerators(app)
@@ -722,7 +730,10 @@ fn docker_hub_repository_and_tag(reference: &str) -> Option<(String, String)> {
 enum HubManifest {
     Digest(String),
     Denied,
-    Unavailable,
+    /// 连接、DNS 或超时等传输失败：无法确认镜像是否存在，允许按加速源摘要兜底。
+    Unreachable,
+    /// Docker Hub 返回限流、服务异常或无法解析的响应：不能据此断定镜像存在。
+    Indeterminate,
 }
 
 fn docker_hub_manifest_digest(reference: &str) -> HubManifest {
@@ -733,15 +744,19 @@ fn docker_hub_manifest_digest(reference: &str) -> HubManifest {
         .timeout(Duration::from_secs(12))
         .build()
     else {
-        return HubManifest::Unavailable;
+        return HubManifest::Indeterminate;
     };
     let scope = format!("repository:{repository}:pull");
-    let Ok(token_response) = client
+    let token_response = match client
         .get("https://auth.docker.io/token")
         .query(&[("service", "registry.docker.io"), ("scope", scope.as_str())])
         .send()
-    else {
-        return HubManifest::Unavailable;
+    {
+        Ok(response) => response,
+        Err(error) if error.is_connect() || error.is_timeout() => {
+            return HubManifest::Unreachable;
+        }
+        Err(_) => return HubManifest::Indeterminate,
     };
     if matches!(
         token_response.status(),
@@ -752,17 +767,17 @@ fn docker_hub_manifest_digest(reference: &str) -> HubManifest {
         return HubManifest::Denied;
     }
     if !token_response.status().is_success() {
-        return HubManifest::Unavailable;
+        return HubManifest::Indeterminate;
     }
     let Ok(token) = serde_json::from_slice::<Value>(
         &token_response.bytes().unwrap_or_default(),
     ) else {
-        return HubManifest::Unavailable;
+        return HubManifest::Indeterminate;
     };
     let Some(token) = token.get("token").and_then(Value::as_str) else {
-        return HubManifest::Unavailable;
+        return HubManifest::Indeterminate;
     };
-    let Ok(response) = client
+    let response = match client
         .head(format!(
             "https://registry-1.docker.io/v2/{repository}/manifests/{tag}"
         ))
@@ -775,8 +790,12 @@ fn docker_hub_manifest_digest(reference: &str) -> HubManifest {
             "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json",
         )
         .send()
-    else {
-        return HubManifest::Unavailable;
+    {
+        Ok(response) => response,
+        Err(error) if error.is_connect() || error.is_timeout() => {
+            return HubManifest::Unreachable;
+        }
+        Err(_) => return HubManifest::Indeterminate,
     };
     if matches!(
         response.status(),
@@ -787,7 +806,7 @@ fn docker_hub_manifest_digest(reference: &str) -> HubManifest {
         return HubManifest::Denied;
     }
     if !response.status().is_success() {
-        return HubManifest::Unavailable;
+        return HubManifest::Indeterminate;
     }
     let Some(digest) = response
         .headers()
@@ -795,12 +814,12 @@ fn docker_hub_manifest_digest(reference: &str) -> HubManifest {
         .and_then(|value| value.to_str().ok())
         .map(|value| value.trim().to_owned())
     else {
-        return HubManifest::Unavailable;
+        return HubManifest::Indeterminate;
     };
     if digest.len() == 71 && digest.starts_with("sha256:") {
         HubManifest::Digest(digest)
     } else {
-        HubManifest::Unavailable
+        HubManifest::Indeterminate
     }
 }
 
@@ -1020,6 +1039,13 @@ fn credential_helper_has_docker_hub(store: &str) -> bool {
             .keys()
             .any(|host| host.to_ascii_lowercase().contains("docker.io"))
     })
+}
+
+/// 只有拿不到任何错误输出（Windows 上偶发）或明确是网络/限流问题时，
+/// 才把镜像交给加速源。拒绝、鉴权、镜像不存在等错误不会触发回退。
+fn should_try_docker_hub_mirror(error_text: &str) -> bool {
+    let trimmed = error_text.trim();
+    trimmed.is_empty() || registry_connection_failure(trimmed)
 }
 
 fn registry_connection_failure(stderr: &str) -> bool {
@@ -1806,6 +1832,20 @@ mod tests {
         assert!(!message.contains("secret"));
         assert!(!message.contains("c2VjcmV0"));
         assert!(message.contains("[已隐藏]"));
+    }
+
+    #[test]
+    fn mirror_fallback_requires_network_failure_or_missing_output() {
+        assert!(should_try_docker_hub_mirror(""));
+        assert!(should_try_docker_hub_mirror("   "));
+        assert!(should_try_docker_hub_mirror(
+            "Get https://registry-1.docker.io/v2/: dial tcp: connectex: A connection attempt failed"
+        ));
+        assert!(!should_try_docker_hub_mirror(
+            "pull access denied for demo/private, repository does not exist"
+        ));
+        assert!(!should_try_docker_hub_mirror("unauthorized: authentication required"));
+        assert!(!should_try_docker_hub_mirror("manifest unknown: manifest unknown"));
     }
 
     #[test]

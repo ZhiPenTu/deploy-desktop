@@ -111,7 +111,12 @@ fn run_update(
         "检查交付包、部署目录与所选服务",
     );
     let mut plan = build_plan(bundle_dir, install_dir, &components)?;
-    crate::commands::projects::write_active_project_env_to_dir(&plan.deploy_dir)?;
+    // 预检需要看到最新环境变量，但不能在预检或失败后留下改动：
+    // 用 guard 记录原内容，只在真正执行更新后才保留新文件。
+    let mut env_guard = crate::commands::projects::ProjectEnvGuard::capture(&plan.deploy_dir)?;
+    if !crate::commands::projects::write_active_project_env_to_dir(&plan.deploy_dir)? {
+        env_guard.disarm();
+    }
     let components = plan.components.clone();
     check_local_docker()?;
     let current = compose_config(&plan, &plan.compose)?;
@@ -170,10 +175,11 @@ fn run_update(
 
     let backup_dir = if backup {
         progress(window, "创建备份", 15, "running", "备份即将替换的部署文件");
-        Some(create_backup(&plan)?)
+        Some(create_backup(&plan, env_guard.previous_content())?)
     } else {
         None
     };
+    env_guard.disarm();
     let execution = (|| -> Result<(), String> {
         for (index, item) in plan.replacements.iter().enumerate() {
             progress(
@@ -1013,7 +1019,7 @@ fn copy_tree(source: &Path, target: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn create_backup(plan: &UpdatePlan) -> Result<PathBuf, String> {
+fn create_backup(plan: &UpdatePlan, previous_env: Option<&[u8]>) -> Result<PathBuf, String> {
     let parent = plan.root.join("backup");
     validate_destination(&plan.root, &parent)?;
     fs::create_dir_all(&parent).map_err(|_| "创建备份目录失败，请检查权限".to_string())?;
@@ -1024,6 +1030,17 @@ fn create_backup(plan: &UpdatePlan) -> Result<PathBuf, String> {
         if existing.exists() {
             copy_tree(&existing, &backup_dir.join(&item.relative))?;
         }
+    }
+    if let Some(content) = previous_env {
+        // 更新写入的新 .env 不在产物替换列表中，按更新前内容单独备份。
+        let relative = plan
+            .deploy_dir
+            .strip_prefix(&plan.root)
+            .unwrap_or_else(|_| Path::new(""));
+        super::projects::write_private_env_bytes(
+            &backup_dir.join(relative).join(".env"),
+            content,
+        )?;
     }
     Ok(backup_dir)
 }
@@ -1388,7 +1405,7 @@ mod tests {
             &["config".to_string()],
         )
         .unwrap();
-        let backup = create_backup(&plan).unwrap();
+        let backup = create_backup(&plan, None).unwrap();
         assert!(backup.join("deploy/docker-compose.yml").is_file());
         assert_eq!(
             fs::read_to_string(backup.join("deploy/nginx/stale.conf")).unwrap(),

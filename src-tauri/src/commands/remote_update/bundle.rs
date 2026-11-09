@@ -14,6 +14,33 @@ pub(super) fn normalize_install_dir(raw: &str) -> String {
 }
 
 /// 读取并校验目标交付包，版本不满足要求时直接报错。
+pub(super) fn validate_install_dir(value: &str) -> Result<(), String> {
+    let value = value.trim().trim_end_matches('/');
+    if value.is_empty() || value.contains(['\n', '\r', '\0']) || !value.starts_with('/') {
+        return Err(String::from(
+            "部署目录必须是目标机上的绝对路径，且不能包含上级目录",
+        ));
+    }
+    let mut has_normal = false;
+    for part in Path::new(value).components() {
+        match part {
+            std::path::Component::Normal(_) => has_normal = true,
+            std::path::Component::RootDir => {}
+            _ => {
+                return Err(String::from(
+                    "部署目录必须是目标机上的绝对路径，且不能包含上级目录",
+                ))
+            }
+        }
+    }
+    if !has_normal {
+        return Err(String::from(
+            "部署目录不能是目标机的系统根目录，请填写专用部署路径",
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn load_target(path: &Path) -> Result<Bundle, String> {
     let bundle = Bundle::load(path)?;
     bundle.ensure_compatible()?;

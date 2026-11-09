@@ -1,4 +1,4 @@
-use super::bundle::{load_bundle, normalize_install_dir};
+use super::bundle::{load_bundle, normalize_install_dir, validate_install_dir};
 use super::inspect::{inspect_remote_deployment_inner, remote_free_kb};
 use super::models::RemoteUpdateResult;
 use super::progress::{emit_progress, ProgressHeartbeat};
@@ -87,6 +87,9 @@ fn update_remote_deployment_blocking(
 
     let key = resolve_existing_key(key_path, &host)?;
     let install_dir = normalize_install_dir(&install_dir);
+    if !install_dir.is_empty() {
+        validate_install_dir(&install_dir)?;
+    }
 
     emit_progress(
         window,

@@ -141,11 +141,12 @@
       class="env-editor"
       type="textarea"
       :rows="14"
+      :disabled="envLoading"
       placeholder="每行一个 KEY=VALUE，例如 DB_PASSWORD=..."
     />
     <template #footer>
       <el-button @click="envVisible = false">取消</el-button>
-      <el-button type="primary" :loading="envSaving" @click="saveEnv">保存</el-button>
+      <el-button type="primary" :loading="envSaving" :disabled="envLoading" @click="saveEnv">保存</el-button>
     </template>
   </el-dialog>
 </template>
@@ -180,6 +181,8 @@ const editingId = ref('');
 const sources = ref([]);
 const envVisible = ref(false);
 const envSaving = ref(false);
+const envLoading = ref(false);
+const envRequest = ref(0);
 const envProjectId = ref('');
 const envProjectName = ref('');
 const envContent = ref('');
@@ -220,19 +223,28 @@ async function openDirectory(row) {
 }
 
 async function openEnv(row) {
+  const request = envRequest.value + 1;
+  envRequest.value = request;
   envProjectId.value = row.id;
   envProjectName.value = row.name;
   envContent.value = '';
   envVisible.value = true;
+  envLoading.value = true;
   try {
-    envContent.value = await getProjectEnv(row.id);
+    const content = await getProjectEnv(row.id);
+    if (request !== envRequest.value) return;
+    envContent.value = content;
   } catch (error) {
+    if (request !== envRequest.value) return;
     envVisible.value = false;
     ElMessage.error(errorText(error));
+  } finally {
+    if (request === envRequest.value) envLoading.value = false;
   }
 }
 
 async function saveEnv() {
+  if (envLoading.value || envSaving.value) return;
   envSaving.value = true;
   try {
     await saveProjectEnv(envProjectId.value, envContent.value);
