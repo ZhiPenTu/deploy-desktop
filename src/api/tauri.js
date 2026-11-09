@@ -109,6 +109,9 @@ export {
   createProject,
   updateProject,
   deleteProject,
+  getProjectEnv,
+  saveProjectEnv,
+  openLocalDirectory,
   setActiveProject,
   getActiveProjectContext,
   activateProjectBundle

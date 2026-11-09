@@ -17,6 +17,18 @@ export async function deleteProject(id) {
   return await invokeDesktop('delete_project', { id });
 }
 
+export async function getProjectEnv(projectId) {
+  return await invokeDesktop('get_project_env', { projectId });
+}
+
+export async function saveProjectEnv(projectId, content) {
+  return await invokeDesktop('save_project_env', { projectId, content });
+}
+
+export async function openLocalDirectory(path) {
+  return await invokeDesktop('open_local_directory', { path });
+}
+
 export async function setActiveProject(id) {
   return await invokeDesktop('set_active_project', { id });
 }
