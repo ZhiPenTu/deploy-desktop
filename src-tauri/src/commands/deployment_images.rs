@@ -140,7 +140,7 @@ pub async fn pull_deployment_images(
             Ok(())
         };
         let results = if host.is_empty() {
-            pull_local_blocking(&window, &references, &logins, &mut on_confirmed)?
+            pull_local_blocking(&window, &app, &references, &logins, &mut on_confirmed)?
         } else {
             if user.trim().is_empty() {
                 return Err(String::from("请先填写目标主机登录用户"));
@@ -324,6 +324,7 @@ fn login_for_reference<'a>(
 
 fn pull_local_blocking(
     window: &tauri::Window,
+    app: &AppHandle,
     references: &[String],
     logins: &HashMap<String, PullLogin>,
     on_confirmed: &mut dyn FnMut(&str) -> Result<(), String>,
@@ -367,16 +368,40 @@ fn pull_local_blocking(
             Duration::from_secs(1800),
             &format!("拉取镜像 {reference}"),
         )?;
+        let mut message = String::from("已拉取并确认");
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            let message = pull_failure(stderr.trim(), login.is_some());
-            let message = redact_secret(
-                &message,
-                login
-                    .map(|value| value.password.as_str())
-                    .unwrap_or_default(),
-            );
-            return Err(format!("拉取镜像 {reference} 失败：{message}"));
+            let stderr = stderr.trim();
+            let mirror = if login.is_none()
+                && is_docker_hub_tag(reference)
+                && registry_connection_failure(stderr)
+            {
+                pull_via_docker_hub_mirror(
+                    window,
+                    app,
+                    reference,
+                    &target_platform,
+                    index,
+                    total,
+                )
+            } else {
+                None
+            };
+            match mirror {
+                Some(source) => {
+                    message = format!("已通过 {source} 加速源拉取并保存为原镜像地址")
+                }
+                None => {
+                    let message = pull_failure(stderr, login.is_some());
+                    let message = redact_secret(
+                        &message,
+                        login
+                            .map(|value| value.password.as_str())
+                            .unwrap_or_default(),
+                    );
+                    return Err(format!("拉取镜像 {reference} 失败：{message}"));
+                }
+            }
         }
         let image_platform = inspect_local_pull(reference, config.as_ref())?;
         if !platform_matches(&image_platform, &target_platform) {
@@ -395,10 +420,302 @@ fn pull_local_blocking(
         );
         results.push(DeploymentImagePullResult {
             reference: reference.clone(),
-            message: String::from("已拉取并确认"),
+            message,
         });
     }
     Ok(results)
+}
+
+fn pull_via_docker_hub_mirror(
+    window: &tauri::Window,
+    app: &AppHandle,
+    reference: &str,
+    target_platform: &str,
+    index: usize,
+    total: usize,
+) -> Option<String> {
+    let Some(expected_digest) = docker_hub_manifest_digest(reference) else {
+        log::warn!(
+            target: "deployment",
+            "无法从 Docker Hub 核对镜像 {reference} 的公开摘要，跳过加速源回退"
+        );
+        return None;
+    };
+    let mirrors = super::registry_sources::docker_hub_accelerators(app).ok()?;
+    for source in mirrors {
+        let Some(mirror) = docker_hub_mirror_reference(reference, &source.address, &source.namespace)
+        else {
+            continue;
+        };
+        emit_pull_progress(
+            window,
+            index * 100 / total,
+            index + 1,
+            total,
+            reference,
+            &format!("直连镜像仓库失败，正在通过 {} 加速拉取 {reference}", source.name),
+        );
+        log::warn!(
+            target: "deployment",
+            "镜像 {reference} 直连失败，尝试通过加速源 {} 拉取",
+            source.address
+        );
+        let mut pull = docker_command();
+        pull.args(["pull", &mirror]);
+        let Ok(output) = run_local_docker(
+            pull,
+            None,
+            Duration::from_secs(600),
+            &format!("通过 {} 拉取镜像 {reference}", source.name),
+        ) else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+        let platform = match inspect_local_image(&mirror, None) {
+            Ok(Some(platform)) => platform,
+            _ => {
+                remove_local_image(&mirror);
+                continue;
+            }
+        };
+        if !platform_matches(&platform, target_platform) {
+            log::warn!(
+                target: "deployment",
+                "加速源 {} 返回的镜像 {mirror} 平台为 {platform}，与目标 {target_platform} 不一致",
+                source.address
+            );
+            remove_local_image(&mirror);
+            continue;
+        }
+        if !local_image_has_digest(&mirror, &expected_digest) {
+            log::warn!(
+                target: "deployment",
+                "加速源 {} 返回的镜像 {mirror} 摘要与 Docker Hub 不一致",
+                source.address
+            );
+            remove_local_image(&mirror);
+            continue;
+        }
+        let mut tag = docker_command();
+        tag.args(["tag", &mirror, reference]);
+        let Ok(output) = run_local_docker(
+            tag,
+            None,
+            Duration::from_secs(60),
+            &format!("保存镜像 {reference} 的原地址"),
+        ) else {
+            remove_local_image(&mirror);
+            continue;
+        };
+        if !output.status.success() {
+            remove_local_image(&mirror);
+            continue;
+        }
+        log::info!(
+            target: "deployment",
+            "已通过加速源 {} 拉取镜像 {reference}，摘要 {expected_digest}",
+            source.address
+        );
+        remove_local_image(&mirror);
+        return Some(source.name);
+    }
+    None
+}
+
+fn is_docker_hub_tag(reference: &str) -> bool {
+    !reference.contains("@sha256:") && docker_hub_path(reference).is_some()
+}
+
+fn docker_hub_mirror_reference(reference: &str, address: &str, namespace: &str) -> Option<String> {
+    let path = docker_hub_path(reference)?;
+    if path.is_empty() || path.contains('@') {
+        return None;
+    }
+    let address = address.trim().trim_end_matches('/');
+    if address.is_empty() {
+        return None;
+    }
+    let namespace = namespace.trim().trim_matches('/');
+    if path.split('/').count() > 1 || namespace.is_empty() {
+        Some(format!("{address}/{path}"))
+    } else {
+        Some(format!("{address}/{namespace}/{path}"))
+    }
+}
+
+fn docker_hub_path(reference: &str) -> Option<&str> {
+    let lower = reference.to_ascii_lowercase();
+    for prefix in [
+        "docker.io/",
+        "index.docker.io/",
+        "registry-1.docker.io/",
+    ] {
+        if lower.starts_with(prefix) {
+            return reference.get(prefix.len()..);
+        }
+    }
+    if normalize_registry_host(&registry_for_reference(reference)) == "docker.io" {
+        Some(reference)
+    } else {
+        None
+    }
+}
+
+fn docker_hub_repository_and_tag(reference: &str) -> Option<(String, String)> {
+    let path = docker_hub_path(reference)?.trim();
+    if path.is_empty() || path.contains('@') {
+        return None;
+    }
+    let (name, tag) = match path.rsplit_once(':') {
+        Some((name, tag)) if !tag.is_empty() && !tag.contains('/') => (name, tag),
+        _ => (path, "latest"),
+    };
+    if name.is_empty() {
+        return None;
+    }
+    let repository = if name.contains('/') {
+        name.to_string()
+    } else {
+        format!("library/{name}")
+    };
+    Some((repository, tag.to_string()))
+}
+
+fn docker_hub_manifest_digest(reference: &str) -> Option<String> {
+    let (repository, tag) = docker_hub_repository_and_tag(reference)?;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(12))
+        .build()
+        .ok()?;
+    let scope = format!("repository:{repository}:pull");
+    let token: Value = serde_json::from_slice(
+        &client
+            .get("https://auth.docker.io/token")
+            .query(&[("service", "registry.docker.io"), ("scope", scope.as_str())])
+            .send()
+            .ok()?
+            .error_for_status()
+            .ok()?
+            .bytes()
+            .ok()?,
+    )
+    .ok()?;
+    let token = token.get("token").and_then(Value::as_str)?;
+    let response = client
+        .head(format!(
+            "https://registry-1.docker.io/v2/{repository}/manifests/{tag}"
+        ))
+        .header(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {token}"),
+        )
+        .header(
+            reqwest::header::ACCEPT,
+            "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json",
+        )
+        .send()
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let digest = response
+        .headers()
+        .get("docker-content-digest")?
+        .to_str()
+        .ok()?
+        .trim()
+        .to_owned();
+    if digest.len() == 71 && digest.starts_with("sha256:") {
+        Some(digest)
+    } else {
+        None
+    }
+}
+
+fn local_image_has_digest(reference: &str, expected: &str) -> bool {
+    let mut command = docker_command();
+    command.args([
+        "image",
+        "inspect",
+        "--format",
+        "{{range .RepoDigests}}{{println .}}{{end}}",
+        "--",
+        reference,
+    ]);
+    let Ok(output) = run_local_docker(
+        command,
+        None,
+        Duration::from_secs(60),
+        "核对加速镜像摘要",
+    ) else {
+        return false;
+    };
+    output.status.success() && repo_digest_matches(&String::from_utf8_lossy(&output.stdout), expected)
+}
+
+fn repo_digest_matches(output: &str, expected: &str) -> bool {
+    output
+        .lines()
+        .map(str::trim)
+        .any(|line| line.ends_with(&format!("@{expected}")))
+}
+
+fn remove_local_image(reference: &str) {
+    let mut command = docker_command();
+    command.args(["rmi", reference]);
+    let _ = run_local_docker(
+        command,
+        None,
+        Duration::from_secs(60),
+        "清理加速镜像引用",
+    );
+}
+
+fn registry_connection_failure(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    if [
+        "unauthorized",
+        "authentication required",
+        "pull access denied",
+        "denied:",
+        "forbidden",
+        "no matching manifest",
+        "manifest invalid",
+        "name unknown",
+        "not found",
+        "404",
+        " 401",
+        " 403",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+    {
+        return false;
+    }
+    [
+        "failed to do request",
+        "dial tcp",
+        "no such host",
+        "server misbehaving",
+        "connectex",
+        "actively refused",
+        "connection refused",
+        "connection reset",
+        "connection attempt failed",
+        "i/o timeout",
+        "context deadline exceeded",
+        "temporary failure in name resolution",
+        "tls handshake timeout",
+        "proxyconnect",
+        "unexpected eof",
+        "toomanyrequests",
+        "too many requests",
+        " 429",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
 }
 
 fn prepare_local_for_transfer(
@@ -838,6 +1155,10 @@ fn pull_failure(stderr: &str, has_login: bool) -> String {
             "镜像仓库中没有该摘要对应的镜像，请确认摘要与仓库地址是否匹配",
         );
     }
+    if registry_connection_failure(stderr) {
+        log::warn!(target: "deployment", "镜像仓库连接失败：{stderr}");
+        return String::from("无法连接镜像仓库，请检查网络、代理与 Docker 镜像加速配置后重试");
+    }
     docker_failure(stderr)
 }
 
@@ -1165,5 +1486,115 @@ mod tests {
             false
         )
         .contains("该摘要对应的镜像"));
+    }
+
+    #[test]
+    fn docker_hub_mirror_keeps_org_paths_and_fills_library_namespace() {
+        assert_eq!(
+            docker_hub_mirror_reference("bitnamilegacy/kafka:4.0", "docker.m.daocloud.io", "library")
+                .as_deref(),
+            Some("docker.m.daocloud.io/bitnamilegacy/kafka:4.0")
+        );
+        assert_eq!(
+            docker_hub_mirror_reference("nginx:1.27", "docker.m.daocloud.io", "library")
+                .as_deref(),
+            Some("docker.m.daocloud.io/library/nginx:1.27")
+        );
+        assert_eq!(
+            docker_hub_mirror_reference("docker.io/library/redis:7", "mirror.example.com", "")
+                .as_deref(),
+            Some("mirror.example.com/library/redis:7")
+        );
+        assert_eq!(
+            docker_hub_mirror_reference(
+                "index.docker.io/library/redis:7",
+                "mirror.example.com",
+                "library"
+            )
+            .as_deref(),
+            Some("mirror.example.com/library/redis:7")
+        );
+        assert_eq!(
+            docker_hub_mirror_reference("Docker.IO/library/redis:7", "mirror.example.com", "library")
+                .as_deref(),
+            Some("mirror.example.com/library/redis:7")
+        );
+        assert!(docker_hub_mirror_reference(
+            "demo/api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "mirror.example.com",
+            "library"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn docker_hub_tag_fallback_only_accepts_tagged_hub_images() {
+        assert!(is_docker_hub_tag("bitnamilegacy/kafka:4.0"));
+        assert!(is_docker_hub_tag("docker.io/library/redis:7"));
+        assert!(!is_docker_hub_tag(
+            "bitnamilegacy/kafka@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ));
+        assert!(!is_docker_hub_tag("registry.example.com/demo/api:1.0"));
+    }
+
+    #[test]
+    fn registry_connection_errors_exclude_login_and_missing_manifest() {
+        assert!(registry_connection_failure(
+            "Error response from daemon: failed to resolve reference \"docker.io/bitnamilegacy/kafka:4.0\": failed to do request: Head \"https://registry-1.docker.io/v2/\": dial tcp: connectex: A connection attempt failed"
+        ));
+        assert!(registry_connection_failure(
+            "dial tcp 127.0.0.1:8888: connectex: No connection could be made because the target machine actively refused it"
+        ));
+        assert!(registry_connection_failure(
+            "Get https://registry-1.docker.io/v2/: temporary failure in name resolution"
+        ));
+        assert!(registry_connection_failure(
+            "failed to do request: context deadline exceeded"
+        ));
+        assert!(!registry_connection_failure(
+            "failed to resolve reference \"docker.io/demo/api:1.0\": unauthorized: authentication required"
+        ));
+        assert!(!registry_connection_failure(
+            "failed to resolve reference \"docker.io/demo/api:1.0\": docker.io/demo/api:1.0: not found"
+        ));
+        assert!(!registry_connection_failure(
+            "failed to resolve reference \"docker.io/demo/api:1.0\": no matching manifest for linux/amd64 in the manifest list entries"
+        ));
+        assert!(!registry_connection_failure(
+            "failed to resolve reference \"docker.io/demo/api:1.0\": 404 Not Found"
+        ));
+        assert!(!registry_connection_failure(
+            "failed to resolve reference \"docker.io/demo/api:1.0\": manifest invalid"
+        ));
+    }
+
+    #[test]
+    fn docker_hub_repository_paths_are_normalized_for_manifest_checks() {
+        assert_eq!(
+            docker_hub_repository_and_tag("bitnamilegacy/kafka:4.0"),
+            Some(("bitnamilegacy/kafka".to_string(), "4.0".to_string()))
+        );
+        assert_eq!(
+            docker_hub_repository_and_tag("nginx"),
+            Some(("library/nginx".to_string(), "latest".to_string()))
+        );
+        assert_eq!(
+            docker_hub_repository_and_tag("docker.io/library/redis:7"),
+            Some(("library/redis".to_string(), "7".to_string()))
+        );
+        assert!(docker_hub_repository_and_tag("demo/api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").is_none());
+    }
+
+    #[test]
+    fn mirror_digest_must_match_the_docker_hub_digest() {
+        let expected = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        assert!(repo_digest_matches(
+            &format!("docker.m.daocloud.io/bitnamilegacy/kafka@{expected}\n"),
+            expected
+        ));
+        assert!(!repo_digest_matches(
+            "docker.m.daocloud.io/bitnamilegacy/kafka@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n",
+            expected
+        ));
     }
 }
