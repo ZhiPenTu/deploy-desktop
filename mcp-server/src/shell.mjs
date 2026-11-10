@@ -8,8 +8,10 @@ const template = (name) => readFileSync(new URL(`../../shell/${name}.sh`, import
 const transferBody = template('transfer');
 const backupBody = template('backup');
 const applyBody = `${template('compose-update')}\n${template('readiness')}\ncompose ps\n`;
+const dockerBody = template('docker');
 export const BASH_STDIN = 'bash --noprofile --norc -s --';
 export const stdinProgram = (script) => `{\n${script}\n}\n`;
+export const remoteProgram = (script) => `{\n${dockerBody}\n${script}\n}\n`;
 export const bashCommand = (script) => `bash --noprofile --norc -c ${shellQuote(script)}`;
 
 export function bashScript(body, args = []) {

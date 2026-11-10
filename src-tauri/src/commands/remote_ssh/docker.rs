@@ -157,8 +157,29 @@ echo SYSTEMD_CONFIG_READY
         message: "systemd 单元与 daemon.json 已写入".to_string(),
     });
 
-    let step4 =
-        "set -e\nsystemctl daemon-reload\nsystemctl enable --now docker\ndocker --version\n";
+    // 先补齐 docker 用户组，再启动守护进程，socket 的属组才会生效；
+    // 非 root 用户加入用户组后需要重新登录，新的 SSH 会话会自动带上。
+    let step4 = r##"set -e
+if grep -q '^docker:' /etc/group 2>/dev/null; then
+  echo "DOCKER_GROUP_STATE=exists"
+elif groupadd docker 2>/dev/null; then
+  echo "DOCKER_GROUP_STATE=created"
+else
+  echo "DOCKER_GROUP_STATE=failed"
+fi
+if [ "$(id -u)" -ne 0 ] && command -v usermod >/dev/null 2>&1; then
+  if usermod -aG docker "$(id -un)" 2>/dev/null; then
+    echo "DOCKER_GROUP_ADDED=yes"
+  else
+    echo "DOCKER_GROUP_ADDED=no"
+  fi
+else
+  echo "DOCKER_GROUP_ADDED=skip"
+fi
+systemctl daemon-reload
+systemctl enable --now docker
+docker --version
+"##;
     let step4_out = run_ssh_script(&host, port, &user, key.as_deref(), step4)?;
     if !step4_out.status.success() {
         let message = String::from_utf8_lossy(&step4_out.stderr)
@@ -176,13 +197,48 @@ echo SYSTEMD_CONFIG_READY
             error_message: Some("远程主机启动 Docker 服务失败".to_string()),
         });
     }
-    let docker_version = String::from_utf8_lossy(&step4_out.stdout)
-        .trim()
+    let step4_output = String::from_utf8_lossy(&step4_out.stdout).to_string();
+    let docker_version = step4_output
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("Docker version"))
+        .unwrap_or("")
         .to_string();
+    let group_added = step4_output
+        .lines()
+        .any(|line| line.trim() == "DOCKER_GROUP_ADDED=yes");
+    let group_skipped = step4_output
+        .lines()
+        .any(|line| line.trim() == "DOCKER_GROUP_ADDED=skip");
+    let group_created = step4_output
+        .lines()
+        .any(|line| line.trim() == "DOCKER_GROUP_STATE=created");
+    let group_exists = step4_output
+        .lines()
+        .any(|line| line.trim() == "DOCKER_GROUP_STATE=exists");
+    let group_note = if group_added {
+        "；已将当前用户加入 docker 用户组，重新登录后生效"
+    } else {
+        ""
+    };
+    let group_state_note = if group_created {
+        "；已创建 docker 用户组"
+    } else if group_exists {
+        "；docker 用户组已存在"
+    } else {
+        "；未能创建 docker 用户组，如提示权限不足请手动处理"
+    };
+    let root_note = if group_skipped && (group_created || group_exists) {
+        "；如后续使用非 root 用户部署，请将该用户加入 docker 用户组"
+    } else {
+        ""
+    };
     steps.push(DockerInstallStep {
         step: "4. 启动 Docker 服务并验证运行状态".to_string(),
         status: "success".to_string(),
-        message: format!("Docker 服务已启动: {docker_version}"),
+        message: format!(
+            "Docker 服务已启动: {docker_version}{group_note}{group_state_note}{root_note}"
+        ),
     });
 
     Ok(DockerInstallResult {

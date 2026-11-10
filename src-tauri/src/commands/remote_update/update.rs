@@ -113,6 +113,13 @@ fn update_remote_deployment_blocking(
         return Err("目标机未安装 Docker，无法执行服务更新。".to_string());
     }
     if !status.docker_running {
+        if let Some(permission) = status
+            .issues
+            .iter()
+            .find(|issue| issue.contains("无权访问 Docker"))
+        {
+            return Err(format!("{permission}。"));
+        }
         return Err("目标机 Docker 守护进程未运行，请先启动 Docker。".to_string());
     }
     if !status.compose_available {

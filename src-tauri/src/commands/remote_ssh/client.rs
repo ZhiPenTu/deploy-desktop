@@ -206,7 +206,7 @@ fn run_ssh_script_with_policy(
     cmd.arg(shell::BASH_STDIN);
     process::run(
         cmd,
-        process::Input::Bytes(shell::stdin_program(script)),
+        process::Input::Bytes(remote_programme(script)),
         process::Options {
             timeout,
             ..process::Options::default()
@@ -214,9 +214,24 @@ fn run_ssh_script_with_policy(
     )
 }
 
+/// 所有远程脚本统一先加载 Docker 访问入口，脚本内部继续按普通命令书写。
+fn remote_programme(script: &str) -> Vec<u8> {
+    crate::core::shell::stdin_program(&format!(
+        "{}\n{}",
+        crate::commands::docker_setup::REMOTE_DOCKER_PREAMBLE,
+        script
+    ))
+}
+
 pub(crate) fn explain_ssh_failure(stderr: &str, key: Option<&str>) -> String {
     let raw = stderr.trim();
     let lower = raw.to_lowercase();
+
+    if crate::commands::docker_setup::docker_socket_permission_denied(raw) {
+        return String::from(
+            "Docker 访问失败：当前 SSH 用户无权访问 Docker。请执行 sudo usermod -aG docker <用户名> 后重新登录，或为该用户配置免密 sudo docker。",
+        );
+    }
 
     let hint = if lower.contains("no route to host") {
         "无法路由到目标主机。请确认工作站与目标机在同一局域网，并在 macOS「系统设置 → 隐私与安全性 → 本地网络」中允许本应用访问本地网络。"
@@ -291,5 +306,15 @@ mod tests {
             known_host_token("host.example.com", 2222),
             "[host.example.com]:2222"
         );
+    }
+
+    #[test]
+    fn docker_socket_permission_is_not_reported_as_ssh_auth_failure() {
+        let message = explain_ssh_failure(
+            "permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock",
+            Some("/tmp/key"),
+        );
+        assert!(message.contains("无权访问 Docker"));
+        assert!(!message.contains("目标机未授权当前密钥"));
     }
 }

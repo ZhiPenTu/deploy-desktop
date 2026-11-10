@@ -1,10 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 use tauri::Emitter;
 
-use super::remote_ssh::find_binary;
 use crate::core::compose::SEARCH_CANDIDATES;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,8 +141,8 @@ fn compose_failure_hint(stderr: &str) -> String {
     if first.contains("no such service") {
         return "Compose 清单中没有该服务，请确认所选服务与部署清单一致".to_string();
     }
-    if first.contains("permission denied") {
-        return "Docker 权限不足，请确认已允许当前用户访问 Docker".to_string();
+    if super::docker_setup::docker_socket_permission_denied(stderr) {
+        return "Docker 权限不足，请把当前用户加入 docker 用户组后重新登录".to_string();
     }
     "命令未执行成功，请检查部署目录与服务配置后重试".to_string()
 }
@@ -330,7 +328,7 @@ pub(crate) fn get_containers_status_blocking() -> Result<Vec<ContainerStatusItem
 
     for (c_name, svc_key) in target_containers {
         // 使用 docker inspect 获取详细信息
-        let output = Command::new(find_binary("docker"))
+        let output = super::docker_setup::docker_command()
             .args([
                 "inspect",
                 "--format",
@@ -348,7 +346,7 @@ pub(crate) fn get_containers_status_blocking() -> Result<Vec<ContainerStatusItem
                 let image = parts.get(2).unwrap_or(&"").to_string();
 
                 // 获取运行端口及简要状态字符串
-                let ps_out = Command::new(find_binary("docker"))
+                let ps_out = super::docker_setup::docker_command()
                     .args(["ps", "-a", "--filter", &format!("name=^{}$", c_name), "--format", "{{.Status}}\t{{.Ports}}"])
                     .output();
 
@@ -471,7 +469,7 @@ pub(crate) fn docker_compose_action_blocking(
         _ => return Err(format!("不支持的 Compose 操作: {}", action)),
     }
 
-    let output = Command::new(find_binary("docker"))
+    let output = super::docker_setup::docker_command()
         .args(&args)
         .current_dir(compose_file.parent().unwrap_or(root))
         .output();
@@ -485,7 +483,7 @@ pub(crate) fn docker_compose_action_blocking(
                 if action == "up" {
                     let containers = artifact_containers();
                     if !containers.is_empty() {
-                        match Command::new(find_binary("docker"))
+                        match super::docker_setup::docker_command()
                             .arg("restart")
                             .args(&containers)
                             .output()
@@ -548,7 +546,7 @@ pub async fn get_service_logs(container_name: String, tail: u32) -> Result<Strin
 }
 
 pub(crate) fn get_service_logs_blocking(container_name: String, tail: u32) -> Result<String, String> {
-    let output = Command::new(find_binary("docker"))
+    let output = super::docker_setup::docker_command()
         .args(["logs", "--tail", &tail.to_string(), &container_name])
         .output();
 
@@ -565,6 +563,7 @@ pub(crate) fn get_service_logs_blocking(container_name: String, tail: u32) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_root(name: &str) -> std::path::PathBuf {

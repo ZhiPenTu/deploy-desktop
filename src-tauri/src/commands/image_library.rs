@@ -665,13 +665,8 @@ pub(super) fn docker_failure(stderr: &str) -> String {
     if text.is_empty() {
         return "Docker 命令执行失败，未返回错误信息".to_string();
     }
-    let lower = text.to_lowercase();
-    if lower.contains("cannot connect to the docker daemon")
-        || lower.contains("is the docker daemon running")
-        || lower.contains("permission denied while trying to connect")
-        || lower.contains("error during connect")
-    {
-        return format!("Docker 服务不可用，请确认 Docker 已启动且当前用户可访问 Docker。{text}");
+    if let Some(hint) = super::docker_setup::docker_failure_hint(text) {
+        return hint.to_string();
     }
     format!("Docker 命令执行失败：{text}")
 }

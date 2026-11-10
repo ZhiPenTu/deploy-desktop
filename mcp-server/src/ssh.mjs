@@ -6,7 +6,7 @@ import { DeployError } from './errors.mjs';
 import { commandExists, findBinary, requireBinary, run } from './exec.mjs';
 import { activeProject, loadConnections } from './projects.mjs';
 import { expandHome, shellQuote } from './util.mjs';
-import { BASH_STDIN, stdinProgram, bashCommand, transferScript } from './shell.mjs';
+import { BASH_STDIN, stdinProgram, remoteProgram, bashCommand, transferScript } from './shell.mjs';
 
 const DEFAULT_KEY_CANDIDATES = ['id_ed25519', 'id_rsa', 'id_ecdsa'];
 
@@ -129,7 +129,7 @@ export function buildSshArgs(hostConfig, extra = []) {
 export async function runRemote(hostConfig, script, options = {}) {
   const ssh = requireBinary('ssh');
   const result = await run(ssh, buildSshArgs(hostConfig, [BASH_STDIN]), {
-    input: stdinProgram(script),
+    input: remoteProgram(script),
     timeoutMs: options.timeoutMs ?? 10 * 60 * 1000,
     maxOutputBytes: options.maxOutputBytes,
     onStdout: options.onStdout,
