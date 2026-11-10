@@ -76,6 +76,8 @@ macOS 使用覆盖式原生标题栏并隐藏重复的窗口标题，保留系�
 
 执行 SSH、Docker 等外部进程的检查入口使用异步命令，通过 `commands/blocking.rs` 将同步实现移到阻塞线程池，禁止在桌面主线程中等待外部进程。内部同步调用继续使用对应的 `_blocking` 函数；已有异步部署执行器保留原有调度方式。
 
+本机 Docker 调用统一通过 `commands/docker_setup.rs` 的 `docker_command()` / `docker_compose_command()` 构造，自动补齐 Docker Desktop、OrbStack 与凭据助手所在目录，不再直接使用 `Command::new("docker")`。远程脚本由 `remote_ssh/client.rs` 和 MCP 的 `runRemote` 统一注入 `shell/docker.sh`：首次调用 `docker` 时探测当前用户权限，权限不足且存在免密 `sudo` 时自动降级；确认是 socket 权限问题时追加可操作提示。新增脚本继续按普通 `docker` 命令书写，不要自行拼接 `sudo` 或另建调用入口。
+
 `npm run check:commands` 会扫描全部 `#[tauri::command]`：命令注册、进度事件发射点和同步命令体一并检查。同步命令体内出现 `Command::new`、`reqwest::blocking`、SSH 脚本执行或 TCP 连接会直接报错，新增命令需先包装为异步入口。
 
 ## 本机配置与文件写入

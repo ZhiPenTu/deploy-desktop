@@ -212,7 +212,16 @@ else
   echo "COMPOSE_FILE="
 fi
 if command -v docker >/dev/null 2>&1; then echo "DOCKER=yes"; else echo "DOCKER=no"; fi
-if docker info >/dev/null 2>&1; then echo "DOCKER_RUNNING=yes"; else echo "DOCKER_RUNNING=no"; fi
+if docker info >/dev/null 2>&1; then
+  echo "DOCKER_RUNNING=yes"
+  echo "DOCKER_PERMISSION=ok"
+elif docker info 2>&1 | grep -qi 'permission denied'; then
+  echo "DOCKER_RUNNING=no"
+  echo "DOCKER_PERMISSION=denied"
+else
+  echo "DOCKER_RUNNING=no"
+  echo "DOCKER_PERMISSION=unknown"
+fi
 if docker compose version >/dev/null 2>&1; then echo "COMPOSE=yes"; elif command -v docker-compose >/dev/null 2>&1; then echo "COMPOSE=yes"; else echo "COMPOSE=no"; fi
 artifact() {{
   local idx=$1
@@ -461,6 +470,10 @@ pub(super) fn inspect_remote_deployment_inner(
         .get("DOCKER_RUNNING")
         .map(|v| v == "yes")
         .unwrap_or(false);
+    let docker_permission_denied = flags
+        .get("DOCKER_PERMISSION")
+        .map(|v| v == "denied")
+        .unwrap_or(false);
     let compose_available = flags.get("COMPOSE").map(|v| v == "yes").unwrap_or(false);
 
     if containers.is_empty() {
@@ -493,7 +506,14 @@ pub(super) fn inspect_remote_deployment_inner(
     if !docker_available {
         issues.push("远程主机未安装 Docker".to_string());
     } else if !docker_running {
-        issues.push("Docker 守护进程未运行".to_string());
+        if docker_permission_denied {
+            issues.push(
+                "当前 SSH 用户无权访问 Docker，请把用户加入 docker 用户组后重新登录，或配置免密 sudo docker"
+                    .to_string(),
+            );
+        } else {
+            issues.push("Docker 守护进程未运行".to_string());
+        }
     }
     if !compose_available {
         issues.push("docker compose 不可用".to_string());
@@ -629,6 +649,7 @@ mod tests {
                 .lines()
                 .any(|line| line == format!("DEPLOY_DIR={}", deploy.display())));
             assert!(text.lines().any(|line| line == "COMPOSE_FILE=docker-compose.yml"));
+            assert!(text.lines().any(|line| line == "DOCKER_PERMISSION=ok"));
             assert!(text.lines().any(|line| line == "ART_0_EXISTS=yes"));
             fs::remove_dir_all(root).unwrap();
         }

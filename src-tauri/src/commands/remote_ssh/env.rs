@@ -81,7 +81,16 @@ echo "MEM_AVAILABLE_KB=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo 2>/dev/n
 echo "DISK_AVAILABLE_KB=$(df -k /home 2>/dev/null | awk 'NR==2{print $4}' || df -k / 2>/dev/null | awk 'NR==2{print $4}')"
 echo "DOCKER_VERSION=$(docker --version 2>/dev/null || true)"
 echo "COMPOSE_VERSION=$(docker compose version 2>/dev/null || docker-compose --version 2>/dev/null || true)"
-echo "DOCKER_RUNNING=$(docker info >/dev/null 2>&1 && echo yes || echo no)"
+if docker info >/dev/null 2>&1; then
+  echo "DOCKER_RUNNING=yes"
+  echo "DOCKER_PERMISSION=ok"
+elif docker info 2>&1 | grep -qi 'permission denied'; then
+  echo "DOCKER_RUNNING=no"
+  echo "DOCKER_PERMISSION=denied"
+else
+  echo "DOCKER_RUNNING=no"
+  echo "DOCKER_PERMISSION=unknown"
+fi
 for p in 8000 8001 18080 12881 6390 9092 20000; do
   if command -v ss >/dev/null 2>&1; then
     if ss -H -ltnu 2>/dev/null | awk '{print $5}' | grep -q ":$p$"; then
@@ -112,6 +121,7 @@ done
     let mut docker_version = None;
     let mut compose_version = None;
     let mut docker_running = false;
+    let mut docker_permission_denied = false;
     let mut port_states = std::collections::HashMap::new();
     let mut issues = Vec::new();
 
@@ -143,6 +153,7 @@ done
                 }
             }
             "DOCKER_RUNNING" => docker_running = value.trim() == "yes",
+            "DOCKER_PERMISSION" => docker_permission_denied = value.trim() == "denied",
             _ => {
                 if let Some(port) = key.strip_prefix("PORT_") {
                     port_states.insert(port.to_string(), value.trim().to_string());
@@ -157,7 +168,14 @@ done
     if !docker_installed {
         issues.push("远程机器未安装 Docker".to_string());
     } else if !docker_running {
-        issues.push("远程机器 Docker 服务未运行".to_string());
+        if docker_permission_denied {
+            issues.push(
+                "当前 SSH 用户无权访问 Docker，请把用户加入 docker 用户组后重新登录，或配置免密 sudo docker"
+                    .to_string(),
+            );
+        } else {
+            issues.push("远程机器 Docker 服务未运行".to_string());
+        }
     }
 
     if !compose_installed {

@@ -6,9 +6,10 @@ import nodeTest from 'node:test';
 // These operations execute on a Unix SSH target; Windows runs the portable executor tests.
 const test = (name, fn) => nodeTest(name, { skip: process.platform === 'win32' }, fn);
 import { run } from '../src/exec.mjs';
-import { bashScript, stdinProgram, transferScript, backupScript, applyScript } from '../src/shell.mjs';
+import { bashScript, stdinProgram, remoteProgram, transferScript, backupScript, applyScript } from '../src/shell.mjs';
 
 const local = (script, options = {}) => run('bash', ['--noprofile', '--norc', '-s'], { input: stdinProgram(script), timeoutMs: 5000, ...options });
+const remote = (script, options = {}) => run('/bin/bash', ['--noprofile', '--norc', '-s', '--'], { input: remoteProgram(script), timeoutMs: 5000, ...options });
 async function fixture(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'deploy-shell-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -26,6 +27,51 @@ test('Bash 参数按字面传递：引号、换行、命令替换和空值', asy
   assert.equal(result.code, 0, result.stderr);
   assert.deepEqual(result.stdout.split('\0').slice(0, -1), values);
   assert.throws(() => bashScript('true', ['bad\0value']), /无效字符/);
+});
+
+test('远程 Docker 入口优先使用当前用户权限', async (t) => {
+  const root = await fixture(t);
+  const bin = path.join(root, 'bin');
+  await fs.mkdir(bin);
+  await fs.writeFile(path.join(bin, 'docker'), '#!/bin/sh\necho "RUN:$*"\n', { mode: 0o755 });
+  const result = await remote('docker ps', { env: { PATH: bin } });
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /RUN:ps/);
+});
+
+test('远程 Docker 入口在权限不足时降级到免密 sudo', async (t) => {
+  const root = await fixture(t);
+  const bin = path.join(root, 'bin');
+  await fs.mkdir(bin);
+  await fs.writeFile(path.join(bin, 'docker'), `#!/bin/sh
+if [ "$1" = info ] && [ "\${DEPLOY_TEST_ROOT:-0}" != 1 ]; then
+  echo 'permission denied while trying to connect to the Docker daemon socket' >&2
+  exit 1
+fi
+echo "RUN:$*"
+`, { mode: 0o755 });
+  await fs.writeFile(path.join(bin, 'sudo'), `#!/bin/sh
+while [ "$1" = -n ] || [ "$1" = -E ]; do shift; done
+export DEPLOY_TEST_ROOT=1
+exec "$@"
+`, { mode: 0o755 });
+  const result = await remote('docker ps', { env: { PATH: bin } });
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /RUN:ps/);
+});
+
+test('远程 Docker 入口在 socket 权限不足时给出可操作提示', async (t) => {
+  const root = await fixture(t);
+  const bin = path.join(root, 'bin');
+  await fs.mkdir(bin);
+  await fs.writeFile(path.join(bin, 'docker'), `#!/bin/sh
+echo 'permission denied while trying to connect to the Docker daemon socket' >&2
+exit 1
+`, { mode: 0o755 });
+  await fs.writeFile(path.join(bin, 'sudo'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+  const result = await remote('docker ps', { env: { PATH: `${bin}:${process.env.PATH}` } });
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /Docker 权限不足/);
 });
 
 test('脚本中的读输入命令不会吞掉后续脚本', async () => {

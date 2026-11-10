@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::net::{TcpListener, UdpSocket};
 use std::process::Command;
 
-use super::remote_ssh::find_binary;
+use super::docker_setup::{docker_command, docker_compose_command};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortStatus {
@@ -61,7 +61,8 @@ pub(crate) fn check_local_env_blocking(target_dir: Option<String>) -> Result<Loc
     let disk_available_gb = get_disk_free_gb(&check_path);
 
     // 检测 Docker
-    let (docker_installed, docker_version, docker_running) = check_docker_status();
+    let (docker_installed, docker_version, docker_running, docker_permission_denied) =
+        check_docker_status();
     let (compose_installed, compose_version) = check_docker_compose_status();
 
     // 检测核心端口占用情况
@@ -83,7 +84,13 @@ pub(crate) fn check_local_env_blocking(target_dir: Option<String>) -> Result<Loc
     if !docker_installed {
         issues.push("未检测到 Docker 运行环境 (需执行离线安装 Docker)".to_string());
     } else if !docker_running {
-        issues.push("Docker 服务未处于运行状态 (需启动 dockerd / systemctl start docker)".to_string());
+        if docker_permission_denied {
+            issues.push("当前用户无权访问 Docker，请把用户加入 docker 用户组后重新登录".to_string());
+        } else {
+            issues.push(
+                "Docker 服务未处于运行状态 (需启动 dockerd / systemctl start docker)".to_string(),
+            );
+        }
     }
 
     if !compose_installed {
@@ -220,22 +227,31 @@ fn get_disk_free_gb(path: &str) -> f64 {
     0.0
 }
 
-fn check_docker_status() -> (bool, Option<String>, bool) {
-    let ver_res = Command::new(find_binary("docker")).arg("--version").output();
+fn check_docker_status() -> (bool, Option<String>, bool, bool) {
+    let ver_res = docker_command().arg("--version").output();
     if let Ok(out) = ver_res {
         if out.status.success() {
             let ver_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
             // 检测 daemon 是否运行
-            let ping_res = Command::new(find_binary("docker")).arg("info").output();
-            let is_running = ping_res.map(|o| o.status.success()).unwrap_or(false);
-            return (true, Some(ver_str), is_running);
+            let ping_res = docker_command().arg("info").output();
+            let (is_running, permission_denied) = match ping_res {
+                Ok(output) if output.status.success() => (true, false),
+                Ok(output) => (
+                    false,
+                    crate::commands::docker_setup::docker_socket_permission_denied(
+                        &String::from_utf8_lossy(&output.stderr),
+                    ),
+                ),
+                Err(_) => (false, false),
+            };
+            return (true, Some(ver_str), is_running, permission_denied);
         }
     }
-    (false, None, false)
+    (false, None, false, false)
 }
 
 fn check_docker_compose_status() -> (bool, Option<String>) {
-    let res = Command::new(find_binary("docker")).args(["compose", "version"]).output();
+    let res = docker_command().args(["compose", "version"]).output();
     if let Ok(out) = res {
         if out.status.success() {
             let ver_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -243,7 +259,7 @@ fn check_docker_compose_status() -> (bool, Option<String>) {
         }
     }
     // 兼容独立 docker-compose 命令
-    let res2 = Command::new(find_binary("docker-compose")).arg("--version").output();
+    let res2 = docker_compose_command().arg("--version").output();
     if let Ok(out) = res2 {
         if out.status.success() {
             let ver_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -277,7 +293,10 @@ fn check_port_availability(port: u16, proto: &str) -> (bool, Option<String>) {
 fn probe_port_occupant(port: u16) -> String {
     // 优先检查 docker ps 是否映射此端口
     let port_str = format!(":{}", port);
-    if let Ok(out) = Command::new(find_binary("docker")).args(["ps", "--format", "{{.Names}}\t{{.Ports}}"]).output() {
+    if let Ok(out) = docker_command()
+        .args(["ps", "--format", "{{.Names}}\t{{.Ports}}"])
+        .output()
+    {
         let text = String::from_utf8_lossy(&out.stdout);
         for line in text.lines() {
             if line.contains(&port_str) {

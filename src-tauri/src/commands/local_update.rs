@@ -11,7 +11,6 @@ use serde_json::Value;
 use tauri::Emitter;
 
 use super::bundle::{ArtifactRoot, Bundle, IMAGE_COMPONENT};
-use super::remote_ssh::find_binary;
 use super::remote_update::RemoteUpdateProgress;
 use crate::core::{backup, compose, path_guard, process};
 
@@ -592,7 +591,7 @@ fn build_plan(
 }
 
 fn docker_output(args: &[&str], purpose: &str) -> Result<String, String> {
-    let mut command = Command::new(find_binary("docker"));
+    let mut command = super::docker_setup::docker_command();
     command.args(args);
     let output = process::run(
         command,
@@ -607,6 +606,11 @@ fn docker_output(args: &[&str], purpose: &str) -> Result<String, String> {
         },
     )?;
     if !output.status.success() {
+        if let Some(hint) =
+            super::docker_setup::docker_failure_hint(&String::from_utf8_lossy(&output.stderr))
+        {
+            return Err(format!("{purpose}失败：{hint}"));
+        }
         return Err(format!(
             "{purpose}失败，请检查 Docker 状态、部署配置与目录权限"
         ));
@@ -650,7 +654,7 @@ fn compose_command(
     compose: &Path,
     action: &[&str],
 ) -> Result<(Command, Option<String>), String> {
-    let mut command = Command::new(find_binary("docker"));
+    let mut command = super::docker_setup::docker_command();
     command
         .arg("compose")
         .arg("--project-directory")

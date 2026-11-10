@@ -6,6 +6,10 @@ use std::time::Duration;
 
 use crate::core::process::{self, Input, Options};
 
+/// 远程脚本共用的 Docker 访问入口：统一处理权限探测与免密 sudo 降级。
+/// 静态脚本，不拼接任何外部输入；由 `remote_ssh::client` 注入到 SSH 脚本。
+pub(crate) const REMOTE_DOCKER_PREAMBLE: &str = include_str!("../../../shell/docker.sh");
+
 #[derive(Debug, Serialize)]
 pub struct DockerInstallation {
     pub os: String,
@@ -90,11 +94,19 @@ fn docker_locations(
             let mut roots = vec![PathBuf::from("/Applications/Docker.app")];
             if let Some(home) = home {
                 roots.push(home.join("Applications/Docker.app"));
+                binaries.push(home.join(".orbstack/bin/docker"));
+                markers.push(home.join("Applications/OrbStack.app/Contents/Info.plist"));
             }
             for root in roots {
                 binaries.push(root.join("Contents/Resources/bin/docker"));
                 markers.push(root.join("Contents/Info.plist"));
             }
+            binaries.push(PathBuf::from(
+                "/Applications/OrbStack.app/Contents/MacOS/xbin/docker",
+            ));
+            markers.push(PathBuf::from(
+                "/Applications/OrbStack.app/Contents/Info.plist",
+            ));
         } else if os == "linux" {
             binaries.push(PathBuf::from("/opt/docker-desktop/bin/docker"));
             markers.push(PathBuf::from("/opt/docker-desktop/bin/com.docker.backend"));
@@ -216,6 +228,80 @@ pub(crate) fn docker_command() -> Command {
     command
 }
 
+fn compose_binary_candidates() -> Vec<PathBuf> {
+    let name = if cfg!(windows) {
+        "docker-compose.exe"
+    } else {
+        "docker-compose"
+    };
+    let mut candidates = Vec::new();
+    if let Some(directory) = find_docker_binary()
+        .and_then(|binary| binary.parent().map(Path::to_path_buf))
+    {
+        candidates.push(directory.join(name));
+    }
+    for directory in ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin"] {
+        candidates.push(Path::new(directory).join(name));
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        candidates.extend(std::env::split_paths(&path).map(|directory| directory.join(name)));
+    }
+    candidates
+}
+
+/// 独立的 `docker-compose` 二进制（旧版 Compose）。优先使用 `docker compose` 插件，
+/// 这里只在插件不可用时作为回退入口，同样补齐凭据助手所需的 PATH。
+pub(crate) fn docker_compose_command() -> Command {
+    let binary = compose_binary_candidates()
+        .into_iter()
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| {
+            PathBuf::from(if cfg!(windows) {
+                "docker-compose.exe"
+            } else {
+                "docker-compose"
+            })
+        });
+    let mut command = Command::new(binary);
+    if let Some(path) = docker_path_env() {
+        command.env("PATH", path);
+    }
+    command
+}
+
+/// 判断错误输出是否为 Docker socket 权限不足，避免把文件权限问题误判为 Docker 权限。
+pub(crate) fn docker_socket_permission_denied(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    (lower.contains("permission denied")
+        && (lower.contains("docker.sock")
+            || lower.contains("docker daemon")
+            || lower.contains("docker_engine")))
+        || (lower.contains("access is denied") && lower.contains("docker_engine"))
+}
+
+/// 把 Docker CLI 的常见失败翻译成用户可执行的提示；未识别时返回 None。
+pub(crate) fn docker_failure_hint(stderr: &str) -> Option<&'static str> {
+    if docker_socket_permission_denied(stderr) {
+        return Some(
+            "当前用户无权访问 Docker。请把用户加入 docker 用户组后重新登录，或在系统设置中允许本应用访问 Docker。",
+        );
+    }
+    let lower = stderr.to_ascii_lowercase();
+    if lower.contains("cannot connect to the docker daemon")
+        || lower.contains("is the docker daemon running")
+        || lower.contains("error during connect")
+    {
+        return Some("无法连接 Docker 服务，请先启动 Docker Desktop 或 Docker 服务后重试。");
+    }
+    if lower.contains("docker: command not found")
+        || lower.contains("docker: not found")
+        || (lower.contains("no such file or directory") && lower.contains("docker"))
+    {
+        return Some("未找到 Docker 命令，请先安装 Docker 并确认已加入 PATH。");
+    }
+    None
+}
+
 fn inspect_installation(
     os: &str,
     binary: Option<&Path>,
@@ -322,7 +408,12 @@ mod tests {
             "/Applications/Docker.app/Contents/Resources/bin/docker"
         )));
         assert!(binaries.contains(&home.join(".docker/bin/docker")));
+        assert!(binaries.contains(&home.join(".orbstack/bin/docker")));
+        assert!(binaries.contains(&PathBuf::from(
+            "/Applications/OrbStack.app/Contents/MacOS/xbin/docker"
+        )));
         assert!(markers.contains(&home.join("Applications/Docker.app/Contents/Info.plist")));
+        assert!(markers.contains(&home.join("Applications/OrbStack.app/Contents/Info.plist")));
         let (binaries, _) = docker_locations("linux", Some(home), None, None);
         assert!(binaries.contains(&PathBuf::from("/usr/bin/docker")));
         assert!(binaries.contains(&PathBuf::from("/opt/docker-desktop/bin/docker")));
@@ -336,6 +427,93 @@ mod tests {
             assert!(!installation.installed);
             assert!(installation.version.is_none());
         }
+    }
+
+    #[test]
+    fn docker_failure_hint_maps_permission_and_daemon_errors() {
+        assert!(docker_failure_hint(
+            "permission denied while trying to connect to the Docker daemon socket"
+        )
+        .unwrap()
+        .contains("docker 用户组"));
+        assert!(docker_failure_hint("Cannot connect to the Docker daemon at unix:///var/run/docker.sock")
+            .unwrap()
+            .contains("启动 Docker"));
+        assert!(docker_failure_hint("some unrelated error").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_preamble_prefers_direct_docker_access() {
+        let directory = mock_runner_dir("direct");
+        write_script(&directory.join("docker"), "echo \"RUN:$*\"");
+        let output = run_remote_preamble(&directory, "docker ps");
+        std::fs::remove_dir_all(&directory).ok();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("RUN:ps"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_preamble_falls_back_to_passwordless_sudo() {
+        let directory = mock_runner_dir("sudo");
+        write_script(
+            &directory.join("docker"),
+            "if [ \"$1\" = info ] && [ \"${DEPLOY_TEST_ROOT:-0}\" != 1 ]; then\n  echo 'permission denied while trying to connect to the Docker daemon socket' >&2\n  exit 1\nfi\necho \"RUN:$*\"",
+        );
+        write_script(
+            &directory.join("sudo"),
+            "while [ \"$1\" = -n ] || [ \"$1\" = -E ]; do shift; done\nexport DEPLOY_TEST_ROOT=1\nexec \"$@\"",
+        );
+        let output = run_remote_preamble(&directory, "docker ps");
+        std::fs::remove_dir_all(&directory).ok();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("RUN:ps"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_preamble_explains_missing_socket_permission() {
+        let directory = mock_runner_dir("denied");
+        write_script(
+            &directory.join("docker"),
+            "echo 'permission denied while trying to connect to the Docker daemon socket' >&2\nexit 1",
+        );
+        write_script(&directory.join("sudo"), "exit 1");
+        let output = run_remote_preamble_with_fallback_path(&directory, "docker ps");
+        std::fs::remove_dir_all(&directory).ok();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("Docker 权限不足"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_preamble_keeps_version_working_without_socket_permission() {
+        let directory = mock_runner_dir("version");
+        write_script(
+            &directory.join("docker"),
+            "if [ \"$1\" = --version ]; then\n  echo 'Docker version 27.0.0'\n  exit 0\nfi\necho 'permission denied while trying to connect to the Docker daemon socket' >&2\nexit 1",
+        );
+        write_script(&directory.join("sudo"), "exit 1");
+        let output = run_remote_preamble_with_fallback_path(&directory, "docker --version");
+        std::fs::remove_dir_all(&directory).ok();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("Docker version 27.0.0"));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("Docker 权限不足"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_preamble_does_not_shadow_missing_docker() {
+        let directory = mock_runner_dir("missing");
+        let output = run_remote_preamble(
+            &directory,
+            "if command -v docker >/dev/null 2>&1; then echo FOUND; else echo MISSING; fi",
+        );
+        std::fs::remove_dir_all(&directory).ok();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("MISSING"));
     }
 
     #[test]
@@ -370,6 +548,69 @@ mod tests {
         let result = inspect_installation("linux", Some(&binary), &[]);
         std::fs::remove_dir_all(binary.parent().unwrap()).unwrap();
         assert!(result.unwrap_err().contains("无法读取版本"));
+    }
+
+    #[cfg(unix)]
+    fn mock_runner_dir(name: &str) -> PathBuf {
+        let directory = std::env::temp_dir().join(format!(
+            "docker-runner-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+
+    #[cfg(unix)]
+    fn write_script(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn run_remote_preamble(path: &Path, script: &str) -> std::process::Output {
+        run_remote_preamble_with_path(path, script, false)
+    }
+
+    #[cfg(unix)]
+    fn run_remote_preamble_with_fallback_path(path: &Path, script: &str) -> std::process::Output {
+        run_remote_preamble_with_path(path, script, true)
+    }
+
+    #[cfg(unix)]
+    fn run_remote_preamble_with_path(
+        path: &Path,
+        script: &str,
+        keep_system_path: bool,
+    ) -> std::process::Output {
+        let search_path = if keep_system_path {
+            std::env::join_paths(
+                std::iter::once(path.to_path_buf()).chain(
+                    std::env::var_os("PATH")
+                        .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
+                        .unwrap_or_default(),
+                ),
+            )
+            .unwrap()
+        } else {
+            path.as_os_str().to_owned()
+        };
+        let mut command = Command::new("/bin/bash");
+        command.args(["--noprofile", "--norc", "-s", "--"]);
+        command.env("PATH", search_path);
+        process::run(
+            command,
+            Input::Bytes(format!("{REMOTE_DOCKER_PREAMBLE}\n{script}\n").into_bytes()),
+            Options {
+                timeout: Duration::from_secs(20),
+                max_output: 64 * 1024,
+            },
+        )
+        .unwrap()
     }
 
     #[cfg(unix)]
