@@ -209,7 +209,7 @@ docker --version
     let group_note = if group_added {
         "；已将当前用户加入 docker 用户组，重新登录后生效"
     } else if group_skipped {
-        "；当前以 root 身份执行，无需加入 docker 用户组"
+        "；已创建 docker 用户组，如后续使用非 root 用户部署，请将该用户加入 docker 用户组"
     } else {
         "；未能自动配置 docker 用户组，如提示权限不足请手动加入"
     };

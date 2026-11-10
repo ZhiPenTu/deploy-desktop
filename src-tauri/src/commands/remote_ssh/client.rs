@@ -228,8 +228,8 @@ pub(crate) fn explain_ssh_failure(stderr: &str, key: Option<&str>) -> String {
     let lower = raw.to_lowercase();
 
     if crate::commands::docker_setup::docker_socket_permission_denied(raw) {
-        return format!(
-            "连接失败：当前 SSH 用户无权访问 Docker。请执行 sudo usermod -aG docker <用户名> 后重新登录，或为该用户配置免密 sudo docker。\n原始错误: {raw}"
+        return String::from(
+            "Docker 访问失败：当前 SSH 用户无权访问 Docker。请执行 sudo usermod -aG docker <用户名> 后重新登录，或为该用户配置免密 sudo docker。",
         );
     }
 

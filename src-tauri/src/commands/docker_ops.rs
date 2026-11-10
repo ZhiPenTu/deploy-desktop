@@ -141,7 +141,7 @@ fn compose_failure_hint(stderr: &str) -> String {
     if first.contains("no such service") {
         return "Compose 清单中没有该服务，请确认所选服务与部署清单一致".to_string();
     }
-    if first.contains("permission denied") {
+    if super::docker_setup::docker_socket_permission_denied(stderr) {
         return "Docker 权限不足，请把当前用户加入 docker 用户组后重新登录".to_string();
     }
     "命令未执行成功，请检查部署目录与服务配置后重试".to_string()

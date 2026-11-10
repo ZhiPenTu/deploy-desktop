@@ -465,10 +465,47 @@ mod tests {
             &directory.join("sudo"),
             "while [ \"$1\" = -n ] || [ \"$1\" = -E ]; do shift; done\nexport DEPLOY_TEST_ROOT=1\nexec \"$@\"",
         );
-        let output = run_remote_preamble(&directory, "docker ps");
+        let output = run_remote_preamble_with_fallback_path(&directory, "docker ps");
         std::fs::remove_dir_all(&directory).ok();
         assert!(output.status.success());
         assert!(String::from_utf8_lossy(&output.stdout).contains("RUN:ps"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_preamble_does_not_fall_back_when_daemon_is_unreachable() {
+        let directory = mock_runner_dir("unreachable");
+        write_script(
+            &directory.join("docker"),
+            "echo 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock' >&2\nexit 1",
+        );
+        write_script(&directory.join("sudo"), "echo SUDO-CALLED\nexit 0");
+        let output = run_remote_preamble_with_fallback_path(&directory, "docker ps");
+        std::fs::remove_dir_all(&directory).ok();
+        assert!(!output.status.success());
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("SUDO-CALLED"));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("Docker 权限不足"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_preamble_passes_docker_config_to_sudo() {
+        let directory = mock_runner_dir("sudo-env");
+        write_script(
+            &directory.join("docker"),
+            "if [ \"$1\" = info ] && [ \"${DEPLOY_TEST_ROOT:-0}\" != 1 ]; then\n  echo 'permission denied while trying to connect to the Docker daemon socket' >&2\n  exit 1\nfi\necho \"RUN:$*\"",
+        );
+        write_script(
+            &directory.join("sudo"),
+            "while [ \"$1\" = -n ] || [ \"$1\" = -E ]; do shift; done\necho \"SUDO:$*\"\nexport DEPLOY_TEST_ROOT=1\nexec \"$@\"",
+        );
+        let output = run_remote_preamble_with_fallback_path(
+            &directory,
+            "DOCKER_CONFIG=/tmp/deploy-test\nexport DOCKER_CONFIG\ndocker ps",
+        );
+        std::fs::remove_dir_all(&directory).ok();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("DOCKER_CONFIG=/tmp/deploy-test"));
     }
 
     #[cfg(unix)]
