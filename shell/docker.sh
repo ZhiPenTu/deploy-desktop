@@ -17,7 +17,9 @@ if command -v docker >/dev/null 2>&1; then
     deploy_env=("DEPLOY_DOCKER_SUDO=1")
     if [ -n "${DOCKER_HOST:-}" ]; then deploy_env+=("DOCKER_HOST=$DOCKER_HOST"); fi
     if [ -n "${DOCKER_CONTEXT:-}" ]; then deploy_env+=("DOCKER_CONTEXT=$DOCKER_CONTEXT"); fi
-    if [ -n "${DOCKER_CONFIG:-}" ]; then deploy_env+=("DOCKER_CONFIG=$DOCKER_CONFIG"); fi
+    if [ -n "${HOME:-}" ]; then
+      deploy_env+=("DOCKER_CONFIG=${DOCKER_CONFIG:-$HOME/.docker}")
+    fi
     command sudo -n env "${deploy_env[@]}" "$@"
   }
 
@@ -29,17 +31,25 @@ if command -v docker >/dev/null 2>&1; then
       DEPLOY_DOCKER_MODE=direct
       return 0
     fi
-    # 只有确认是 socket 权限问题时才降级，避免把命令切到另一套 Docker 上执行。
+    # 只有确认是默认 socket 的权限问题时才降级，避免把命令切到另一套 Docker 上执行。
     case "$DEPLOY_DOCKER_PROBE" in
-      *[Pp]ermission\ denied*[Dd]ocker*|*[Dd]ocker*[Pp]ermission\ denied*)
+      *[Pp]ermission\ denied*docker.sock*|\
+      *[Pp]ermission\ denied*[Dd]ocker\ daemon*|\
+      *[Pp]ermission\ denied*docker_engine*)
         DEPLOY_DOCKER_DENIED=1
-        if command -v sudo >/dev/null 2>&1 \
-          && deploy_docker_sudo "$DEPLOY_DOCKER_BIN" info >/dev/null 2>&1; then
-          DEPLOY_DOCKER_MODE=sudo
-          return 0
-        fi
         ;;
     esac
+    if [ "$DEPLOY_DOCKER_DENIED" = 1 ]; then
+      case "$DEPLOY_DOCKER_PROBE" in
+        *"/var/run/docker.sock"*|*docker_engine*)
+          if command -v sudo >/dev/null 2>&1 \
+            && deploy_docker_sudo "$DEPLOY_DOCKER_BIN" info >/dev/null 2>&1; then
+            DEPLOY_DOCKER_MODE=sudo
+            return 0
+          fi
+          ;;
+      esac
+    fi
     DEPLOY_DOCKER_MODE=direct
     return 1
   }

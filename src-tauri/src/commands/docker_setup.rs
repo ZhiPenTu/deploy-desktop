@@ -459,16 +459,17 @@ mod tests {
         let directory = mock_runner_dir("sudo");
         write_script(
             &directory.join("docker"),
-            "if [ \"$1\" = info ] && [ \"${DEPLOY_TEST_ROOT:-0}\" != 1 ]; then\n  echo 'permission denied while trying to connect to the Docker daemon socket' >&2\n  exit 1\nfi\necho \"RUN:$*\"",
+            "if [ \"$1\" = info ] && [ \"${DEPLOY_TEST_ROOT:-0}\" != 1 ]; then\n  echo 'permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock' >&2\n  exit 1\nfi\necho \"RUN:$*\"",
         );
         write_script(
             &directory.join("sudo"),
-            "while [ \"$1\" = -n ] || [ \"$1\" = -E ]; do shift; done\nexport DEPLOY_TEST_ROOT=1\nexec \"$@\"",
+            "while [ \"$1\" = -n ] || [ \"$1\" = -E ]; do shift; done\necho \"SUDO:$*\"\nexport DEPLOY_TEST_ROOT=1\nexec \"$@\"",
         );
         let output = run_remote_preamble_with_fallback_path(&directory, "docker ps");
         std::fs::remove_dir_all(&directory).ok();
         assert!(output.status.success());
         assert!(String::from_utf8_lossy(&output.stdout).contains("RUN:ps"));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("DOCKER_CONFIG="));
     }
 
     #[cfg(unix)]
@@ -489,11 +490,27 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn remote_preamble_does_not_switch_daemons_for_rootless_socket() {
+        let directory = mock_runner_dir("rootless");
+        write_script(
+            &directory.join("docker"),
+            "echo 'permission denied while trying to connect to the Docker daemon socket at unix:///run/user/1000/docker.sock' >&2\nexit 1",
+        );
+        write_script(&directory.join("sudo"), "echo SUDO-CALLED\nexit 0");
+        let output = run_remote_preamble_with_fallback_path(&directory, "docker ps");
+        std::fs::remove_dir_all(&directory).ok();
+        assert!(!output.status.success());
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("SUDO-CALLED"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("Docker 权限不足"));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn remote_preamble_passes_docker_config_to_sudo() {
         let directory = mock_runner_dir("sudo-env");
         write_script(
             &directory.join("docker"),
-            "if [ \"$1\" = info ] && [ \"${DEPLOY_TEST_ROOT:-0}\" != 1 ]; then\n  echo 'permission denied while trying to connect to the Docker daemon socket' >&2\n  exit 1\nfi\necho \"RUN:$*\"",
+            "if [ \"$1\" = info ] && [ \"${DEPLOY_TEST_ROOT:-0}\" != 1 ]; then\n  echo 'permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock' >&2\n  exit 1\nfi\necho \"RUN:$*\"",
         );
         write_script(
             &directory.join("sudo"),
@@ -514,7 +531,7 @@ mod tests {
         let directory = mock_runner_dir("denied");
         write_script(
             &directory.join("docker"),
-            "echo 'permission denied while trying to connect to the Docker daemon socket' >&2\nexit 1",
+            "echo 'permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock' >&2\nexit 1",
         );
         write_script(&directory.join("sudo"), "exit 1");
         let output = run_remote_preamble_with_fallback_path(&directory, "docker ps");
@@ -529,7 +546,7 @@ mod tests {
         let directory = mock_runner_dir("version");
         write_script(
             &directory.join("docker"),
-            "if [ \"$1\" = --version ]; then\n  echo 'Docker version 27.0.0'\n  exit 0\nfi\necho 'permission denied while trying to connect to the Docker daemon socket' >&2\nexit 1",
+            "if [ \"$1\" = --version ]; then\n  echo 'Docker version 27.0.0'\n  exit 0\nfi\necho 'permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock' >&2\nexit 1",
         );
         write_script(&directory.join("sudo"), "exit 1");
         let output = run_remote_preamble_with_fallback_path(&directory, "docker --version");

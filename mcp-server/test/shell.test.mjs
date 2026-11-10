@@ -45,19 +45,21 @@ test('远程 Docker 入口在权限不足时降级到免密 sudo', async (t) => 
   await fs.mkdir(bin);
   await fs.writeFile(path.join(bin, 'docker'), `#!/bin/sh
 if [ "$1" = info ] && [ "\${DEPLOY_TEST_ROOT:-0}" != 1 ]; then
-  echo 'permission denied while trying to connect to the Docker daemon socket' >&2
+  echo 'permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock' >&2
   exit 1
 fi
 echo "RUN:$*"
 `, { mode: 0o755 });
   await fs.writeFile(path.join(bin, 'sudo'), `#!/bin/sh
 while [ "$1" = -n ] || [ "$1" = -E ]; do shift; done
+echo "SUDO:$*"
 export DEPLOY_TEST_ROOT=1
 exec "$@"
 `, { mode: 0o755 });
   const result = await remote('docker ps', { env: { PATH: `${bin}:${process.env.PATH}` } });
   assert.equal(result.code, 0, result.stderr);
   assert.match(result.stdout, /RUN:ps/);
+  assert.match(result.stdout, /DOCKER_CONFIG=/);
 });
 
 test('远程 Docker 入口在守护进程不可达时不降级到 sudo', async (t) => {
@@ -81,7 +83,7 @@ test('远程 Docker 入口通过 sudo 保留 DOCKER_CONFIG', async (t) => {
   await fs.mkdir(bin);
   await fs.writeFile(path.join(bin, 'docker'), `#!/bin/sh
 if [ "$1" = info ] && [ "\${DEPLOY_TEST_ROOT:-0}" != 1 ]; then
-  echo 'permission denied while trying to connect to the Docker daemon socket' >&2
+  echo 'permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock' >&2
   exit 1
 fi
 echo "RUN:$*"
@@ -104,12 +106,27 @@ test('远程 Docker 入口在 socket 权限不足时给出可操作提示', asyn
   const bin = path.join(root, 'bin');
   await fs.mkdir(bin);
   await fs.writeFile(path.join(bin, 'docker'), `#!/bin/sh
-echo 'permission denied while trying to connect to the Docker daemon socket' >&2
+echo 'permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock' >&2
 exit 1
 `, { mode: 0o755 });
   await fs.writeFile(path.join(bin, 'sudo'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
   const result = await remote('docker ps', { env: { PATH: `${bin}:${process.env.PATH}` } });
   assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /Docker 权限不足/);
+});
+
+test('远程 Docker 入口不会为 rootless socket 切换到 root daemon', async (t) => {
+  const root = await fixture(t);
+  const bin = path.join(root, 'bin');
+  await fs.mkdir(bin);
+  await fs.writeFile(path.join(bin, 'docker'), `#!/bin/sh
+echo 'permission denied while trying to connect to the Docker daemon socket at unix:///run/user/1000/docker.sock' >&2
+exit 1
+`, { mode: 0o755 });
+  await fs.writeFile(path.join(bin, 'sudo'), '#!/bin/sh\necho SUDO-CALLED\nexit 0\n', { mode: 0o755 });
+  const result = await remote('docker ps', { env: { PATH: `${bin}:${process.env.PATH}` } });
+  assert.notEqual(result.code, 0);
+  assert.doesNotMatch(result.stdout, /SUDO-CALLED/);
   assert.match(result.stderr, /Docker 权限不足/);
 });
 

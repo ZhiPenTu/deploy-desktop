@@ -84,7 +84,7 @@ echo "COMPOSE_VERSION=$(docker compose version 2>/dev/null || docker-compose --v
 if docker info >/dev/null 2>&1; then
   echo "DOCKER_RUNNING=yes"
   echo "DOCKER_PERMISSION=ok"
-elif docker info 2>&1 | grep -Eqi 'permission denied.*docker|docker.*permission denied'; then
+elif docker info 2>&1 | grep -Eqi 'permission denied.*(docker\.sock|docker daemon|docker_engine)|(docker\.sock|docker daemon|docker_engine).*permission denied'; then
   echo "DOCKER_RUNNING=no"
   echo "DOCKER_PERMISSION=denied"
 else
