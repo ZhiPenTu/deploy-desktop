@@ -25,6 +25,9 @@ jobs:
 
       - name: Install npm dependencies
         run: npm ci
+        env:
+          npm_config_registry: https://registry.npmjs.org/
+          npm_config_replace_registry_host: always
 
       - name: Install Chromium
         run: npx playwright install --with-deps chromium
@@ -96,6 +99,9 @@ jobs:
 
       - name: Install npm dependencies
         run: npm ci
+        env:
+          npm_config_registry: https://registry.npmjs.org/
+          npm_config_replace_registry_host: always
 
       - name: Check UI text
         run: npm run check:ui-text
