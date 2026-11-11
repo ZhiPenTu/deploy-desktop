@@ -628,10 +628,12 @@ export function useDeploymentWizard(config, emit) {
     preflighting.value = true;
     operationError.value = '';
     preflightPassed.value = false;
+    let context;
     try {
-      await preflight(executionContext());
+      context = executionContext();
+      await preflight(context);
     } catch (error) {
-      operationError.value = failureText(error, '预检');
+      operationError.value = failureText(error, '预检', { remote: context?.remote });
       diagnostics.value = safeText(error);
     } finally {
       preflighting.value = false;
@@ -648,7 +650,7 @@ export function useDeploymentWizard(config, emit) {
       context = executionContext();
       await preflight(context);
     } catch (error) {
-      operationError.value = failureText(error, '预检');
+      operationError.value = failureText(error, '预检', { remote: context?.remote });
       diagnostics.value = safeText(error);
       return;
     } finally {
@@ -750,7 +752,7 @@ export function useDeploymentWizard(config, emit) {
         success: false,
         message: '执行未完成，请查看执行详情，处理后重新比对。'
       };
-      operationError.value = failureText(error, action);
+      operationError.value = failureText(error, action, { remote: context.remote });
       diagnostics.value += `\n${safeText(error.result?.output || '')}\n${safeText(error)}`;
       phase.value = '';
     } finally {
