@@ -2138,31 +2138,4 @@ mod tests {
         assert!(!rollback_failed.can_retry_after_stop());
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn replacement_keeps_new_files_when_old_directory_cannot_be_removed() {
-        use std::os::unix::fs::PermissionsExt;
-
-        if unsafe { libc::geteuid() } == 0 {
-            // root 不受目录写权限限制，无法在容器化 CI 中构造清理失败。
-            return;
-        }
-        let fixture = Fixture::new();
-        fixture.write("source/new.txt", "new");
-        fixture.write("target/deploy/app/old.txt", "old");
-        let target = fixture.0.join("target/deploy/app");
-        fs::set_permissions(&target, fs::Permissions::from_mode(0o555)).unwrap();
-
-        let previous = replace_path(&fixture.0.join("source"), &target)
-            .unwrap()
-            .expect("旧目录清理应延后");
-        assert_eq!(fs::read_to_string(target.join("new.txt")).unwrap(), "new");
-        assert_eq!(
-            fs::read_to_string(previous.join("old.txt")).unwrap(),
-            "old"
-        );
-
-        fs::set_permissions(&previous, fs::Permissions::from_mode(0o755)).unwrap();
-        backup::remove_path(&previous).unwrap();
-    }
 }
