@@ -181,9 +181,12 @@ pub(crate) fn compose_failure_message(stderr: &str) -> String {
             "Compose 清单中的挂载路径在本机不存在或不可访问，请确认交付包已完整分发到部署目录后重试",
         );
     }
-    if contains("mount denied") || (contains("source path") && contains("\\\\?\\")) {
+    if contains("mount denied")
+        || contains("mounts denied")
+        || (contains("source path") && contains("\\\\?\\"))
+    {
         return String::from(
-            "Docker 无法挂载部署目录：路径带有 Windows 扩展前缀或格式无效。请确认部署目录为本地绝对路径后重试",
+            "Docker 无法挂载部署目录，请确认部署目录位于本机磁盘目录，避免使用网络共享目录后重试",
         );
     }
     let hint = compose_failure_hint(&lines.join("\n"));
@@ -648,7 +651,11 @@ mod tests {
         let verbatim = compose_failure_message(
             "Error response from daemon: mount denied: the source path \\\\?\\D:\\400mbushu\\deploy\\site is not a valid Windows path",
         );
-        assert!(verbatim.contains("Windows 扩展前缀"), "{verbatim}");
+        assert!(verbatim.contains("无法挂载部署目录"), "{verbatim}");
+        assert!(!verbatim.contains("扩展前缀"), "{verbatim}");
+
+        let plural = compose_failure_message("Mounts denied: path D:\\deploy is not shared");
+        assert!(plural.contains("无法挂载部署目录"), "{plural}");
 
         let other = compose_failure_message("unknown flag: --remove-orphans");
         assert!(other.contains("unknown flag"));

@@ -198,3 +198,44 @@ test('error objects do not leak the Error prefix into user-facing text', () => {
   assert.equal(safeText(new Error('部署失败')), '部署失败');
   assert.equal(safeText('  kafka:\n    image: demo'), '  kafka:\n    image: demo');
 });
+
+test('mount failures are reported as mount problems instead of permission problems', () => {
+  const raw =
+    'Compose 操作失败：Docker 无法挂载部署目录，请确认部署目录位于本机磁盘目录，避免使用网络共享目录后重试\n' +
+    '原始输出：Container tt-net-manager-gateway-shard-1 Recreate; Error response from daemon: mount denied: ' +
+    'the source path \\\\?\\D:\\400mbushu\\deploy\\site is not a valid Windows path';
+  const text = failureText(raw, '增量更新', { remote: false });
+  assert.match(text, /无法挂载部署目录/);
+  assert.doesNotMatch(text, /目录或文件权限/);
+  assert.doesNotMatch(text, /原始输出/);
+  assert.doesNotMatch(text, /mount denied/);
+
+  const bare = failureText(
+    'Error response from daemon: mount denied: the source path \\\\?\\D:\\400mbushu is not a valid Windows path',
+    '增量更新',
+    { remote: false }
+  );
+  assert.match(bare, /本机磁盘目录/);
+  assert.doesNotMatch(bare, /目录或文件权限/);
+});
+
+test('diagnostic lines stay out of the main failure message', () => {
+  const text = failureText(
+    '替换原部署文件失败，文件可能正被其他程序占用，请关闭占用后重试\n替换详情：阶段=MoveAside 错误=os error 5 旧文件=D:\\deploy\\site',
+    '增量更新',
+    { remote: false }
+  );
+  assert.match(text, /被其他程序占用/);
+  assert.doesNotMatch(text, /阶段=MoveAside/);
+  assert.doesNotMatch(text, /替换详情/);
+});
+
+test('actionable reasons are redacted before reaching the user', () => {
+  const text = failureText(
+    '部署文件被占用：token=super-secret-value 来自 https://example.internal/host',
+    '增量更新',
+    { remote: false }
+  );
+  assert.doesNotMatch(text, /super-secret-value/);
+  assert.doesNotMatch(text, /example\.internal/);
+});

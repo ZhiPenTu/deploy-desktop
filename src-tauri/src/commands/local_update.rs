@@ -1708,6 +1708,45 @@ mod tests {
     }
 
     #[test]
+    fn compose_arguments_pass_environment_files_without_verbatim_prefix() {
+        let fixture = Fixture::new();
+        fixture.write("deploy/.env", "APP_PORT=8080\n");
+        fixture.write("deploy/docker-compose.yml", "services:\n  api:\n    image: nginx\n");
+        let root = fs::canonicalize(&fixture.0).unwrap();
+        let deploy_dir = root.join("deploy");
+        let plan = UpdatePlan {
+            root: root.clone(),
+            deploy_dir: deploy_dir.clone(),
+            compose: deploy_dir.join("docker-compose.yml"),
+            bundle_compose: deploy_dir.join("docker-compose.yml"),
+            variant: None,
+            components: Vec::new(),
+            replacements: Vec::new(),
+            images: Vec::new(),
+            services: Vec::new(),
+            all_services: Vec::new(),
+            bindings: Vec::new(),
+            config_selected: false,
+            image_selected: false,
+        };
+        let compose = plan.compose.clone();
+        let (command, _) = compose_command(&plan, &compose, &["ps", "-a", "-q"]).unwrap();
+        let args: Vec<String> = command
+            .get_args()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect();
+        let env_file = deploy_dir.join(".env").to_string_lossy().into_owned();
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "--env-file" && pair[1] == env_file),
+            "{args:?}"
+        );
+        for value in args.iter() {
+            assert!(!value.contains(r"\\?\"), "{value}");
+        }
+    }
+
+    #[test]
     fn uses_declared_variant_compose_for_execution() {
         let compose = "services:\n  api:\n    image: nginx\n";
         let fixture = Fixture::new();
