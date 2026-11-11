@@ -733,11 +733,13 @@ fn pull_local_blocking(
             fs::create_dir_all(dir).map_err(|e| format!("创建导出目录失败: {e}"))?;
             let file_name = format!("{}.tar", safe_file_name(&image.name));
             let target = PathBuf::from(dir).join(file_name);
+            // Docker 的输出路径不接受 Windows 扩展前缀，导出参数统一归一化。
+            let docker_target = crate::core::path_guard::docker_path(&target);
             run_local(
                 &[
                     "save".to_string(),
                     "-o".to_string(),
-                    target.display().to_string(),
+                    docker_target.display().to_string(),
                     image.reference.clone(),
                 ],
                 None,
@@ -751,7 +753,7 @@ fn pull_local_blocking(
                 total,
                 &image.name,
                 100,
-                &format!("已导出 {}", target.display()),
+                &format!("已导出 {}", docker_target.display()),
                 false,
             );
             results.push(ImagePullResult {
@@ -759,7 +761,7 @@ fn pull_local_blocking(
                 reference: image.reference.clone(),
                 digest: image.digest.clone(),
                 platform: image.platform.clone(),
-                exported_path: Some(target.display().to_string()),
+                exported_path: Some(docker_target.display().to_string()),
                 size_bytes: size,
                 message: "已拉取并导出".to_string(),
             });

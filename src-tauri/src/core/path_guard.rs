@@ -4,7 +4,74 @@
 //! 绝对路径、`..` 跳转与分隔符混用。这里只放与业务无关的纯判断：不访问磁盘、
 //! 不解析符号链接，也不生成面向用户的文案，由命令层决定提示内容。
 
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
+
+/// 把 Windows 扩展长度路径转换成 Docker CLI 接受的普通路径。
+///
+/// `fs::canonicalize` 在 Windows 上返回 `\\?\D:\...` 或 `\\?\UNC\...`。
+/// Docker 的 bind mount 不接受这种前缀，相对挂载会因此被解析成无法挂载的地址。
+/// 只还原盘符路径与 UNC 路径：`\\?\Volume{...}` 和 `\\?\GLOBALROOT\...` 没有等价的
+/// 普通路径，保留原样交给上层判断，避免变成无效的相对路径。非 Windows 或普通路径原样返回。
+pub fn docker_path(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    let Some(rest) = text.strip_prefix(r"\\?\") else {
+        return path.to_path_buf();
+    };
+    if rest
+        .get(..4)
+        .map(|prefix| prefix.eq_ignore_ascii_case("UNC\\"))
+        .unwrap_or(false)
+    {
+        return PathBuf::from(format!(r"\\{}", &rest[4..]));
+    }
+    let bytes = rest.as_bytes();
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+    {
+        return PathBuf::from(rest);
+    }
+    path.to_path_buf()
+}
+
+/// 按路径组件拆分路径，便于逐段比较。
+///
+/// 组件拆分由平台决定分隔符，Unix 上反斜杠是普通文件名字符，不会被当成层级。
+fn path_segments(path: &Path) -> Vec<String> {
+    docker_path(path)
+        .components()
+        .filter_map(|component| match component {
+            Component::Prefix(prefix) => {
+                Some(prefix.as_os_str().to_string_lossy().to_uppercase())
+            }
+            Component::RootDir => Some(String::from("/")),
+            Component::CurDir => None,
+            Component::ParentDir => Some(String::from("..")),
+            Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
+        })
+        .collect()
+}
+
+/// 按路径段判断 `target` 是否位于 `base` 内；Windows 下忽略大小写。
+pub fn path_is_within(base: &Path, target: &Path) -> bool {
+    let base = path_segments(base);
+    let target = path_segments(target);
+    if base.is_empty() || target.len() < base.len() {
+        return false;
+    }
+    // 含 `..` 的路径无法在不访问磁盘的情况下判定归属，直接视为不包含。
+    if base.iter().any(|part| part == "..") || target.iter().any(|part| part == "..") {
+        return false;
+    }
+    base.iter().zip(target.iter()).all(|(left, right)| {
+        if cfg!(windows) {
+            left.eq_ignore_ascii_case(right)
+        } else {
+            left == right
+        }
+    })
+}
 
 /// 相对路径不能直接拼接的原因。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,5 +202,100 @@ mod tests {
         assert!(is_strictly_within(base, Path::new("/opt/demo/app")));
         assert!(!is_strictly_within(base, base));
         assert!(!is_within(base, Path::new("/opt/other")));
+    }
+
+    #[test]
+    fn docker_path_removes_windows_verbatim_prefix() {
+        assert_eq!(
+            docker_path(Path::new(r"\\?\D:\400mbushu\deploy")),
+            PathBuf::from(r"D:\400mbushu\deploy")
+        );
+        assert_eq!(
+            docker_path(Path::new(r"\\?\UNC\server\share\app")),
+            PathBuf::from(r"\\server\share\app")
+        );
+        assert_eq!(
+            docker_path(Path::new("/opt/demo")),
+            PathBuf::from("/opt/demo")
+        );
+        assert_eq!(
+            docker_path(Path::new(r"\\?\unc\server\share\app")),
+            PathBuf::from(r"\\server\share\app")
+        );
+        assert_eq!(
+            docker_path(Path::new(r"\\?\Volume{1234}\app")),
+            PathBuf::from(r"\\?\Volume{1234}\app")
+        );
+    }
+
+    #[test]
+    fn docker_path_keeps_namespaces_without_plain_equivalent() {
+        assert_eq!(
+            docker_path(Path::new(r"\\?\GLOBALROOT\Device\HarddiskVolume1\app")),
+            PathBuf::from(r"\\?\GLOBALROOT\Device\HarddiskVolume1\app")
+        );
+        assert_eq!(
+            docker_path(Path::new(r"\\?\Volume{1234}\app")),
+            PathBuf::from(r"\\?\Volume{1234}\app")
+        );
+    }
+
+    #[test]
+    fn path_containment_does_not_match_sibling_prefixes() {
+        assert!(path_is_within(
+            Path::new("/opt/demo"),
+            Path::new("/opt/demo/app")
+        ));
+        assert!(!path_is_within(
+            Path::new("/opt/demo"),
+            Path::new("/opt/demo2")
+        ));
+        assert!(path_is_within(Path::new("/"), Path::new("/opt/demo")));
+    }
+
+    #[test]
+    fn path_containment_normalizes_repeated_separators() {
+        assert!(path_is_within(
+            Path::new("/opt/demo"),
+            Path::new("/opt//demo/app")
+        ));
+        assert!(path_is_within(
+            Path::new("/opt/demo/"),
+            Path::new("/opt/demo/app")
+        ));
+    }
+
+    #[test]
+    fn path_containment_rejects_parent_segments() {
+        assert!(!path_is_within(
+            Path::new("/opt/demo"),
+            Path::new("/opt/demo/../demo2")
+        ));
+        assert!(!path_is_within(
+            Path::new("/opt/demo/.."),
+            Path::new("/opt/demo2")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_path_containment_keeps_backslash_inside_names() {
+        assert!(!path_is_within(
+            Path::new("/opt/demo"),
+            Path::new("/opt/demo\\child")
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_path_containment_ignores_case() {
+        assert!(path_is_within(
+            Path::new(r"D:\400mbushu\deploy"),
+            Path::new(r"d:\400MBUSHU\deploy\site")
+        ));
+        assert!(!path_is_within(
+            Path::new(r"D:\400mbushu\deploy"),
+            Path::new(r"D:\400mbushu\deploy2")
+        ));
     }
 }

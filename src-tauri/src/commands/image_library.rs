@@ -335,7 +335,7 @@ pub async fn import_offline_packages(
             let output = super::docker_setup::docker_command()
                 .arg("load")
                 .arg("-i")
-                .arg(&path)
+                .arg(crate::core::path_guard::docker_path(&path))
                 .output();
             let result = match output {
                 Ok(output) if output.status.success() => {
@@ -958,7 +958,7 @@ pub(super) fn export_images_blocking(
         command
             .arg("save")
             .arg("--output")
-            .arg(&temp)
+            .arg(crate::core::path_guard::docker_path(&temp))
             .arg(&reference);
         let output = crate::core::process::run(
             command,

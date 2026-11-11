@@ -156,7 +156,7 @@ fn is_compose_warning(line: &str) -> bool {
 
 /// 在通用提示之外识别 Windows 上最常见的 Compose 启动失败原因，
 /// 并把首条错误带入提示；Compose 的警告行不参与判断，避免掩盖真实错误。
-fn compose_failure_message(stderr: &str) -> String {
+pub(crate) fn compose_failure_message(stderr: &str) -> String {
     let lines: Vec<&str> = stderr
         .lines()
         .map(str::trim)
@@ -179,6 +179,14 @@ fn compose_failure_message(stderr: &str) -> String {
     if contains("invalid mount config") || contains("bind source path does not exist") {
         return String::from(
             "Compose 清单中的挂载路径在本机不存在或不可访问，请确认交付包已完整分发到部署目录后重试",
+        );
+    }
+    if contains("mount denied")
+        || contains("mounts denied")
+        || (contains("source path") && contains("\\\\?\\"))
+    {
+        return String::from(
+            "Docker 无法挂载部署目录，请确认部署目录位于本机磁盘目录，避免使用网络共享目录后重试",
         );
     }
     let hint = compose_failure_hint(&lines.join("\n"));
@@ -284,7 +292,7 @@ pub async fn load_offline_images(
 
         let output = super::docker_setup::docker_command()
             .args(["load", "-i"])
-            .arg(tar_path)
+            .arg(crate::core::path_guard::docker_path(tar_path))
             .output();
 
         match output {
@@ -423,10 +431,18 @@ pub(crate) fn docker_compose_action_blocking(
     let mut args = vec!["compose".to_string()];
     for env_file in resolve_env_files_for_dir(root) {
         args.push("--env-file".to_string());
-        args.push(env_file.to_string_lossy().to_string());
+        args.push(
+            crate::core::path_guard::docker_path(&env_file)
+                .to_string_lossy()
+                .to_string(),
+        );
     }
     args.push("-f".to_string());
-    args.push(compose_file.to_string_lossy().to_string());
+    args.push(
+        crate::core::path_guard::docker_path(&compose_file)
+            .to_string_lossy()
+            .to_string(),
+    );
 
     // 离线镜像按摘要绑定为不可变 ID；原 Compose 始终是首个 -f，项目目录保持不变。
     if action == "up" {
@@ -435,7 +451,11 @@ pub(crate) fn docker_compose_action_blocking(
             super::deployment_image_bindings::local_override(Path::new(&install), &compose_file)?
         {
             args.push("-f".to_string());
-            args.push(override_file.display().to_string());
+            args.push(
+                crate::core::path_guard::docker_path(&override_file)
+                    .display()
+                    .to_string(),
+            );
         }
     }
 
@@ -471,7 +491,9 @@ pub(crate) fn docker_compose_action_blocking(
 
     let output = super::docker_setup::docker_command()
         .args(&args)
-        .current_dir(compose_file.parent().unwrap_or(root))
+        .current_dir(crate::core::path_guard::docker_path(
+            compose_file.parent().unwrap_or(root),
+        ))
         .output();
 
     match output {
@@ -625,6 +647,15 @@ mod tests {
             "Error response from daemon: invalid mount config for type \"bind\": bind source path does not exist: /opt/demo",
         );
         assert!(mount.contains("挂载路径"));
+
+        let verbatim = compose_failure_message(
+            "Error response from daemon: mount denied: the source path \\\\?\\D:\\400mbushu\\deploy\\site is not a valid Windows path",
+        );
+        assert!(verbatim.contains("无法挂载部署目录"), "{verbatim}");
+        assert!(!verbatim.contains("扩展前缀"), "{verbatim}");
+
+        let plural = compose_failure_message("Mounts denied: path D:\\deploy is not shared");
+        assert!(plural.contains("无法挂载部署目录"), "{plural}");
 
         let other = compose_failure_message("unknown flag: --remove-orphans");
         assert!(other.contains("unknown flag"));

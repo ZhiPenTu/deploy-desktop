@@ -473,7 +473,7 @@ pub(crate) fn local_override(install: &Path, compose: &Path) -> Result<Option<Pa
         .join(".deploy-desktop")
         .join(format!("images-{}.compose.json", sha256_hex(document.as_bytes())));
     write_private(&path, document.as_bytes())?;
-    Ok(Some(path))
+    Ok(Some(crate::core::path_guard::docker_path(&path)))
 }
 
 pub(crate) fn remote_override(
