@@ -186,3 +186,15 @@ test('local deployment permission failures do not look like login failures', () 
     );
   }
 });
+
+test('error objects do not leak the Error prefix into user-facing text', () => {
+  const text = failureText(
+    new Error('部署文件仍被其他程序占用；受影响的服务已停止，请关闭占用程序后重新执行增量更新'),
+    '增量更新',
+    { remote: false }
+  );
+  assert.match(text, /被其他程序占用/);
+  assert.doesNotMatch(text, /^增量更新失败：Error:/);
+  assert.equal(safeText(new Error('部署失败')), '部署失败');
+  assert.equal(safeText('  kafka:\n    image: demo'), '  kafka:\n    image: demo');
+});

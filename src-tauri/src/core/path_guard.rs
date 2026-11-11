@@ -4,7 +4,59 @@
 //! 绝对路径、`..` 跳转与分隔符混用。这里只放与业务无关的纯判断：不访问磁盘、
 //! 不解析符号链接，也不生成面向用户的文案，由命令层决定提示内容。
 
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
+
+/// 把 Windows 扩展长度路径转换成 Docker CLI 接受的普通路径。
+///
+/// `fs::canonicalize` 在 Windows 上返回 `\\?\D:\...` 或 `\\?\UNC\...`。
+/// Docker 的 bind mount 不接受这种前缀，相对挂载会因此被解析成无法挂载的地址。
+/// 非 Windows 或普通路径原样返回。
+pub fn docker_path(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    let Some(rest) = text.strip_prefix(r"\\?\") else {
+        return path.to_path_buf();
+    };
+    if rest
+        .get(..4)
+        .map(|prefix| prefix.eq_ignore_ascii_case("UNC\\"))
+        .unwrap_or(false)
+    {
+        return PathBuf::from(format!(r"\\{}", &rest[4..]));
+    }
+    if rest
+        .get(..7)
+        .map(|prefix| prefix.eq_ignore_ascii_case("Volume{"))
+        .unwrap_or(false)
+    {
+        return path.to_path_buf();
+    }
+    PathBuf::from(rest)
+}
+
+fn comparable_path(path: &Path) -> String {
+    let mut text = docker_path(path).to_string_lossy().replace('\\', "/");
+    while text.len() > 1 && text.ends_with('/') {
+        text.pop();
+    }
+    if cfg!(windows) {
+        text.make_ascii_lowercase();
+    }
+    text
+}
+
+/// 按路径段判断 `target` 是否位于 `base` 内；Windows 下忽略大小写。
+pub fn path_is_within(base: &Path, target: &Path) -> bool {
+    let base = comparable_path(base);
+    let target = comparable_path(target);
+    if base == "/" {
+        return target.starts_with('/');
+    }
+    target == base
+        || target
+            .strip_prefix(&base)
+            .map(|rest| rest.starts_with('/'))
+            .unwrap_or(false)
+}
 
 /// 相对路径不能直接拼接的原因。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,5 +187,55 @@ mod tests {
         assert!(is_strictly_within(base, Path::new("/opt/demo/app")));
         assert!(!is_strictly_within(base, base));
         assert!(!is_within(base, Path::new("/opt/other")));
+    }
+
+    #[test]
+    fn docker_path_removes_windows_verbatim_prefix() {
+        assert_eq!(
+            docker_path(Path::new(r"\\?\D:\400mbushu\deploy")),
+            PathBuf::from(r"D:\400mbushu\deploy")
+        );
+        assert_eq!(
+            docker_path(Path::new(r"\\?\UNC\server\share\app")),
+            PathBuf::from(r"\\server\share\app")
+        );
+        assert_eq!(
+            docker_path(Path::new("/opt/demo")),
+            PathBuf::from("/opt/demo")
+        );
+        assert_eq!(
+            docker_path(Path::new(r"\\?\unc\server\share\app")),
+            PathBuf::from(r"\\server\share\app")
+        );
+        assert_eq!(
+            docker_path(Path::new(r"\\?\Volume{1234}\app")),
+            PathBuf::from(r"\\?\Volume{1234}\app")
+        );
+    }
+
+    #[test]
+    fn path_containment_does_not_match_sibling_prefixes() {
+        assert!(path_is_within(
+            Path::new("/opt/demo"),
+            Path::new("/opt/demo/app")
+        ));
+        assert!(!path_is_within(
+            Path::new("/opt/demo"),
+            Path::new("/opt/demo2")
+        ));
+        assert!(path_is_within(Path::new("/"), Path::new("/opt/demo")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_path_containment_ignores_case() {
+        assert!(path_is_within(
+            Path::new(r"D:\400mbushu\deploy"),
+            Path::new(r"d:\400MBUSHU\deploy\site")
+        ));
+        assert!(!path_is_within(
+            Path::new(r"D:\400mbushu\deploy"),
+            Path::new(r"D:\400mbushu\deploy2")
+        ));
     }
 }

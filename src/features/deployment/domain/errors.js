@@ -1,5 +1,5 @@
 export function safeText(value) {
-  return String(value || '')
+  return errorMessage(value)
     .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, '[私钥已隐藏]')
     .replace(/\b(?:https?|ssh):\/\/[^\s]+/gi, '[地址已隐藏]')
     .replace(
@@ -8,6 +8,11 @@ export function safeText(value) {
     )
     .replace(/((?:--password|--token)\s+)(?:"[^"]*"|'[^']*'|\S+)/gi, '$1[已隐藏]')
     .replace(/(Bearer\s+)[\w.-]+/gi, '$1[已隐藏]');
+}
+
+function errorMessage(error) {
+  const text = typeof error === 'string' ? error : error?.message;
+  return String(text || '');
 }
 
 function actionableReason(text) {
@@ -19,6 +24,7 @@ function actionableReason(text) {
     )
       continue;
     const cleaned = line
+      .replace(/^Error:\s*/i, '')
       .replace(/^应用更新失败[：:]\s*/, '')
       .replace(/^更新未完成[：:]\s*/, '')
       .replace(/[。.]\s*$/, '')
@@ -29,7 +35,7 @@ function actionableReason(text) {
 }
 
 export function failureText(error, action, { remote } = {}) {
-  const text = String(error || '');
+  const text = errorMessage(error).trim().replace(/^Error:\s*/i, '');
   const reason = actionableReason(text);
   if (reason) return `${action}失败：${reason}。`;
   const authentication =

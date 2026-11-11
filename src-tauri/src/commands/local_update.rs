@@ -314,7 +314,8 @@ fn run_update(
                 "running",
                 "将交付包镜像导入本机 Docker",
             );
-            docker_output(&["load", "-i", &image.to_string_lossy()], "导入镜像")?;
+            let image_path = path_guard::docker_path(image).to_string_lossy().into_owned();
+            docker_output(&["load", "-i", &image_path], "导入镜像")?;
         }
         let effective = if plan.config_selected {
             preferred_compose(&plan.deploy_dir, plan.variant.as_deref())?
@@ -837,12 +838,12 @@ fn compose_command(
     command
         .arg("compose")
         .arg("--project-directory")
-        .arg(&plan.deploy_dir);
+        .arg(path_guard::docker_path(&plan.deploy_dir));
     for env in super::docker_ops::resolve_env_files_for(&plan.root, &plan.deploy_dir) {
         reject_symlinks(&env)?;
-        command.arg("--env-file").arg(env);
+        command.arg("--env-file").arg(path_guard::docker_path(&env));
     }
-    command.arg("-f").arg(compose);
+    command.arg("-f").arg(path_guard::docker_path(compose));
     let needs_images = plan.config_selected || plan.image_selected;
     let override_document = if needs_images
         && matches!(action.first(), Some(&"config") | Some(&"up"))
@@ -858,7 +859,9 @@ fn compose_command(
     if override_document.is_some() {
         command.args(["-f", "-"]);
     }
-    command.args(action).current_dir(&plan.deploy_dir);
+    command
+        .args(action)
+        .current_dir(path_guard::docker_path(&plan.deploy_dir));
     Ok((command, override_document))
 }
 
@@ -871,6 +874,7 @@ fn compose_output(plan: &UpdatePlan, compose: &Path, action: &[&str]) -> Result<
     )?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        let hint = super::docker_ops::compose_failure_message(&stderr);
         let detail = stderr
             .lines()
             .map(str::trim)
@@ -879,9 +883,9 @@ fn compose_output(plan: &UpdatePlan, compose: &Path, action: &[&str]) -> Result<
             .collect::<Vec<_>>()
             .join("；");
         return Err(if detail.is_empty() {
-            "Compose 操作失败，请检查镜像、配置和目录权限".to_string()
+            format!("Compose 操作失败：{hint}")
         } else {
-            format!("Compose 操作失败：{detail}")
+            format!("Compose 操作失败：{hint}\n原始输出：{detail}")
         });
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
@@ -1027,6 +1031,7 @@ fn validate_effective_configs(
 }
 
 fn service_binds_path(config: &Value, service: &str, path: &Path) -> bool {
+    let path = path_guard::docker_path(path);
     config
         .get("services")
         .and_then(|value| value.get(service))
@@ -1038,7 +1043,7 @@ fn service_binds_path(config: &Value, service: &str, path: &Path) -> bool {
                     && volume
                         .get("source")
                         .and_then(Value::as_str)
-                        .map(|source| path.starts_with(Path::new(source)))
+                        .map(|source| path_guard::path_is_within(Path::new(source), &path))
                         .unwrap_or(false)
             })
         })
@@ -1199,14 +1204,7 @@ fn check_backup_space(plan: &UpdatePlan) -> Result<(), String> {
 }
 
 fn display_path(path: &Path) -> String {
-    let text = path.to_string_lossy();
-    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
-        format!(r"\\{rest}")
-    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
-        rest.to_string()
-    } else {
-        text.into_owned()
-    }
+    path_guard::docker_path(path).to_string_lossy().into_owned()
 }
 
 fn copy_tree(source: &Path, target: &Path) -> Result<(), FileOperationError> {
@@ -1327,7 +1325,11 @@ fn replace_path_with_lock_retry(
             destination.display(),
             failure.log_detail()
         );
-        return Err(failure.user_message());
+        return Err(format!(
+            "{}\n替换详情：{}",
+            failure.user_message(),
+            failure.log_detail()
+        ));
     }
 
     let pending: Vec<String> = item
@@ -1371,9 +1373,12 @@ fn replace_path_with_lock_retry(
                 );
                 let message = failure.user_message();
                 return Err(if stopped_services.is_empty() {
-                    message
+                    format!("{message}\n替换详情：{}", failure.log_detail())
                 } else {
-                    format!("{message}；受影响的服务已停止，请处理后重新执行增量更新")
+                    format!(
+                        "{message}；受影响的服务已停止，请处理后重新执行增量更新\n替换详情：{}",
+                        failure.log_detail()
+                    )
                 });
             }
         }
@@ -1391,9 +1396,10 @@ fn replace_path_with_lock_retry(
     } else {
         "部署文件仍被其他程序占用；受影响的服务已停止，请关闭占用程序后重新执行增量更新"
     };
+    let detail = failure.log_detail();
     Err(match stop_error {
-        Some(error) => format!("{error}；{message}"),
-        None => message.to_string(),
+        Some(error) => format!("{error}；{message}\n替换详情：{detail}"),
+        None => format!("{message}\n替换详情：{detail}"),
     })
 }
 
@@ -1657,6 +1663,48 @@ mod tests {
         .unwrap();
         assert!(error.contains("安装根目录"), "{error}");
         assert!(error.contains("target"), "{error}");
+    }
+
+    #[test]
+    fn compose_arguments_drop_windows_verbatim_prefix() {
+        let plan = UpdatePlan {
+            root: PathBuf::from(r"\\?\D:\400mbushu"),
+            deploy_dir: PathBuf::from(r"\\?\D:\400mbushu\deploy"),
+            compose: PathBuf::from(r"\\?\D:\400mbushu\deploy\docker-compose.yml"),
+            bundle_compose: PathBuf::from(r"\\?\D:\400mbushu\deploy\docker-compose.yml"),
+            variant: None,
+            components: Vec::new(),
+            replacements: Vec::new(),
+            images: Vec::new(),
+            services: Vec::new(),
+            all_services: Vec::new(),
+            bindings: Vec::new(),
+            config_selected: false,
+            image_selected: false,
+        };
+        let compose = plan.compose.clone();
+        let (command, override_document) =
+            compose_command(&plan, &compose, &["up", "-d"]).unwrap();
+        assert!(override_document.is_none());
+        let args: Vec<String> = command
+            .get_args()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect();
+        for value in args.iter().chain(
+            command
+                .get_current_dir()
+                .map(|value| vec![value.to_string_lossy().into_owned()])
+                .unwrap_or_default()
+                .iter(),
+        ) {
+            assert!(!value.contains(r"\\?\"), "{value}");
+        }
+        assert!(args.windows(2).any(|pair| {
+            pair[0] == "--project-directory" && pair[1] == r"D:\400mbushu\deploy"
+        }));
+        assert!(args.windows(2).any(|pair| {
+            pair[0] == "-f" && pair[1] == r"D:\400mbushu\deploy\docker-compose.yml"
+        }));
     }
 
     #[test]
