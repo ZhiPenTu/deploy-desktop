@@ -18,6 +18,9 @@ const LOCK_SUFFIX: &str = ".lock";
 const RETRY_INTERVAL: Duration = Duration::from_millis(15);
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(3);
 const STALE_AFTER: Duration = Duration::from_secs(30);
+/// Windows 上删除文件的瞬间新建同名文件、或杀毒软件扫描新建文件，都会返回拒绝访问。
+/// 这类情况短暂重试即可恢复，不应直接让用户失败。
+const DENIED_RETRY_WINDOW: Duration = Duration::from_millis(500);
 
 /// 持有期间保证同一份配置文件只被当前进程改写；离开作用域即释放。
 #[derive(Debug)]
@@ -46,6 +49,7 @@ pub fn lock_path(target: &Path) -> PathBuf {
 fn acquire_with_timeout(target: &Path, timeout: Duration) -> Result<FileLock, String> {
     let path = lock_path(target);
     let deadline = Instant::now() + timeout;
+    let mut denied_since: Option<Instant> = None;
     loop {
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(mut file) => {
@@ -53,12 +57,20 @@ fn acquire_with_timeout(target: &Path, timeout: Duration) -> Result<FileLock, St
                 return Ok(FileLock { path });
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                denied_since = None;
                 if is_stale(&path) {
                     let _ = fs::remove_file(&path);
                     continue;
                 }
                 if Instant::now() >= deadline {
                     return Err("配置正在被另一个程序写入，请稍后重试".to_string());
+                }
+                sleep(RETRY_INTERVAL);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                let started = *denied_since.get_or_insert_with(Instant::now);
+                if started.elapsed() >= DENIED_RETRY_WINDOW || Instant::now() >= deadline {
+                    return Err(format!("无法创建配置锁：{error}"));
                 }
                 sleep(RETRY_INTERVAL);
             }
@@ -148,6 +160,25 @@ mod tests {
         assert!(lock.exists());
         drop(guard);
         assert!(!lock.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn transient_lock_path_obstruction_is_retried() {
+        let dir = temp_dir("obstruct");
+        let target = dir.join("sample.json");
+        let lock = lock_path(&target);
+        // 用同名目录占住锁路径：新建会被拒绝或提示已存在，移除后应能拿到锁。
+        fs::create_dir_all(&lock).unwrap();
+        let blocker = lock.clone();
+        let handle = std::thread::spawn(move || {
+            sleep(Duration::from_millis(80));
+            let _ = fs::remove_dir_all(&blocker);
+        });
+        let acquired = acquire_with_timeout(&target, Duration::from_secs(3));
+        handle.join().unwrap();
+        let acquired = acquired.expect("锁路径短暂占用后应能重试成功");
+        drop(acquired);
         let _ = fs::remove_dir_all(&dir);
     }
 
