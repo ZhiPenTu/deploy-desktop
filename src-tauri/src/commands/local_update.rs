@@ -1,6 +1,7 @@
 //! 本机增量更新。预检只读取文件与 Docker，执行阶段不删除数据卷。
 use std::collections::BTreeSet;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
@@ -28,6 +29,7 @@ pub struct LocalUpdateResult {
 struct Replacement {
     source: PathBuf,
     relative: PathBuf,
+    services: Vec<String>,
 }
 
 struct UpdatePlan {
@@ -52,6 +54,82 @@ struct ComponentBinding {
     component: String,
     services: Vec<String>,
     paths: Vec<PathBuf>,
+}
+
+#[derive(Debug)]
+struct FileOperationError {
+    message: String,
+    error: io::Error,
+}
+
+#[derive(Debug)]
+enum ReplaceError {
+    File(FileOperationError),
+    Swap {
+        failure: backup::SwapFailure,
+        previous: PathBuf,
+    },
+    Invalid(String),
+}
+
+impl ReplaceError {
+    fn is_lock_conflict(&self) -> bool {
+        let error = match self {
+            Self::File(failure) => &failure.error,
+            Self::Swap { failure, .. } => &failure.error,
+            Self::Invalid(_) => return false,
+        };
+        error.kind() == io::ErrorKind::PermissionDenied
+            || matches!(error.raw_os_error(), Some(5 | 32 | 33))
+    }
+
+    fn can_retry_after_stop(&self) -> bool {
+        match self {
+            // 复制或创建暂存目录失败可能来自源文件权限，停止服务无法解决。
+            Self::File(_) => false,
+            Self::Swap { failure, .. } => {
+                failure.stage == backup::SwapStage::MoveAside
+                    || (failure.stage == backup::SwapStage::Install
+                        && failure.rollback.is_ok())
+            }
+            Self::Invalid(_) => false,
+        }
+    }
+
+    fn user_message(&self) -> String {
+        match self {
+            Self::File(failure) => failure.message.clone(),
+            Self::Swap { failure, previous } => match failure.stage {
+                backup::SwapStage::MoveAside => {
+                    "替换原部署文件失败，文件可能正被其他程序占用，请关闭占用后重试".to_string()
+                }
+                backup::SwapStage::Install if failure.rollback.is_ok() => {
+                    "写入更新文件失败，已恢复原文件，请关闭占用部署目录的程序后重试".to_string()
+                }
+                backup::SwapStage::Install => {
+                    format!(
+                        "写入更新文件失败，原文件未能恢复，旧文件保留在 {}，请处理后恢复再试",
+                        display_path(previous)
+                    )
+                }
+            },
+            Self::Invalid(message) => message.clone(),
+        }
+    }
+
+    fn log_detail(&self) -> String {
+        match self {
+            Self::File(failure) => format!("{}：{}", failure.message, failure.error),
+            Self::Swap { failure, previous } => format!(
+                "阶段={:?} 错误={} 回滚={:?} 旧文件={}",
+                failure.stage,
+                failure.error,
+                failure.rollback.as_ref().err(),
+                display_path(previous)
+            ),
+            Self::Invalid(message) => message.clone(),
+        }
+    }
 }
 
 #[tauri::command]
@@ -145,6 +223,30 @@ fn run_update(
             return Err(format!("目标部署尚未创建服务 {service}，请先完成首次部署"));
         }
     }
+    if cfg!(windows) {
+        // 未选中的共享挂载服务同样可能占用文件。直接提示先停止，避免更新到一半才发现锁冲突。
+        let root = plan.root.clone();
+        for item in &plan.replacements {
+            let destination = root.join(&item.relative);
+            for service in services_binding_path(&current, &destination) {
+                if plan.services.contains(&service) {
+                    continue;
+                }
+                let ids = compose_output(&plan, &plan.compose, &["ps", "-q", &service])?;
+                if !ids.trim().is_empty() {
+                    return Err(format!(
+                        "部署路径 {} 还被服务 {service} 挂载并占用，但该服务不在本次所选组件中。请先停止该服务后重试",
+                        destination.display()
+                    ));
+                }
+            }
+        }
+        for item in &mut plan.replacements {
+            let destination = root.join(&item.relative);
+            item.services
+                .retain(|service| service_binds_path(&current, service, &destination));
+        }
+    }
     if backup {
         check_backup_space(&plan)?;
     }
@@ -179,18 +281,30 @@ fn run_update(
         None
     };
     env_guard.disarm();
+    let mut stopped_services = BTreeSet::new();
+    let mut deferred_cleanup = Vec::new();
     let execution = (|| -> Result<(), String> {
         for (index, item) in plan.replacements.iter().enumerate() {
+            let percent = 25 + index * 30 / plan.replacements.len().max(1);
             progress(
                 window,
                 "替换部署文件",
-                25 + index * 30 / plan.replacements.len().max(1),
+                percent,
                 "running",
                 "写入所选组件与配置",
             );
             let destination = plan.root.join(&item.relative);
             validate_destination(&plan.root, &destination)?;
-            replace_path(&item.source, &destination)?;
+            if let Some(previous) = replace_path_with_lock_retry(
+                window,
+                &plan,
+                item,
+                &destination,
+                percent,
+                &mut stopped_services,
+            )? {
+                deferred_cleanup.push(previous);
+            }
         }
         for image in &plan.images {
             progress(
@@ -239,7 +353,42 @@ fn run_update(
         wait_for_services(&plan, &effective, waiting)?;
         Ok(())
     })();
-    let error = execution.err();
+    let mut error = execution.err();
+    if !stopped_services.is_empty() {
+        if let Some(reason) = error.as_mut() {
+            if !reason.contains("受影响的服务已停止") {
+                *reason = format!(
+                    "{reason}；受影响的服务已停止：{}。请处理后重新执行增量更新",
+                    stopped_services
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join("、")
+                );
+            }
+        }
+    }
+    let mut kept_previous = Vec::new();
+    let mut cleanup_failures = Vec::new();
+    for previous in deferred_cleanup {
+        if error.is_some() {
+            log::warn!(
+                target: "deploy",
+                "更新未完成，保留替换前的旧文件：目录={}",
+                previous.display()
+            );
+            kept_previous.push(previous);
+            continue;
+        }
+        if let Err(cleanup_error) = backup::remove_path(&previous) {
+            log::warn!(
+                target: "deploy",
+                "清理替换前的旧文件失败：目录={} 错误={cleanup_error}",
+                previous.display()
+            );
+            cleanup_failures.push(previous);
+        }
+    }
     let success = error.is_none();
     let scope = if dry_run { "预检" } else { "更新" };
     if success {
@@ -294,18 +443,39 @@ fn run_update(
             "更新未完成，请查看结果与备份目录"
         },
     );
+    let mut output = if success {
+        "本机更新完成，所选服务已通过就绪检查。"
+    } else if backup {
+        "本机更新未完成，已停止后续操作。可使用备份恢复替换前的文件。"
+    } else {
+        "本机更新未完成，已停止后续操作。请检查容器日志和部署文件。"
+    }
+    .to_string();
+    if !kept_previous.is_empty() {
+        output.push_str(&format!(
+            "\n更新未完成，替换前旧文件保留在：{}",
+            kept_previous
+                .iter()
+                .map(|path| display_path(path))
+                .collect::<Vec<_>>()
+                .join("、")
+        ));
+    }
+    if !cleanup_failures.is_empty() {
+        output.push_str(&format!(
+            "\n替换前旧文件暂未清理，可在关闭占用后手动删除：{}",
+            cleanup_failures
+                .iter()
+                .map(|path| display_path(path))
+                .collect::<Vec<_>>()
+                .join("、")
+        ));
+    }
     Ok(LocalUpdateResult {
         success,
         components,
-        backup_dir: backup_dir.map(|path| path.to_string_lossy().to_string()),
-        output: if success {
-            "本机更新完成，所选服务已通过就绪检查。"
-        } else if backup {
-            "本机更新未完成，已停止后续操作。可使用备份恢复替换前的文件。"
-        } else {
-            "本机更新未完成，已停止后续操作。请检查容器日志和部署文件。"
-        }
-        .to_string(),
+        backup_dir: backup_dir.map(|path| display_path(&path)),
+        output,
         error,
         duration_secs: started.elapsed().as_secs(),
     })
@@ -551,10 +721,19 @@ fn build_plan(
                 .strip_prefix(&root)
                 .map_err(|_| "更新目标超出部署目录，已中止操作".to_string())?
                 .to_path_buf();
-            if replacements.iter().any(|item| item.relative == relative) {
+            if let Some(existing) = replacements.iter_mut().find(|item| item.relative == relative) {
+                for service in &component.services {
+                    if !existing.services.contains(service) {
+                        existing.services.push(service.clone());
+                    }
+                }
                 continue;
             }
-            replacements.push(Replacement { source, relative });
+            replacements.push(Replacement {
+                source,
+                relative,
+                services: component.services.clone(),
+            });
         }
         for service in &component.services {
             if !current.contains(service) || !incoming.contains(service) {
@@ -866,6 +1045,20 @@ fn service_binds_path(config: &Value, service: &str, path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+fn services_binding_path(config: &Value, path: &Path) -> BTreeSet<String> {
+    config
+        .get("services")
+        .and_then(Value::as_object)
+        .map(|services| {
+            services
+                .iter()
+                .filter(|(name, _)| service_binds_path(config, name, path))
+                .map(|(name, _)| name.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn check_images_available(config: &Value) -> Result<(), String> {
     let services = config
         .get("services")
@@ -1005,20 +1198,48 @@ fn check_backup_space(plan: &UpdatePlan) -> Result<(), String> {
     Ok(())
 }
 
-fn copy_tree(source: &Path, target: &Path) -> Result<(), String> {
-    validate_tree(source)?;
+fn display_path(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        text.into_owned()
+    }
+}
+
+fn copy_tree(source: &Path, target: &Path) -> Result<(), FileOperationError> {
+    validate_tree(source).map_err(|message| FileOperationError {
+        message,
+        error: io::Error::new(io::ErrorKind::InvalidData, "交付文件校验失败"),
+    })?;
     if source.is_dir() {
-        fs::create_dir_all(target).map_err(|_| "创建更新目录失败，请检查权限".to_string())?;
-        for entry in fs::read_dir(source).map_err(|_| "读取更新目录失败".to_string())? {
-            let entry = entry.map_err(|_| "读取更新文件失败".to_string())?;
+        fs::create_dir_all(target).map_err(|error| FileOperationError {
+            message: "创建更新目录失败，请检查权限".to_string(),
+            error,
+        })?;
+        for entry in fs::read_dir(source).map_err(|error| FileOperationError {
+            message: "读取更新目录失败".to_string(),
+            error,
+        })? {
+            let entry = entry.map_err(|error| FileOperationError {
+                message: "读取更新文件失败".to_string(),
+                error,
+            })?;
             copy_tree(&entry.path(), &target.join(entry.file_name()))?;
         }
     } else {
         if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent).map_err(|_| "创建更新目录失败，请检查权限".to_string())?;
+            fs::create_dir_all(parent).map_err(|error| FileOperationError {
+                message: "创建更新目录失败，请检查权限".to_string(),
+                error,
+            })?;
         }
-        fs::copy(source, target)
-            .map_err(|_| "复制更新文件失败，请检查空间和目录权限".to_string())?;
+        fs::copy(source, target).map_err(|error| FileOperationError {
+            message: "复制更新文件失败，请检查空间和目录权限".to_string(),
+            error,
+        })?;
     }
     Ok(())
 }
@@ -1032,7 +1253,8 @@ fn create_backup(plan: &UpdatePlan, previous_env: Option<&[u8]>) -> Result<PathB
     for item in &plan.replacements {
         let existing = plan.root.join(&item.relative);
         if existing.exists() {
-            copy_tree(&existing, &backup_dir.join(&item.relative))?;
+            copy_tree(&existing, &backup_dir.join(&item.relative))
+                .map_err(|failure| failure.message)?;
         }
     }
     if let Some(content) = previous_env {
@@ -1049,33 +1271,136 @@ fn create_backup(plan: &UpdatePlan, previous_env: Option<&[u8]>) -> Result<PathB
     Ok(backup_dir)
 }
 
-fn replace_path(source: &Path, target: &Path) -> Result<(), String> {
+fn replace_path(source: &Path, target: &Path) -> Result<Option<PathBuf>, ReplaceError> {
     let parent = target
         .parent()
-        .ok_or_else(|| "更新目标目录无效".to_string())?;
-    fs::create_dir_all(parent).map_err(|_| "创建更新目录失败，请检查权限".to_string())?;
+        .ok_or_else(|| ReplaceError::Invalid("更新目标目录无效".to_string()))?;
+    fs::create_dir_all(parent).map_err(|error| {
+        ReplaceError::File(FileOperationError {
+            message: "创建更新目录失败，请检查权限".to_string(),
+            error,
+        })
+    })?;
     let suffix = backup::unique_suffix();
     let staging = parent.join(format!(".deploy-update-new-{suffix}"));
     let previous = parent.join(format!(".deploy-update-old-{suffix}"));
     if let Err(error) = copy_tree(source, &staging) {
         let _ = backup::remove_path(&staging);
-        return Err(error);
+        return Err(ReplaceError::File(error));
     }
     match backup::swap_staged(&staging, target, &previous) {
-        Ok(had_previous) => backup::discard_previous(&previous, had_previous)
-            .map_err(|_| "更新文件已写入，但无法清理临时旧文件，请检查目录权限".to_string()),
+        Ok(had_previous) => match backup::discard_previous(&previous, had_previous) {
+            Ok(()) => Ok(None),
+            Err(error) => {
+                // 新文件已经落位；旧文件被容器或扫描程序占用不应把更新判为失败。
+                log::warn!(
+                    target: "deploy",
+                    "替换完成但清理旧文件失败，稍后重试：目录={} 错误={error}",
+                    previous.display()
+                );
+                Ok(Some(previous))
+            }
+        },
         Err(failure) => {
             let _ = backup::remove_path(&staging);
-            match failure.stage {
-                backup::SwapStage::MoveAside => {
-                    Err("替换原部署文件失败，请检查目录权限".to_string())
-                }
-                backup::SwapStage::Install => {
-                    Err("写入更新失败，已尝试恢复原文件，请检查部署目录".to_string())
-                }
+            Err(ReplaceError::Swap { failure, previous })
+        }
+    }
+}
+
+fn replace_path_with_lock_retry(
+    window: &tauri::Window,
+    plan: &UpdatePlan,
+    item: &Replacement,
+    destination: &Path,
+    percent: usize,
+    stopped_services: &mut BTreeSet<String>,
+) -> Result<Option<PathBuf>, String> {
+    let failure = match replace_path(&item.source, destination) {
+        Ok(previous) => return Ok(previous),
+        Err(failure) => failure,
+    };
+    if !cfg!(windows) || !failure.is_lock_conflict() || !failure.can_retry_after_stop() {
+        log::warn!(
+            target: "deploy",
+            "替换部署文件失败：目标={} 错误={}",
+            destination.display(),
+            failure.log_detail()
+        );
+        return Err(failure.user_message());
+    }
+
+    let pending: Vec<String> = item
+        .services
+        .iter()
+        .filter(|service| !stopped_services.contains(*service))
+        .cloned()
+        .collect();
+    let mut stop_error = None;
+    if !pending.is_empty() {
+        progress(
+            window,
+            "释放部署文件",
+            percent,
+            "running",
+            "停止受影响的服务以释放被占用的部署文件",
+        );
+        match stop_update_services(plan, &pending) {
+            Ok(()) => {
+                stopped_services.extend(pending);
+            }
+            Err(error) => stop_error = Some(error),
+        }
+    }
+
+    for attempt in 0..4 {
+        std::thread::sleep(Duration::from_secs(attempt + 1));
+        match replace_path(&item.source, destination) {
+            Ok(previous) => return Ok(previous),
+            Err(failure)
+                if failure.is_lock_conflict() && failure.can_retry_after_stop() =>
+            {
+                continue;
+            }
+            Err(failure) => {
+                log::warn!(
+                    target: "deploy",
+                    "替换部署文件重试失败：目标={} 错误={}",
+                    destination.display(),
+                    failure.log_detail()
+                );
+                let message = failure.user_message();
+                return Err(if stopped_services.is_empty() {
+                    message
+                } else {
+                    format!("{message}；受影响的服务已停止，请处理后重新执行增量更新")
+                });
             }
         }
     }
+
+    log::warn!(
+        target: "deploy",
+        "替换部署文件重试后仍被占用：目标={} 初始错误={} 停止服务错误={:?}",
+        destination.display(),
+        failure.log_detail(),
+        stop_error
+    );
+    let message = if stopped_services.is_empty() {
+        "部署文件仍被其他程序占用，请关闭占用程序并确认当前账户可以修改部署目录后重试"
+    } else {
+        "部署文件仍被其他程序占用；受影响的服务已停止，请关闭占用程序后重新执行增量更新"
+    };
+    Err(match stop_error {
+        Some(error) => format!("{error}；{message}"),
+        None => message.to_string(),
+    })
+}
+
+fn stop_update_services(plan: &UpdatePlan, services: &[String]) -> Result<(), String> {
+    let mut args = vec!["stop"];
+    args.extend(services.iter().map(String::as_str));
+    compose_output(plan, &plan.compose, &args).map(|_| ())
 }
 
 fn wait_for_services(plan: &UpdatePlan, compose: &Path, services: &[String]) -> Result<(), String> {
@@ -1634,6 +1959,31 @@ mod tests {
     }
 
     #[test]
+    fn services_binding_path_includes_all_shared_mounts() {
+        let fixture = Fixture::new();
+        let root = fs::canonicalize(&fixture.0).unwrap();
+        let site = root.join("deploy/site");
+        let config = serde_json::json!({
+            "services": {
+                "web": {
+                    "volumes": [{ "type": "bind", "source": site }]
+                },
+                "worker": {
+                    "volumes": [{ "type": "bind", "source": root.join("deploy") }]
+                },
+                "batch": {
+                    "profiles": ["tools"],
+                    "volumes": [{ "type": "bind", "source": site }]
+                }
+            }
+        });
+        let services = services_binding_path(&config, &site);
+        assert!(services.contains("web"));
+        assert!(services.contains("worker"));
+        assert!(services.contains("batch"));
+    }
+
+    #[test]
     fn config_components_without_services_skip_mount_checks() {
         let fixture = Fixture::new();
         let root = fs::canonicalize(&fixture.0).unwrap();
@@ -1727,5 +2077,92 @@ mod tests {
         assert!(ensure_compose_env(&install, &deploy, &compose).is_err());
         fixture.write("deploy/.env", "MCP_TEST_ONLY_PASSWORD=secret\n");
         assert!(ensure_compose_env(&install, &deploy, &compose).is_ok());
+    }
+
+    #[test]
+    fn display_path_hides_windows_verbatim_prefix() {
+        assert_eq!(
+            display_path(Path::new(r"\\?\D:\400mbushu\backup\update-1")),
+            r"D:\400mbushu\backup\update-1"
+        );
+        assert_eq!(
+            display_path(Path::new(r"\\?\UNC\server\share\app")),
+            r"\\server\share\app"
+        );
+        assert_eq!(display_path(Path::new("/tmp/demo")), "/tmp/demo");
+    }
+
+    #[test]
+    fn rollback_failure_reports_previous_directory() {
+        let error = ReplaceError::Swap {
+            failure: backup::SwapFailure {
+                stage: backup::SwapStage::Install,
+                error: io::Error::new(io::ErrorKind::PermissionDenied, "写入失败"),
+                rollback: Err(io::Error::new(io::ErrorKind::PermissionDenied, "恢复失败")),
+            },
+            previous: PathBuf::from(r"\\?\D:\400mbushu\.deploy-update-old-1"),
+        };
+        let text = error.user_message();
+        assert!(text.contains("未能恢复"), "{text}");
+        assert!(text.contains(r"D:\400mbushu\.deploy-update-old-1"), "{text}");
+    }
+
+    #[test]
+    fn only_safe_swap_conflicts_trigger_service_stop_retry() {
+        let locked = ReplaceError::Swap {
+            failure: backup::SwapFailure {
+                stage: backup::SwapStage::MoveAside,
+                error: io::Error::new(io::ErrorKind::PermissionDenied, "占用"),
+                rollback: Ok(()),
+            },
+            previous: PathBuf::from("previous"),
+        };
+        assert!(locked.is_lock_conflict());
+        assert!(locked.can_retry_after_stop());
+
+        let copy_failure = ReplaceError::File(FileOperationError {
+            message: "复制更新文件失败".to_string(),
+            error: io::Error::new(io::ErrorKind::PermissionDenied, "权限"),
+        });
+        assert!(copy_failure.is_lock_conflict());
+        assert!(!copy_failure.can_retry_after_stop());
+
+        let rollback_failed = ReplaceError::Swap {
+            failure: backup::SwapFailure {
+                stage: backup::SwapStage::Install,
+                error: io::Error::new(io::ErrorKind::PermissionDenied, "写入失败"),
+                rollback: Err(io::Error::new(io::ErrorKind::PermissionDenied, "恢复失败")),
+            },
+            previous: PathBuf::from("previous"),
+        };
+        assert!(!rollback_failed.can_retry_after_stop());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replacement_keeps_new_files_when_old_directory_cannot_be_removed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if unsafe { libc::geteuid() } == 0 {
+            // root 不受目录写权限限制，无法在容器化 CI 中构造清理失败。
+            return;
+        }
+        let fixture = Fixture::new();
+        fixture.write("source/new.txt", "new");
+        fixture.write("target/deploy/app/old.txt", "old");
+        let target = fixture.0.join("target/deploy/app");
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o555)).unwrap();
+
+        let previous = replace_path(&fixture.0.join("source"), &target)
+            .unwrap()
+            .expect("旧目录清理应延后");
+        assert_eq!(fs::read_to_string(target.join("new.txt")).unwrap(), "new");
+        assert_eq!(
+            fs::read_to_string(previous.join("old.txt")).unwrap(),
+            "old"
+        );
+
+        fs::set_permissions(&previous, fs::Permissions::from_mode(0o755)).unwrap();
+        backup::remove_path(&previous).unwrap();
     }
 }

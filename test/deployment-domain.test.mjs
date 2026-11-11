@@ -140,3 +140,49 @@ test('failure text keeps the actionable reason instead of a generic docker messa
   assert.match(failureText('目标机 Docker 守护进程未运行，请先启动 Docker。', '预检'), /未运行/);
   assert.match(failureText('连接超时：请检查网络连通性。', '连接检查'), /检查目标主机连接/);
 });
+
+test('local deployment permission failures do not look like login failures', () => {
+  const local = failureText('复制更新文件失败，请检查空间和目录权限', '增量更新', {
+    remote: false
+  });
+  assert.match(local, /目录或文件权限/);
+  assert.doesNotMatch(local, /登录权限|凭证/);
+
+  const occupied = failureText(
+    '部署文件仍被其他程序占用，请关闭占用程序并确认当前账户可以修改部署目录后重试',
+    '增量更新',
+    { remote: false }
+  );
+  assert.match(occupied, /占用/);
+
+  const recovery = failureText(
+    '写入更新文件失败，原文件未能恢复，请使用备份目录或目标目录中的临时旧文件恢复后再试',
+    '增量更新',
+    { remote: false }
+  );
+  assert.match(recovery, /备份目录/);
+
+  assert.match(
+    failureText('Permission denied (publickey).', '增量更新', { remote: true }),
+    /登录权限和凭证/
+  );
+  const remoteFilePermission = failureText(
+    '无法读取 Docker Compose 清单，请检查文件权限',
+    '增量更新',
+    { remote: true }
+  );
+  assert.doesNotMatch(remoteFilePermission, /登录权限和凭证/);
+
+  for (const error of [
+    '当前 SSH 用户无权访问 Docker，请把用户加入 docker 用户组后重新登录',
+    'ssh: connect to host 10.0.0.1 port 22: Connection refused',
+    '镜像源登录失败，请检查用户名、密码、网络和仓库证书',
+    '已填写仓库用户名，请同时填写密码'
+  ]) {
+    assert.doesNotMatch(
+      failureText(error, '增量更新', { remote: true }),
+      /主机登录权限和凭证/,
+      error
+    );
+  }
+});
