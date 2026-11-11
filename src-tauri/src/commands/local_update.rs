@@ -1735,7 +1735,8 @@ mod tests {
             .get_args()
             .map(|value| value.to_string_lossy().into_owned())
             .collect();
-        let env_file = deploy_dir.join(".env").to_string_lossy().into_owned();
+        // Windows 上 canonicalize 会带上扩展前缀，传入 Docker 的必须是归一化后的路径。
+        let env_file = path_guard::docker_path(&deploy_dir.join(".env")).to_string_lossy().into_owned();
         assert!(
             args.windows(2)
                 .any(|pair| pair[0] == "--env-file" && pair[1] == env_file),
