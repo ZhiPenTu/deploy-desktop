@@ -126,15 +126,8 @@
             >
               下一步：选择并写入制品
             </el-button>
-            <el-button v-if="artifactBlockedCount" :disabled="busy" @click="emit('recheck')">
-              重新检查
-            </el-button>
             <p class="field-hint">
-              {{
-                artifactBlockedCount
-                  ? '先处理无法核对的路径并重新检查，才能继续。'
-                  : '下一步会写入所选组件；缺失或不一致的文件会随组件一并替换。'
-              }}
+              下一步会写入所选组件；缺失、不一致或无法核对的路径会随组件整体替换。
             </p>
           </div>
         </el-tab-pane>
@@ -438,14 +431,11 @@ const artifactProblemCount = computed(() => {
 const artifactFixableCount = computed(
   () =>
     (props.review?.artifacts || []).filter((artifact) =>
-      ['missing', 'incomplete'].includes(artifact.status)
+      ['missing', 'incomplete', 'unconfirmed', 'invalid'].includes(artifact.status)
     ).length
 );
 const artifactBlockedCount = computed(
-  () =>
-    (props.review?.artifacts || []).filter((artifact) =>
-      ['unconfirmed', 'invalid'].includes(artifact.status)
-    ).length
+  () => 0
 );
 const artifactHint = computed(() => {
   if (!props.review?.artifacts?.length) {
