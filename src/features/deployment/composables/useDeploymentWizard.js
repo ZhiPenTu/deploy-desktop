@@ -726,7 +726,7 @@ export function useDeploymentWizard(config, emit) {
         context.imageDir
       );
       const unavailableFiles = (verified.artifacts || []).filter((artifact) =>
-        ['missing', 'invalid', 'unconfirmed'].includes(artifact.status)
+        ['missing', 'incomplete', 'invalid', 'unconfirmed'].includes(artifact.status)
       );
       if (unavailableFiles.length) {
         throw new Error(

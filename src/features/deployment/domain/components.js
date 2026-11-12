@@ -33,7 +33,9 @@ export function deploymentComponents(plan) {
 
 export function missingArtifactIssue(plan, review, selected = []) {
   if (!review?.hasDeployment) return '';
-  const missing = (review.artifacts || []).filter((artifact) => artifact.status === 'missing');
+  const missing = (review.artifacts || []).filter((artifact) =>
+    ['missing', 'incomplete', 'unconfirmed', 'invalid'].includes(artifact.status)
+  );
   const unselected = missing.filter((artifact) =>
     !(plan?.components || []).some((component) =>
       selected.includes(component.key) &&
@@ -52,7 +54,7 @@ export function servicesAreReady(review) {
     ? review.services.filter((service) => service.change !== 'removed')
     : [];
   const filesReady = !(review?.artifacts || []).some((artifact) =>
-    ['missing', 'invalid', 'unconfirmed'].includes(artifact.status)
+    ['missing', 'incomplete', 'invalid', 'unconfirmed'].includes(artifact.status)
   );
   return Boolean(review?.targetChecked && filesReady && services.length && services.every((service) =>
     service.containerState === 'running' && !['unhealthy', 'starting'].includes(service.containerHealth)

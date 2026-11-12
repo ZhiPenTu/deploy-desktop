@@ -999,7 +999,7 @@ test('清单比对步骤在镜像齐全时显示就绪状态并允许继续', as
   expect(problems).toEqual([]);
 });
 
-test('制品文件缺失时提供写入入口，路径异常时阻止继续', async ({ page }) => {
+test('制品文件缺失或路径异常时提供写入入口', async ({ page }) => {
   const problems = [];
   page.on('pageerror', (error) => problems.push(`未捕获异常：${error.message}`));
   page.on('console', (message) => {
@@ -1066,11 +1066,9 @@ test('制品文件缺失时提供写入入口，路径异常时阻止继续', as
 
   const invalidReview = {
     ...missingReview,
-    ready: false,
-    canIncrementalUpdate: false,
     artifacts: [{ ...missingReview.artifacts[0], status: 'invalid' }],
-    artifactIssues: ['有 1 个制品路径与交付包声明的类型不一致或包含符号链接，请在目标机处理该路径后重新检查。'],
-    issues: ['有 1 个制品文件无法核对或路径异常，请处理目标目录后重新检查。']
+    artifactIssues: ['有 1 个制品路径与交付包声明的类型不一致或包含符号链接，可勾选对应组件后整体替换。'],
+    issues: []
   };
   await page.evaluate((review) => {
     const invoke = window.__TAURI_INTERNALS__.invoke;
@@ -1085,11 +1083,18 @@ test('制品文件缺失时提供写入入口，路径异常时阻止继续', as
   await page.getByRole('button', { name: '返回清单比对' }).click();
   await page.getByRole('tab', { name: '制品文件' }).click();
   await expect(page.getByRole('tabpanel').locator('.el-table__row').first()).toContainText('路径异常');
-  await expect(page.getByRole('button', { name: '下一步：选择更新' })).toBeDisabled();
-  await expect(page.locator('.next-blocked')).toContainText('制品文件无法核对或路径异常');
-  await expect(
-    page.getByRole('tabpanel', { name: '制品文件' }).getByRole('button', { name: '重新检查', exact: true })
-  ).toBeVisible();
+  const review = page
+    .locator('.step-card')
+    .filter({ has: page.getByRole('heading', { name: '核对目标环境' }) });
+  const replaceButton = page.getByRole('button', { name: '下一步：选择并写入制品' });
+  await expect(replaceButton).toBeEnabled();
+  await replaceButton.click();
+  await expect(page.getByRole('button', { name: '开始增量更新' })).toBeEnabled();
+  await page.getByRole('button', { name: '返回清单比对' }).click();
+  const reviewAfterReturn = page
+    .locator('.step-card')
+    .filter({ has: page.getByRole('heading', { name: '核对目标环境' }) });
+  await expect(reviewAfterReturn.locator('.status-row')).toContainText('制品 1 项待处理');
   expect(problems).toEqual([]);
 });
 

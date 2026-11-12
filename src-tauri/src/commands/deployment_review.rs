@@ -1570,12 +1570,12 @@ fn compare_with_artifacts(
         }
         if unconfirmed > 0 {
             artifact_issues.push(format!(
-                "有 {unconfirmed} 个制品文件无法核对，请检查目标目录权限后重新检查。"
+                "有 {unconfirmed} 个制品文件无法核对内容，可勾选对应组件后整体替换。"
             ));
         }
         if invalid > 0 {
             artifact_issues.push(format!(
-                "有 {invalid} 个制品路径与交付包声明的类型不一致或包含符号链接，请在目标机处理该路径后重新检查。"
+                "有 {invalid} 个制品路径与交付包声明的类型不一致或包含符号链接，可勾选对应组件后整体替换。"
             ));
         }
     } else {
@@ -1589,23 +1589,14 @@ fn compare_with_artifacts(
             .count();
         if unconfirmed > 0 {
             artifact_issues.push(format!(
-                "有 {unconfirmed} 个制品文件无法核对，请检查目标目录权限后重新检查。"
+                "有 {unconfirmed} 个制品文件无法核对内容，可直接写入替换。"
             ));
         }
         if invalid > 0 {
             artifact_issues.push(format!(
-                "有 {invalid} 个制品路径与交付包声明的类型不一致或包含符号链接，请在目标机处理该路径后重新检查。"
+                "有 {invalid} 个制品路径与交付包声明的类型不一致或包含符号链接，可直接写入替换。"
             ));
         }
-    }
-    let artifact_blocked = artifact_reviews
-        .iter()
-        .filter(|artifact| matches!(artifact.status.as_str(), "unconfirmed" | "invalid"))
-        .count();
-    if artifact_blocked > 0 {
-        issues.push(format!(
-            "有 {artifact_blocked} 个制品文件无法核对或路径异常，请处理目标目录后重新检查。"
-        ));
     }
     let ready =
         target.checked && target.docker_running && target.compose_available && issues.is_empty();
