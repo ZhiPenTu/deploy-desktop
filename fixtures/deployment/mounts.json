@@ -1,0 +1,87 @@
+{
+  "contract": {
+    "volumes": ["db-data"],
+    "dataServices": ["db"],
+    "preserve": ["/srv/app/deploy/backups"],
+    "managed": ["/srv/app/deploy/config", "/srv/app/app.jar"]
+  },
+  "cases": [
+    {
+      "name": "declared-named-volume",
+      "valid": true,
+      "config": {
+        "services": {"db": {"volumes": [{"type": "volume", "source": "db-data"}]}},
+        "volumes": {"db-data": {"name": "demo_db-data"}}
+      }
+    },
+    {
+      "name": "anonymous-database-volume",
+      "valid": false,
+      "config": {"services": {"db": {"volumes": [{"type": "volume", "target": "/data"}]}}}
+    },
+    {
+      "name": "undeclared-old-volume",
+      "valid": false,
+      "config": {"services": {"old-db": {"volumes": [{"type": "volume", "source": "legacy-data"}]}}}
+    },
+    {
+      "name": "external-named-volume",
+      "valid": false,
+      "config": {
+        "services": {"db": {"volumes": [{"type": "volume", "source": "db-data"}]}},
+        "volumes": {"db-data": {"name": "external-db", "external": true}}
+      }
+    },
+    {
+      "name": "remote-volume-driver-options",
+      "valid": false,
+      "config": {
+        "services": {"db": {"volumes": [{"type": "volume", "source": "db-data"}]}},
+        "volumes": {"db-data": {"name": "demo_db-data", "driver_opts": {"type": "nfs", "device": ":/database"}}}
+      }
+    },
+    {
+      "name": "writable-host-database",
+      "valid": false,
+      "config": {"services": {"db": {"volumes": [{"type": "bind", "source": "/srv/app/pgdata", "target": "/data"}]}}}
+    },
+    {
+      "name": "database-cannot-use-preserve-as-backup",
+      "valid": false,
+      "config": {"services": {"db": {"volumes": [{"type": "bind", "source": "/srv/app/deploy/backups/db", "target": "/data"}]}}}
+    },
+    {
+      "name": "managed-readonly-code-and-config",
+      "valid": true,
+      "config": {"services": {"app": {"volumes": [
+        {"type": "bind", "source": "/srv/app/app.jar", "read_only": true},
+        {"type": "bind", "source": "/srv/app/deploy/config/app.yml", "read_only": true}
+      ]}}}
+    },
+    {
+      "name": "managed-code-cannot-store-data",
+      "valid": false,
+      "config": {"services": {"app": {"volumes": [{"type": "bind", "source": "/srv/app/deploy/config/db"}]}}}
+    },
+    {
+      "name": "app-backups-preserved",
+      "valid": true,
+      "config": {"services": {"app": {"volumes": [{"type": "bind", "source": "/srv/app/deploy/backups"}]}}}
+    },
+    {
+      "name": "preserve-prefix-is-not-directory",
+      "valid": false,
+      "config": {"services": {"app": {"volumes": [{"type": "bind", "source": "/srv/app/deploy/backups-other"}]}}}
+    },
+    {
+      "name": "inherited-volumes",
+      "valid": false,
+      "config": {"services": {"app": {"volumes_from": ["other"]}}}
+    },
+    {
+      "name": "transient-tmpfs",
+      "valid": true,
+      "config": {"services": {"app": {"volumes": [{"type": "tmpfs", "target": "/tmp"}]}}}
+    }
+  ]
+}

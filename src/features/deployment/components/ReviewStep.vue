@@ -36,7 +36,7 @@
       </div>
       <el-alert
         v-if="review.hasDeployment && review.composeChanged"
-        title="配置有变化，可继续选择更新内容；仅勾选“部署配置”时才会替换配置文件。"
+        title="配置有变化。完整版本部署会替换全部部署配置，并在失败时恢复上一版本。"
         type="info"
         :closable="false"
         show-icon
@@ -124,7 +124,7 @@
               :disabled="busy || !review.ready"
               @click="emit('next')"
             >
-              下一步：选择并写入制品
+              下一步：部署完整版本
             </el-button>
             <el-button v-if="artifactBlockedCount" :disabled="busy" @click="emit('recheck')">
               重新检查
@@ -133,7 +133,7 @@
               {{
                 artifactBlockedCount
                   ? '先处理无法核对的路径并重新检查，才能继续。'
-                  : '下一步会写入所选组件；缺失或不一致的文件会随组件一并替换。'
+                  : '下一步会写入交付包声明的全部受管文件。'
               }}
             </p>
           </div>
@@ -335,7 +335,7 @@
           {{ imageNextBlockedReason }}
         </p>
         <el-button type="primary" :disabled="busy || !review?.ready" @click="emit('next')">
-          下一步：选择更新
+          下一步：部署版本
           <el-icon class="el-icon--right"><ArrowRight /></el-icon>
         </el-button>
       </div>
@@ -452,7 +452,7 @@ const artifactHint = computed(() => {
     return '交付包没有声明需要写入目标目录的制品文件。';
   }
   return props.review.hasDeployment
-    ? '这里显示目标机上实际存在的制品文件；缺失或不一致的文件会在下一步增量更新时替换。'
+    ? '这里显示目标机上实际存在的制品文件；下一步会部署完整版本，全部受管文件以交付包为准。'
     : '首次部署会在下一步把这些制品文件写入目标目录。';
 });
 const prepareButtonText = computed(() => {

@@ -69,7 +69,25 @@ pub struct RuntimeSpec {
     #[serde(default)]
     pub services: Vec<ServiceSpec>,
     #[serde(default)]
+    pub data: Option<RuntimeDataSpec>,
+    #[serde(default)]
     pub database: Option<DatabaseSpec>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ServiceRole {
+    App,
+    Data,
+}
+
+impl ServiceRole {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ServiceRole::App => "app",
+            ServiceRole::Data => "data",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -78,6 +96,8 @@ pub struct ServiceSpec {
     pub key: String,
     pub label: String,
     #[serde(default)]
+    pub role: Option<ServiceRole>,
+    #[serde(default)]
     pub port: Option<u16>,
     #[serde(default)]
     pub protocol: String,
@@ -85,6 +105,38 @@ pub struct ServiceSpec {
     pub description: String,
     #[serde(default)]
     pub container: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeDataSpec {
+    #[serde(default)]
+    pub volumes: Vec<DataVolumeSpec>,
+    #[serde(default)]
+    pub paths: Vec<DataPathSpec>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DataVolumeSpec {
+    pub name: String,
+    pub service: String,
+    pub image: String,
+    #[serde(default)]
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DataPathMode {
+    Preserve,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DataPathSpec {
+    pub path: String,
+    pub mode: DataPathMode,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -214,7 +266,36 @@ pub struct DeployedRecord {
     pub product: String,
     pub version: String,
     pub installed_at: String,
+    #[serde(default)]
     pub artifacts: Vec<DeployedArtifact>,
+    #[serde(default)]
+    pub images: Vec<DeployedImage>,
+    #[serde(default)]
+    pub compose_files: Vec<DeployedComposeFile>,
+    #[serde(default)]
+    pub effective_compose: String,
+    #[serde(default)]
+    pub env_sha256: String,
+    #[serde(default)]
+    pub data_volumes: Vec<String>,
+    #[serde(default)]
+    pub transaction_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeployedImage {
+    pub reference: String,
+    pub image_id: String,
+    #[serde(default)]
+    pub platform: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeployedComposeFile {
+    pub path: String,
+    pub sha256: String,
 }
 
 pub const DEPLOYED_RECORD_DIR: &str = ".deploy-desktop";
@@ -431,8 +512,26 @@ impl Bundle {
     }
 
     pub fn deployed_record(&self, project_id: &str) -> DeployedRecord {
+        let compose_files = [self.descriptor.runtime.compose.trim(), self.effective_compose()]
+            .into_iter()
+            .filter(|source| !source.is_empty())
+            .filter_map(|source| {
+                let artifact = self.artifact_for_source(source)?;
+                let digest = self
+                    .descriptor
+                    .files
+                    .iter()
+                    .find(|file| file.path.trim() == source)
+                    .map(|file| file.sha256.to_ascii_lowercase())
+                    .unwrap_or_default();
+                Some(DeployedComposeFile {
+                    path: artifact.path.clone(),
+                    sha256: digest,
+                })
+            })
+            .collect();
         DeployedRecord {
-            schema_version: 1,
+            schema_version: 2,
             project_id: project_id.to_string(),
             product: self.product().to_string(),
             version: self.version().to_string(),
@@ -448,7 +547,89 @@ impl Bundle {
                     kind: artifact.kind.as_str().to_string(),
                 })
                 .collect(),
+            images: Vec::new(),
+            compose_files,
+            effective_compose: self.artifact_for_source(self.effective_compose())
+                .map(|artifact| match artifact.root {
+                    ArtifactRoot::Install => artifact.path.clone(),
+                    ArtifactRoot::Deploy => {
+                        let deploy = self.deploy_source_rel();
+                        if deploy.is_empty() { artifact.path.clone() } else { format!("{deploy}/{}", artifact.path) }
+                    }
+                }).unwrap_or_default(),
+            env_sha256: String::new(),
+            data_volumes: self
+                .descriptor
+                .runtime
+                .data
+                .as_ref()
+                .map(|data| data.volumes.iter().map(|volume| volume.name.clone()).collect())
+                .unwrap_or_default(),
+            transaction_id: None,
         }
+    }
+
+    /// 完整版本部署必须能判断服务角色、持久数据卷与宿主保留目录。
+    /// 旧交付包仍可被兼容命令加载，但不能进入完整版本部署事务。
+    pub fn ensure_full_deploy_metadata(&self) -> Result<(), String> {
+        let runtime = &self.descriptor.runtime;
+        for source in [runtime.compose.trim(), self.effective_compose()] {
+            if source.is_empty() {
+                continue;
+            }
+            let artifact = self.artifact_for_source(source).ok_or_else(|| {
+                format!("交付包未声明 Compose 清单 {source} 对应的部署产物，请重新构建制品")
+            })?;
+            if !matches!(artifact.root, ArtifactRoot::Deploy) {
+                return Err(
+                    "完整版本部署要求 Compose 清单部署在 Compose 目录（deploy 根），请重新构建制品"
+                        .to_string(),
+                );
+            }
+        }
+        let missing_roles: Vec<&str> = runtime
+            .services
+            .iter()
+            .filter(|service| service.role.is_none())
+            .map(|service| service.key.as_str())
+            .collect();
+        if !missing_roles.is_empty() {
+            return Err(format!(
+                "交付包未声明服务角色：{}。完整版本部署无法判断应用与数据服务，请重新构建制品",
+                missing_roles.join("、")
+            ));
+        }
+        if runtime.services.iter().any(|service| service.key.eq_ignore_ascii_case("frontend") && service.port.is_none()) {
+            return Err("网页服务未声明 HTTP 端口，无法验证完整版本就绪".to_string());
+        }
+        let data = runtime.data.as_ref().ok_or_else(|| {
+            "交付包未声明持久数据卷，无法保证部署失败后恢复数据。请重新构建制品".to_string()
+        })?;
+        for service in &runtime.services {
+            if service.role == Some(ServiceRole::Data)
+                && !data.volumes.iter().any(|volume| volume.service == service.key)
+            {
+                return Err(format!("数据服务 {} 未声明可冷备的持久数据卷", service.key));
+            }
+        }
+        if let Some(database) = &runtime.database {
+            if !runtime.services.iter().any(|service| {
+                service.key == database.service_key && service.role == Some(ServiceRole::Data)
+            }) {
+                return Err(format!("数据库服务 {} 必须声明为数据服务", database.service_key));
+            }
+            if !data
+                .volumes
+                .iter()
+                .any(|volume| volume.service.trim() == database.service_key.trim())
+            {
+                return Err(format!(
+                    "交付包未声明数据库服务 {} 的持久数据卷，无法安全部署",
+                    database.service_key
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub fn ensure_tool_version(&self, tool_version: &str) -> Result<(), String> {
@@ -513,6 +694,55 @@ impl Bundle {
                 return Err(format!("交付包服务 {key} 缺少显示名称，请重新构建制品"));
             }
         }
+        let mut data_volume_names: BTreeSet<&str> = BTreeSet::new();
+        if let Some(data) = &runtime.data {
+            for volume in &data.volumes {
+                let name = volume.name.trim();
+                if name.is_empty()
+                    || name.contains(['/', '\\', '\n', '\r', '\0', ' '])
+                    || name == "."
+                    || name == ".."
+                {
+                    return Err("交付包声明的数据卷名称无效，请重新构建制品".to_string());
+                }
+                if !data_volume_names.insert(name) {
+                    return Err(format!("交付包重复声明数据卷 {name}，请重新构建制品"));
+                }
+                if !service_keys.contains(volume.service.trim()) {
+                    return Err(format!(
+                        "交付包数据卷 {name} 引用了未声明的服务 {}，请重新构建制品",
+                        volume.service
+                    ));
+                }
+                if volume.image.trim().is_empty()
+                    || !descriptor
+                        .images
+                        .iter()
+                        .any(|image| image.name.trim() == volume.image.trim())
+                {
+                    return Err(format!(
+                        "交付包数据卷 {name} 未引用已声明的备份镜像，请重新构建制品"
+                    ));
+                }
+            }
+            if runtime.database.is_some()
+                && !data.volumes.iter().any(|volume| {
+                    runtime
+                        .database
+                        .as_ref()
+                        .map(|database| volume.service.trim() == database.service_key.trim())
+                        .unwrap_or(false)
+                })
+            {
+                return Err(
+                    "交付包声明了数据库，但未声明数据库服务的持久数据卷，请重新构建制品"
+                        .to_string(),
+                );
+            }
+            for path in &data.paths {
+                safe_relative(&path.path, "保留数据目录")?;
+            }
+        }
         if let Some(database) = &runtime.database {
             if database.service_key.trim().is_empty() || database.client.trim().is_empty() {
                 return Err("交付包的数据库声明不完整，请重新构建制品".to_string());
@@ -562,6 +792,30 @@ impl Bundle {
             }
             if !targets.insert((artifact.root.as_str().to_string(), target.clone())) {
                 return Err(format!("交付包重复声明部署位置 {target}，请重新构建制品"));
+            }
+            let install_relative = match artifact.root {
+                ArtifactRoot::Install => target.clone(),
+                ArtifactRoot::Deploy => {
+                    let deploy_rel = self.deploy_source_rel();
+                    if deploy_rel.is_empty() {
+                        target.clone()
+                    } else {
+                        format!("{deploy_rel}/{target}")
+                    }
+                }
+            };
+            if let Some(data) = &runtime.data {
+                for preserved in &data.paths {
+                    let preserved = preserved.path.trim().replace('\\', "/");
+                    if install_relative == preserved
+                        || install_relative.starts_with(&format!("{preserved}/"))
+                        || preserved.starts_with(&format!("{install_relative}/"))
+                    {
+                        return Err(format!(
+                            "产物 {key} 会覆盖保留数据目录 {preserved}，请重新构建制品"
+                        ));
+                    }
+                }
             }
             let owned: Vec<String> = match artifact.kind {
                 ArtifactKind::File => {
@@ -824,6 +1078,20 @@ pub fn read_deployed_record(install_dir: &Path) -> Option<DeployedRecord> {
     let path = install_dir.join(DEPLOYED_RECORD_DIR).join(DEPLOYED_RECORD_FILE);
     let text = fs::read_to_string(path).ok()?;
     serde_json::from_str(&text).ok()
+}
+
+pub fn read_deployed_record_strict(
+    install_dir: &Path,
+) -> Result<Option<DeployedRecord>, String> {
+    let path = install_dir.join(DEPLOYED_RECORD_DIR).join(DEPLOYED_RECORD_FILE);
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("无法读取上一版本部署记录：{error}")),
+    };
+    serde_json::from_str(&text)
+        .map(Some)
+        .map_err(|_| "上一版本部署记录格式无效，请确认旧部署状态后再部署".to_string())
 }
 
 fn chrono_like_now() -> String {
@@ -1301,5 +1569,15 @@ mod tests {
                 case["name"]
             );
         }
+    }
+
+    #[test]
+    fn generated_bundle_contract_can_be_verified_externally() {
+        let Ok(dir) = std::env::var("DEPLOY_BUNDLE_CONTRACT_DIR") else {
+            return;
+        };
+        let bundle = Bundle::load(Path::new(&dir)).unwrap();
+        bundle.verify_payload().unwrap();
+        bundle.ensure_full_deploy_metadata().unwrap();
     }
 }

@@ -80,7 +80,10 @@ async function main() {
   await client.connect(transport);
   try {
     const tools = await client.listTools();
-    assert.equal(tools.tools.length, 51);
+    assert.equal(tools.tools.length, 54);
+    for (const name of ['deploy_version_remote', 'deploy_transaction_status', 'deploy_transaction_recover']) {
+      assert.ok(tools.tools.some((tool) => tool.name === name), name);
+    }
     console.log(`tools: ${tools.tools.length}`);
 
     const profile = parse(await client.callTool({ name: 'deploy_profile_get', arguments: {} }));
@@ -125,6 +128,21 @@ async function main() {
     assert.equal(denied.isError, true);
     assert.equal(parse(denied).code, 'CONFIRM_REQUIRED');
     console.log('confirm boundary: CONFIRM_REQUIRED');
+    for (const [name, args] of [
+      ['deploy_version_remote', { bundleDir }],
+      ['deploy_transaction_recover', {}]
+    ]) {
+      const result = await client.callTool({ name, arguments: args });
+      assert.equal(result.isError, true);
+      assert.equal(parse(result).code, 'CONFIRM_REQUIRED');
+    }
+    const partial = await client.callTool({
+      name: 'deploy_update_remote',
+      arguments: { bundleDir, components: [], dryRun: true }
+    });
+    assert.equal(partial.isError, true);
+    assert.equal(parse(partial).code, 'FULL_DEPLOY_REQUIRED');
+    console.log('version deployment boundaries: OK');
   } finally {
     await client.close();
   }

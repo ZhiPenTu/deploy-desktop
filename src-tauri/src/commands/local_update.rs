@@ -11,7 +11,7 @@ use serde::Serialize;
 use serde_json::Value;
 use tauri::Emitter;
 
-use super::bundle::{ArtifactRoot, Bundle, IMAGE_COMPONENT};
+use super::bundle::{default_components, ArtifactRoot, Bundle, IMAGE_COMPONENT};
 use super::remote_update::RemoteUpdateProgress;
 use crate::core::{backup, compose, path_guard, process};
 
@@ -175,6 +175,19 @@ fn run_update(
     backup: bool,
     dry_run: bool,
 ) -> Result<LocalUpdateResult, String> {
+    if !backup {
+        return Err("当前版本已改为完整版本部署，不支持关闭部署前备份".to_string());
+    }
+    let bundle = Bundle::load(Path::new(bundle_dir.trim()))?;
+    let expected = default_components(&bundle);
+    let mut actual = components.clone();
+    let mut expected_sorted = expected;
+    actual.sort();
+    actual.dedup();
+    expected_sorted.sort();
+    if actual != expected_sorted {
+        return Err("当前版本已改为完整版本部署，不支持部分组件更新".to_string());
+    }
     static LOCAL_UPDATE_LOCK: Mutex<()> = Mutex::new(());
     let _guard = LOCAL_UPDATE_LOCK
         .try_lock()

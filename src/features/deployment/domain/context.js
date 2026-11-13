@@ -12,12 +12,8 @@ export function createDeploymentContext({
   connection,
   remote,
   bundle,
-  components,
-  backup,
-  action,
   label,
-  imageDir = '',
-  allowedComponents = []
+  imageDir = ''
 }) {
   if (!validInstallDir(connection.installDir, remote)) throw new Error('请填写有效的部署目录，不能使用根目录或上级路径。');
   if (remote && (!connection.remoteHost?.trim() || !connection.remoteUser?.trim())) {
@@ -27,12 +23,6 @@ export function createDeploymentContext({
     throw new Error('请填写有效的 SSH 端口。');
   }
   if (!bundle?.dir?.trim()) throw new Error('请先选择并检查交付包。');
-  if (!['first', 'incremental'].includes(action)) throw new Error('请选择部署方式。');
-  if (!Array.isArray(components) || (action === 'incremental' && !components.length)) {
-    throw new Error('请至少选择一个更新组件。');
-  }
-  const allowed = new Set(Array.isArray(allowedComponents) ? allowedComponents : []);
-  if (components.some((key) => !allowed.has(key))) throw new Error('更新组件无效，请重新选择交付包。');
   return Object.freeze({
     remote,
     host: connection.remoteHost,
@@ -43,9 +33,6 @@ export function createDeploymentContext({
     installDir: connection.installDir.trim(),
     imageDir,
     version: bundle.version,
-    components: Object.freeze([...components]),
-    backup,
-    action,
     label
   });
 }

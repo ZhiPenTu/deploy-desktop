@@ -1,45 +1,28 @@
 <template>
   <div class="step-card">
-    <h3>选择部署操作</h3>
+    <h3>部署完整版本</h3>
     <p class="desc">
       目标 {{ targetLabel }}，部署目录 {{ installDir }}，制品版本 {{ version || '未标记' }}。
+      本次会部署交付包声明的全部服务和配置，不再进行部分组件更新。
     </p>
-    <el-radio-group
-      :model-value="action"
-      class="deployment-actions"
-      :disabled="locked"
-      @update:model-value="(value) => emit('update:action', value)"
-    >
-      <el-radio value="first" border :disabled="!review?.canFirstDeploy">
-        <span class="action-title">首次部署</span>
-        <span class="action-description">写入交付包并启动清单中的服务，适用于尚未部署的目标目录。</span>
-      </el-radio>
-      <el-radio value="incremental" border :disabled="!review?.canIncrementalUpdate">
-        <span class="action-title">增量更新</span>
-        <span class="action-description">备份并替换所选内容，重启受影响的服务，适用于已有部署。</span>
-      </el-radio>
-    </el-radio-group>
-    <el-form v-if="action === 'incremental'" label-width="110px" @submit.prevent>
-      <el-form-item label="更新内容">
-        <el-checkbox-group
-          :model-value="components"
-          :disabled="locked"
-          @update:model-value="(value) => emit('update:components', value)"
-        >
-          <el-checkbox v-for="component in componentOptions" :key="component.key" :value="component.key">
-            {{ component.label }}
-          </el-checkbox>
-        </el-checkbox-group>
-      </el-form-item>
-      <el-form-item label="更新前备份">
-        <el-switch
-          :model-value="backup"
-          :disabled="locked"
-          @update:model-value="(value) => emit('update:backup', value)"
-        />
-        <span class="field-hint backup-hint">保留被替换文件，便于需要时恢复。</span>
-      </el-form-item>
-    </el-form>
+    <el-alert
+      v-if="transactionBlocked"
+      :title="
+        transactionNeedsManual
+          ? '上次自动恢复未完成或恢复被中断，处理完成前不能开始新部署。'
+          : '检测到未完成的部署事务，处理完成前不能开始新部署。'
+      "
+      :description="
+        transactionNeedsManual
+          ? `现场已保留：${transaction?.snapshotDir || '事务快照目录'}。请按恢复错误排查后人工恢复，系统不会重复自动恢复。`
+          : transaction?.error
+          ? `失败原因：${transaction.error}`
+          : '可以恢复部署前的版本和业务数据。'
+      "
+      type="error"
+      :closable="false"
+      show-icon
+    />
     <el-alert
       v-if="artifactSelectionIssue"
       :title="artifactSelectionIssue"
@@ -47,14 +30,77 @@
       :closable="false"
       show-icon
     />
+
+    <div class="deployment-summary">
+      <div class="summary-item">
+        <span class="summary-label">部署方式</span>
+        <strong>完整版本部署</strong>
+      </div>
+      <div class="summary-item">
+        <span class="summary-label">服务</span>
+        <strong>{{ services.length }} 个</strong>
+      </div>
+      <div class="summary-item">
+        <span class="summary-label">停机</span>
+        <strong>短暂停机，按数据量估算备份与恢复耗时</strong>
+      </div>
+      <div class="summary-item">
+        <span class="summary-label">失败处理</span>
+        <strong>自动恢复上一版本</strong>
+      </div>
+      <div class="summary-item">
+        <span class="summary-label">备份空间</span>
+        <strong>{{ backupEstimate }}</strong>
+      </div>
+    </div>
+
+    <el-form label-width="110px" class="deployment-detail" @submit.prevent>
+      <el-form-item label="受影响服务">
+        <div class="tag-row">
+          <el-tag v-for="service in services" :key="service.key" type="info">
+            {{ service.label || service.key }}
+          </el-tag>
+          <span v-if="!services.length" class="field-hint">未读取到服务清单</span>
+        </div>
+      </el-form-item>
+      <el-form-item label="保留数据">
+        <div class="tag-row">
+          <el-tag v-for="volume in dataVolumes" :key="volume.name" type="success">
+            {{ volume.name }}
+          </el-tag>
+          <el-tag v-for="path in dataPaths" :key="path.path" type="success">
+            {{ path.path }}
+          </el-tag>
+          <span v-if="!dataVolumes.length && !dataPaths.length" class="field-hint">
+            交付包未声明数据卷
+          </span>
+        </div>
+      </el-form-item>
+    </el-form>
     <el-alert
-      v-if="preflightPassed && !result"
-      title="预检通过，可以开始执行。"
-      type="success"
+      title="部署失败时会停止新版本、恢复部署前的受管文件与数据卷，并重新启动上一版本。失败期间的新写入会一并撤回。"
+      type="info"
       :closable="false"
       show-icon
     />
-    <el-alert v-if="operationError" :title="operationError" type="error" :closable="false" show-icon />
+
+    <el-alert
+      v-if="preflightPassed && !result"
+      title="预检通过，可以开始完整版本部署。"
+      :description="preflightMessage"
+      type="success"
+      :closable="false"
+      show-icon
+      class="spaced"
+    />
+    <el-alert
+      v-if="operationError"
+      :title="operationError"
+      type="error"
+      :closable="false"
+      show-icon
+      class="spaced"
+    />
     <div v-if="executing || phase" class="execution-status" role="status" aria-live="polite">
       <el-icon v-if="executing" class="is-loading">
         <Loading />
@@ -69,28 +115,35 @@
         · 已用时 {{ elapsedText }}
       </p>
       <p class="field-hint">
-        应用配置后的服务就绪检查最长约 3 分钟，请保持页面打开，完成或失败后都会显示结果。
+        数据卷备份与恢复可能持续较长时间，请保持页面打开。连接中断不会终止目标机上的部署事务。
       </p>
     </div>
     <div v-if="result" class="execution-result">
       <el-alert
-        :title="
-          result.success
-            ? action === 'first'
-              ? '首次部署执行完成'
-              : '增量更新执行完成'
-            : result.pending
-            ? '操作已执行，服务待确认'
-            : '操作未完成'
-        "
+        :title="resultTitle"
         :description="result.message"
-        :type="result.success ? 'success' : result.pending ? 'warning' : 'error'"
+        :type="resultTone"
         :closable="false"
         show-icon
       />
-      <p v-if="result.backupDir" class="field-hint">备份目录：{{ result.backupDir }}</p>
-      <el-button v-if="result.success || result.pending" type="primary" plain @click="emit('go-dashboard')">
+      <p v-if="result.snapshotDir && !result.success" class="field-hint">
+        事务快照：{{ result.snapshotDir }}
+      </p>
+      <el-button
+        v-if="result.success"
+        type="primary"
+        plain
+        @click="emit('go-dashboard')"
+      >
         查看集群监控
+      </el-button>
+      <el-button
+        v-if="transactionBlocked && !transactionNeedsManual"
+        type="primary"
+        :loading="recoveringTransaction"
+        @click="emit('recover')"
+      >
+        恢复上一版本
       </el-button>
     </div>
     <el-collapse v-if="diagnostics" class="optional-panel">
@@ -98,15 +151,45 @@
         <pre class="terminal-log">{{ diagnostics }}</pre>
       </el-collapse-item>
     </el-collapse>
+    <el-alert
+      v-if="transactionNeedsManual || result?.recoveryFailed"
+      title="请联系工程师完成人工恢复"
+      type="error"
+      :closable="false"
+      show-icon
+    >
+      <p>请提供事务编号、快照路径和执行详情，保留全部备份，不要清空数据或再次部署。</p>
+      <ol>
+        <li>确认目标服务均已停止，核对文件与数据卷备份的完整性。</li>
+        <li>按快照清单恢复部署文件，再按数据卷清单恢复部署前的数据。</li>
+        <li>使用上一版本的配置与镜像启动服务，检查健康状态及网页访问后再恢复业务。</li>
+      </ol>
+    </el-alert>
     <div class="step-footer">
       <el-button :disabled="busy" @click="emit('previous')"> 返回清单比对 </el-button>
       <div class="input-row wrap">
-        <el-button :loading="preflighting" :disabled="!canExecute || locked" @click="emit('preflight')">
-          执行预检
+        <el-button
+          v-if="transactionBlocked && !transactionNeedsManual"
+          type="warning"
+          :loading="recoveringTransaction"
+          :disabled="busy"
+          @click="emit('recover')"
+        >
+          恢复上一版本
         </el-button>
-        <el-button type="primary" :loading="executing" :disabled="!canExecute || locked" @click="emit('execute')">
-          {{ action === 'first' ? '开始首次部署' : '开始增量更新' }}
-        </el-button>
+        <template v-else>
+          <el-button :loading="preflighting" :disabled="!canExecute || locked" @click="emit('preflight')">
+            执行预检
+          </el-button>
+          <el-button
+            type="primary"
+            :loading="executing"
+            :disabled="!canExecute || locked"
+            @click="emit('execute')"
+          >
+            开始完整版本部署
+          </el-button>
+        </template>
       </div>
     </div>
   </div>
@@ -120,17 +203,17 @@ const props = defineProps({
   targetLabel: { type: String, default: '' },
   installDir: { type: String, default: '' },
   version: { type: String, default: '' },
-  action: { type: String, default: 'first' },
-  components: { type: Array, default: () => [] },
-  componentOptions: { type: Array, default: () => [] },
-  backup: { type: Boolean, default: true },
+  plan: { type: Object, default: null },
   review: { type: Object, default: null },
+  transaction: { type: Object, default: null },
   busy: { type: Boolean, default: false },
   canExecute: { type: Boolean, default: false },
   artifactSelectionIssue: { type: String, default: '' },
   preflighting: { type: Boolean, default: false },
   preflightPassed: { type: Boolean, default: false },
+  preflightMessage: { type: String, default: '' },
   executing: { type: Boolean, default: false },
+  recoveringTransaction: { type: Boolean, default: false },
   phase: { type: String, default: '' },
   operationError: { type: String, default: '' },
   progressPercent: { type: Number, default: 0 },
@@ -141,18 +224,46 @@ const props = defineProps({
   diagnostics: { type: String, default: '' }
 });
 
-const emit = defineEmits([
-  'update:action',
-  'update:components',
-  'update:backup',
-  'previous',
-  'preflight',
-  'execute',
-  'go-dashboard'
-]);
+const emit = defineEmits(['previous', 'preflight', 'execute', 'go-dashboard', 'recover']);
 
-/** 执行已开始或已出结果时，操作选择不再接受修改。 */
-const locked = computed(() => props.busy || Boolean(props.result?.success || props.result?.pending));
+const services = computed(() =>
+  (props.plan?.services?.length
+    ? props.plan.services
+    : props.review?.services || []
+  ).filter(
+    (service) => service.change !== 'removed'
+  ).map((service) => ({
+    ...service,
+    key: service.key || service.name,
+    label: service.label || service.name || service.key
+  }))
+);
+const dataVolumes = computed(() => props.plan?.dataVolumes || []);
+const dataPaths = computed(() => props.plan?.dataPaths || []);
+const transactionBlocked = computed(
+  () =>
+    Boolean(props.transaction) &&
+    !['committed', 'recovered'].includes(props.transaction.state)
+);
+const transactionNeedsManual = computed(
+  () => ['recovery_failed', 'recovering'].includes(props.transaction?.state)
+);
+const backupEstimate = computed(() => {
+  const match = props.preflightMessage.match(/预计备份空间约\s*([\d.]+\s*GB)/);
+  return match ? match[1] : '预检时按数据量估算';
+});
+const locked = computed(() => props.busy || Boolean(props.result?.success));
+const resultTitle = computed(() => {
+  if (props.result?.success) return '完整版本部署完成';
+  if (props.result?.recovered) return '新版本部署失败，已恢复上一版本';
+  if (props.result?.recoveryFailed) return '新版本失败，自动恢复未完成';
+  return '部署未完成';
+});
+const resultTone = computed(() => {
+  if (props.result?.success) return 'success';
+  if (props.result?.recovered) return 'warning';
+  return 'error';
+});
 </script>
 
 <style scoped>
@@ -176,6 +287,47 @@ h3 {
   line-height: 1.6;
   margin-bottom: 22px;
 }
+.deployment-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+  margin: 18px 0;
+}
+.summary-item {
+  padding: 14px 16px;
+  background: var(--panel-subtle);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+}
+.summary-label {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.summary-item strong {
+  font-size: 13px;
+  color: var(--text-main);
+}
+.deployment-detail {
+  margin: 10px 0 18px;
+}
+.tag-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.field-hint {
+  width: 100%;
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.65;
+  margin-top: 6px;
+  overflow-wrap: anywhere;
+}
+.spaced {
+  margin-top: 14px;
+}
 .input-row {
   display: flex;
   align-items: center;
@@ -197,65 +349,10 @@ h3 {
 .step-footer > .input-row {
   width: auto;
 }
-.field-hint {
-  width: 100%;
-  font-size: 12px;
-  color: var(--text-muted);
-  line-height: 1.65;
-  margin-top: 6px;
-  overflow-wrap: anywhere;
-}
 .optional-panel,
 .execution-result,
 .execution-status {
   margin-top: 20px;
-}
-.deployment-actions {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 16px;
-  width: 100%;
-  margin: 12px 0 24px;
-}
-.deployment-actions :deep(.el-radio) {
-  margin: 0;
-  padding: 20px 22px;
-  height: auto;
-  white-space: normal;
-  align-items: flex-start;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border-color);
-  background: var(--panel-bg);
-  box-shadow: var(--shadow-card);
-  transition: all 0.18s ease;
-}
-.deployment-actions :deep(.el-radio.is-bordered.is-checked) {
-  border-color: var(--primary-color);
-  background: var(--primary-soft);
-  box-shadow: var(--shadow-raised);
-}
-.deployment-actions :deep(.el-radio__input) {
-  margin-top: 4px;
-}
-.deployment-actions :deep(.el-radio__label) {
-  white-space: normal;
-}
-.action-title {
-  display: block;
-  font-size: 14.5px;
-  font-weight: 600;
-  color: var(--text-main);
-  margin-bottom: 6px;
-}
-.action-description {
-  display: block;
-  font-size: 12px;
-  line-height: 1.65;
-  color: var(--text-muted);
-}
-.backup-hint {
-  width: auto;
-  margin: 0 0 0 12px;
 }
 .execution-status {
   display: flex;
@@ -294,11 +391,16 @@ h3 {
   line-height: 1.65;
   box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.4);
 }
+@media (max-width: 900px) {
+  .deployment-summary {
+    grid-template-columns: 1fr 1fr;
+  }
+}
 @media (max-width: 760px) {
   .step-card {
     padding: 20px;
   }
-  .deployment-actions {
+  .deployment-summary {
     grid-template-columns: 1fr;
   }
   .step-footer {

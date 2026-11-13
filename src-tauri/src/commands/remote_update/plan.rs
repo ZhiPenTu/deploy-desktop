@@ -31,10 +31,27 @@ pub struct PlanImage {
 pub struct PlanService {
     pub key: String,
     pub label: String,
+    pub role: String,
     pub container: String,
     pub port: Option<u16>,
     pub protocol: String,
     pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanDataVolume {
+    pub name: String,
+    pub service: String,
+    pub image: String,
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanDataPath {
+    pub path: String,
+    pub mode: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -96,6 +113,8 @@ pub struct BundlePlan {
     pub variant: String,
     pub components: Vec<PlanComponent>,
     pub services: Vec<PlanService>,
+    pub data_volumes: Vec<PlanDataVolume>,
+    pub data_paths: Vec<PlanDataPath>,
     pub database: Option<PlanDatabase>,
     pub images: Vec<PlanImage>,
     pub image_check: String,
@@ -149,6 +168,10 @@ pub fn inspect_bundle_plan_blocking(
         .map(|service| PlanService {
             key: service.key.clone(),
             label: service.label.clone(),
+            role: service
+                .role
+                .map(|role| role.as_str().to_string())
+                .unwrap_or_default(),
             container: bundle.container_name(&service.key),
             port: service.port,
             protocol: if service.protocol.trim().is_empty() {
@@ -159,6 +182,36 @@ pub fn inspect_bundle_plan_blocking(
             description: service.description.clone(),
         })
         .collect::<Vec<_>>();
+    let data_volumes = descriptor
+        .runtime
+        .data
+        .as_ref()
+        .map(|data| {
+            data.volumes
+                .iter()
+                .map(|volume| PlanDataVolume {
+                    name: volume.name.clone(),
+                    service: volume.service.clone(),
+                    image: volume.image.clone(),
+                    required: volume.required,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let data_paths = descriptor
+        .runtime
+        .data
+        .as_ref()
+        .map(|data| {
+            data.paths
+                .iter()
+                .map(|path| PlanDataPath {
+                    path: path.path.clone(),
+                    mode: "preserve".to_string(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
     let file_count = descriptor.files.len();
     let total_bytes = descriptor.files.iter().map(|file| file.size).sum();
@@ -258,6 +311,8 @@ pub fn inspect_bundle_plan_blocking(
         variant: descriptor.runtime.variant.clone(),
         components,
         services,
+        data_volumes,
+        data_paths,
         database: descriptor
             .runtime
             .database

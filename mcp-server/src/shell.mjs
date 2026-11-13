@@ -22,6 +22,10 @@ export function bashScript(body, args = []) {
 }
 export const transferScript = (action, target, stage = '') => bashScript(transferBody, [action, target, stage]);
 export const backupScript = (installDir, targets) => bashScript(backupBody, [installDir, ...targets]);
+export const versionDeployScript = `${dockerBody}\n${template('version-deploy')}`;
+export const deploymentBaselineScript = template('deployment-baseline');
+export const versionDeployLaunchScript = (txn, mode, args) =>
+  bashScript(template('version-deploy-launch'), [txn, mode, ...args]);
 export const applyScript = ({ deployDir, compose, config, restart, wait }) =>
   bashScript(applyBody, [deployDir, compose, config ? 'yes' : 'no', String(restart.length), ...restart, ...wait]);
 

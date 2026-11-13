@@ -2,45 +2,20 @@ import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 import { mockIPC, clearMocks } from '@tauri-apps/api/mocks';
 import { validInstallDir, createDeploymentContext, contextTarget } from '../src/features/deployment/domain/context.js';
-import { deploymentComponents, servicesAreReady, requireSuccessfulResult, missingArtifactIssue } from '../src/features/deployment/domain/components.js';
+import { servicesAreReady, requireSuccessfulResult } from '../src/features/deployment/domain/components.js';
 import { safeText, failureText } from '../src/features/deployment/domain/errors.js';
-import { invokeIncremental } from '../src/features/deployment/services/operations.js';
+import { invokeVersionDeployment } from '../src/features/deployment/services/operations.js';
 
 const input = () => ({
   connection: { remoteHost: 'host.example.com', remotePort: 2222, remoteUser: 'deploy', remoteKey: '/key', installDir: '/srv/app' },
   remote: true, bundle: { dir: '/bundle', version: '1.0.0' },
-  components: ['backend'], backup: true, action: 'incremental', label: 'demo',
-  allowedComponents: ['backend', 'config', 'image']
+  label: 'demo'
 });
 
 afterEach(() => {
   if (globalThis.window) clearMocks();
   delete globalThis.window;
   delete globalThis.isTauri;
-});
-
-test('缺失制品必须由本次选择的组件覆盖，首次部署允许待写入', () => {
-  const plan = {
-    components: [
-      { key: 'api', artifacts: [{ key: 'server' }] },
-      { key: 'web', artifacts: [{ key: 'site' }] }
-    ]
-  };
-  const review = {
-    hasDeployment: true,
-    artifacts: [{ key: 'server', label: '服务程序', status: 'missing' }]
-  };
-  assert.match(missingArtifactIssue(plan, review, ['web']), /服务程序/);
-  assert.equal(missingArtifactIssue(plan, review, ['api']), '');
-  assert.equal(missingArtifactIssue(plan, { ...review, hasDeployment: false }, []), '');
-  assert.equal(missingArtifactIssue(plan, {
-    ...review, artifacts: [{ key: 'server', status: 'incomplete' }]
-  }, ['web']), '');
-  assert.equal(servicesAreReady({
-    ...review,
-    targetChecked: true,
-    services: [{ containerState: 'running', containerHealth: 'healthy' }]
-  }), false);
 });
 
 test('deployment paths reject roots, traversal and control characters on both platforms', () => {
@@ -52,39 +27,20 @@ test('deployment paths reject roots, traversal and control characters on both pl
   assert.equal(validInstallDir('C:\\apps\\demo', true), false);
 });
 
-test('confirmation snapshots detach mutable host and component inputs', () => {
+test('confirmation snapshots detach mutable host and bundle inputs', () => {
   const options = input();
   const context = createDeploymentContext(options);
   options.connection.remoteHost = 'changed.example.com';
-  options.components.push('config');
   options.bundle.dir = '/other';
   assert.equal(context.host, 'host.example.com');
   assert.equal(context.bundleDir, '/bundle');
-  assert.deepEqual(context.components, ['backend']);
-  assert.ok(Object.isFrozen(context) && Object.isFrozen(context.components));
+  assert.ok(Object.isFrozen(context));
   assert.equal(contextTarget(context).host, 'host.example.com');
   assert.equal(contextTarget({ remote: false }), null);
-  for (const patch of [{components:[]}, {components:['unknown']}, {components:['constructor']}, {action:'invalid'}, {bundle:null}]) {
+  for (const patch of [{bundle:null}]) {
     assert.throws(() => createDeploymentContext({...input(), ...patch}));
   }
   assert.throws(() => createDeploymentContext({...input(), connection:{...input().connection,remotePort:0}}), /端口/);
-});
-
-test('component choices come from the bundle descriptor instead of fixed names', () => {
-  const plan = {
-    components: [
-      { key: 'web', label: '站点', artifacts: [], services: ['web'] },
-      { key: 'agent', label: '采集程序', artifacts: [], services: [] },
-      { key: 'web', label: '重复项', artifacts: [], services: [] }
-    ],
-    images: [{ imageRef: 'demo/web@sha256:abc', bundleFile: '' }]
-  };
-  assert.deepEqual(deploymentComponents(plan), ['web', 'agent']);
-  assert.deepEqual(deploymentComponents({ components: [], images: [] }), []);
-  assert.deepEqual(
-    deploymentComponents({ ...plan, images: [{ imageRef: 'demo/web@sha256:abc', bundleFile: 'images/web.tar' }] }),
-    ['web', 'agent', 'image']
-  );
 });
 
 test('a successful command is insufficient without checked and ready containers', () => {
@@ -98,23 +54,24 @@ test('a successful command is insufficient without checked and ready containers'
   assert.throws(() => requireSuccessfulResult(null, '更新失败'), /更新失败/);
 });
 
-test('operation service preserves target and dry-run, rejects failed responses and retains recovery details', async () => {
+test('version deployment preserves target and dry-run, rejects failed preflight and retains recovery details', async () => {
   globalThis.window = {};
   globalThis.isTauri = true;
   const calls=[];
   const result={success:false,error:'更新失败',backup_dir:'/backup',output:'details'};
   mockIPC((command,args)=>{calls.push({command,args});return result;});
   const remote=createDeploymentContext(input());
-  await assert.rejects(invokeIncremental(remote,true),(error)=>error.result===result);
+  await assert.rejects(invokeVersionDeployment(remote,true),(error)=>error.result===result);
   const local=createDeploymentContext({...input(),remote:false});
-  await assert.rejects(invokeIncremental(local,false), /更新失败/);
-  assert.equal(calls[0].command,'update_remote_deployment');
+  const localResult=await invokeVersionDeployment(local,false);
+  assert.equal(localResult.success,false);
+  assert.equal(calls[0].command,'deploy_remote_version');
   assert.equal(calls[0].args.host,remote.host);
   assert.equal(calls[0].args.dryRun,true);
-  assert.equal(calls[1].command,'update_local_deployment');
+  assert.equal(calls[1].command,'deploy_local_version');
   assert.equal(calls[1].args.dryRun,false);
   mockIPC(()=>({success:true,output:'ok'}));
-  assert.equal((await invokeIncremental(remote,true)).success,true);
+  assert.equal((await invokeVersionDeployment(remote,true)).success,true);
 });
 
 test('deployment diagnostics redact credentials and private keys', () => {
