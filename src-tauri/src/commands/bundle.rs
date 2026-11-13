@@ -740,7 +740,10 @@ impl Bundle {
                 );
             }
             for path in &data.paths {
-                safe_relative(&path.path, "保留数据目录")?;
+                let path = safe_relative(&path.path, "保留数据目录")?;
+                if is_internal_deploy_path(&path) {
+                    return Err("保留数据目录不能使用部署事务内部路径，请重新构建制品".to_string());
+                }
             }
         }
         if let Some(database) = &runtime.database {
@@ -804,6 +807,11 @@ impl Bundle {
                     }
                 }
             };
+            if is_internal_deploy_path(&install_relative) {
+                return Err(format!(
+                    "产物 {key} 不能写入部署事务内部路径，请重新构建制品"
+                ));
+            }
             if let Some(data) = &runtime.data {
                 for preserved in &data.paths {
                     let preserved = preserved.path.trim().replace('\\', "/");
@@ -1009,6 +1017,36 @@ pub fn safe_relative(value: &str, label: &str) -> Result<String, String> {
     }
 }
 
+pub fn is_internal_deploy_path(value: &str) -> bool {
+    let normalized = value.trim().replace('\\', "/");
+    let first = normalized.split('/').next().unwrap_or_default();
+    let alias = first
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches(|ch: char| ch == '.' || ch == ' ');
+    if alias.eq_ignore_ascii_case(DEPLOYED_RECORD_DIR) {
+        return true;
+    }
+    // Windows 8.3 短名（例如 `.DEPL~1`）可能指向同名目录，同样按内部目录处理。
+    is_dos_short_name(alias)
+}
+
+fn is_dos_short_name(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix('.') else {
+        return false;
+    };
+    let Some((head, tail)) = rest.split_once('~') else {
+        return false;
+    };
+    !head.is_empty()
+        && head.len() <= 6
+        && head.chars().all(|ch| ch.is_ascii_alphanumeric())
+        && !tail.is_empty()
+        && tail.len() <= 3
+        && tail.chars().all(|ch| ch.is_ascii_digit())
+}
+
 pub fn ensure_within(base: &Path, target: &Path, label: &str) -> Result<(), String> {
     if !path_guard::is_within(base, target) {
         return Err(format!(
@@ -1168,6 +1206,23 @@ mod tests {
         let path = root.join(relative);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn internal_deploy_path_detection_covers_case_and_windows_aliases() {
+        for path in [
+            ".deploy-desktop",
+            ".DEPLOY-DESKTOP/deployed.json",
+            ".deploy-desktop./transactions",
+            ".deploy-desktop /transactions",
+            ".deploy-desktop:stream",
+            ".deploy-desktop\\transactions",
+            ".DEPL~1/transactions",
+        ] {
+            assert!(is_internal_deploy_path(path), "{path}");
+        }
+        assert!(!is_internal_deploy_path("site/.deploy-desktop"));
+        assert!(!is_internal_deploy_path("deploy/readme.md"));
     }
 
     /// 按目录实际内容计算 files[]，测试只需要声明产物与组件。

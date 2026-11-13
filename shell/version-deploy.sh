@@ -59,7 +59,7 @@ write_status() {
 }
 
 compose_bin() {
-  if docker compose version >/dev/null 2>&1; then
+  if timeout 30 docker compose version >/dev/null 2>&1; then
     COMPOSE=(docker compose)
   elif command -v docker-compose >/dev/null 2>&1; then
     COMPOSE=(docker-compose)
@@ -69,17 +69,41 @@ compose_bin() {
   fi
 }
 
+acquire_project_lock() {
+  local project_lock directory
+  [ -f "$TXN/project-lock" ] || return 0
+  project_lock=$(cat "$TXN/project-lock")
+  case "$project_lock" in
+    /tmp/deploy-desktop-project-locks/*.lock) ;;
+    *) echo 'Compose 项目锁路径无效' >&2; return 1 ;;
+  esac
+  [ ! -L "$project_lock" ] || { echo 'Compose 项目锁不能使用符号链接' >&2; return 1; }
+  directory=$(dirname -- "$project_lock")
+  [ ! -L "$directory" ] || { echo 'Compose 项目锁目录不能使用符号链接' >&2; return 1; }
+  mkdir -p -- "$directory"
+  exec 8>>"$project_lock"
+  if ! flock -n 8; then
+    echo '同一 Compose 项目正在其他部署目录执行任务' >&2
+    return 1
+  fi
+  printf '%s\n' "$$" > "$project_lock"
+}
+
 compose() {
   local env_args=()
   [ -f "$DEPLOY/.env" ] && env_args+=(--env-file "$DEPLOY/.env")
   [ -f "$DEPLOY/.env.local" ] && env_args+=(--env-file "$DEPLOY/.env.local")
-  "${COMPOSE[@]}" --project-directory "$DEPLOY" ${env_args[@]+"${env_args[@]}"} -f "$DEPLOY/$1" "${@:2}"
+  if [ "${COMPOSE_TIMEOUT:-0}" -gt 0 ]; then
+    timeout "$COMPOSE_TIMEOUT" "${COMPOSE[@]}" --project-directory "$DEPLOY" ${env_args[@]+"${env_args[@]}"} -f "$DEPLOY/$1" "${@:2}"
+  else
+    "${COMPOSE[@]}" --project-directory "$DEPLOY" ${env_args[@]+"${env_args[@]}"} -f "$DEPLOY/$1" "${@:2}"
+  fi
 }
 
 compose_down() {
   local file=$1
   [ -n "$file" ] && [ -f "$DEPLOY/$file" ] || return 0
-  compose "$file" down --remove-orphans
+  COMPOSE_TIMEOUT=600 compose "$file" down --remove-orphans
 }
 
 compose_up() {
@@ -90,9 +114,9 @@ compose_up() {
     return 4
   }
   if [ -n "$override" ] && [ -f "$override" ]; then
-    compose "$file" -f "$override" up -d --no-build --remove-orphans
+    COMPOSE_TIMEOUT=1800 compose "$file" -f "$override" up -d --no-build --remove-orphans
   else
-    compose "$file" up -d --no-build --remove-orphans
+    COMPOSE_TIMEOUT=1800 compose "$file" up -d --no-build --remove-orphans
   fi
 }
 
@@ -123,14 +147,14 @@ wait_services() {
   for attempt in $(seq 1 90); do
     unready=
     for service in $services; do
-      ids=$(compose "$file" ps -a -q "$service" 2>/dev/null || true)
+      ids=$(COMPOSE_TIMEOUT=60 compose "$file" ps -a -q "$service" 2>/dev/null || true)
       if [ -z "$ids" ]; then
         unready="$unready $service"
         continue
       fi
       for id in $ids; do
-        state=$(docker inspect --format '{{.State.Status}}' "$id" 2>/dev/null || echo missing)
-        health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$id" 2>/dev/null || echo missing)
+        state=$(timeout 60 docker inspect --format '{{.State.Status}}' "$id" 2>/dev/null || echo missing)
+        health=$(timeout 60 docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$id" 2>/dev/null || echo missing)
         if [ "$state" != running ] || { [ "$health" != healthy ] && [ "$health" != none ]; }; then
           unready="$unready $service"
         fi
@@ -149,7 +173,7 @@ wait_services() {
   echo "服务未在等待时间内就绪：$unready" >&2
   for service in $unready; do
     [ "$service" = http ] && continue
-    compose "$file" logs --tail 40 "$service" >&2 || true
+    COMPOSE_TIMEOUT=60 compose "$file" logs --tail 40 "$service" >&2 || true
   done
   return 4
 }
@@ -157,7 +181,77 @@ wait_services() {
 services_from_compose() {
   local file=$1
   [ -n "$file" ] && [ -f "$DEPLOY/$file" ] || return 0
-  compose "$file" config --services 2>/dev/null || true
+  COMPOSE_TIMEOUT=60 compose "$file" config --services 2>/dev/null || true
+}
+
+path_is_internal() {
+  local first=${1%%/*}
+  local alias=${first%%:*}
+  alias=$(printf '%s' "$alias" | tr '[:upper:]' '[:lower:]' | sed 's/[. ]*$//')
+  internal_state_name "$alias"
+}
+
+internal_state_name() {
+  local alias=$1 body head tail
+  [ "$alias" = ".deploy-desktop" ] && return 0
+  body=${alias#[.]}
+  case "$body" in
+    *~*) ;;
+    *) return 1 ;;
+  esac
+  head=${body%%~*}
+  tail=${body#*~}
+  case "$tail" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ -n "$head" ] && [ "${#head}" -le 6 ] || return 1
+  case "$head" in
+    *[!a-z0-9]*) return 1 ;;
+  esac
+}
+
+validate_managed_path() {
+  local relative=$1
+  case "$relative" in
+    ""|.|./*|/*|..|../*|*/../*|*/..|*\\*|*$'\t'*|*$'\n'*|*$'\r'*) return 1 ;;
+  esac
+  if path_is_internal "$relative"; then
+    [ "$relative" = ".deploy-desktop/deployed.json" ] || return 1
+  fi
+}
+
+validate_artifact_path() {
+  local relative=$1
+  validate_managed_path "$relative" || return 1
+  ! path_is_internal "$relative"
+}
+
+validate_project_scope() {
+  [ -f "$TXN/project-name" ] || return 0
+  local project working
+  project=$(cat "$TXN/project-name")
+  [ -n "$project" ] || return 0
+  local output
+  output=$(timeout 60 docker ps -a \
+    --filter "label=com.docker.compose.project=$project" \
+    --format '{{.Label "com.docker.compose.project.working_dir"}}' 2>/dev/null) || {
+    echo '无法检查 Compose 项目容器边界' >&2
+    return 1
+  }
+  [ -n "$output" ] || return 0
+  while IFS= read -r working; do
+    [ -n "$working" ] || {
+      echo "Compose 项目 $project 的容器缺少工作目录标签，无法确认部署边界" >&2
+      return 1
+    }
+    case "$working" in
+      "$DEPLOY"|"$DEPLOY"/*) ;;
+      *)
+        echo "Compose 项目 $project 已被其他部署目录使用（${working}），已阻止部署" >&2
+        return 1
+        ;;
+    esac
+  done <<< "$output"
 }
 
 snapshot_files() {
@@ -166,9 +260,7 @@ snapshot_files() {
   [ -f "$INCOMING/managed-paths.txt" ] || return 0
   while IFS= read -r relative; do
     [ -n "$relative" ] || continue
-    case "$relative" in
-      /*|*../*|../*|*\\*|*$'\t'*|*$'\n'*|*$'\r'*) echo "非法快照路径：$relative" >&2; return 5 ;;
-    esac
+    validate_managed_path "$relative" || { echo "非法快照路径：$relative" >&2; return 5; }
     mkdir -p "$SNAPSHOT/files/$(dirname -- "$relative")"
     if [ -e "$INSTALL/$relative" ] || [ -L "$INSTALL/$relative" ]; then
       rm -rf -- "$SNAPSHOT/files/$relative"
@@ -187,6 +279,7 @@ restore_files() {
   [ -f "$SNAPSHOT/files.complete" ] && [ -f "$SNAPSHOT/files.list" ] || return 0
   while IFS=$'\t' read -r existed bytes digest relative; do
     [ -n "$relative" ] || continue
+    validate_managed_path "$relative" || { echo "非法恢复路径：$relative" >&2; return 11; }
     rm -rf -- "$INSTALL/$relative" || return 11
     if [ "$existed" = yes ] && { [ -e "$SNAPSHOT/files/$relative" ] || [ -L "$SNAPSHOT/files/$relative" ]; }; then
       mkdir -p -- "$(dirname -- "$INSTALL/$relative")" || return 12
@@ -199,7 +292,7 @@ check_volume_tools() {
   while IFS=$'\t' read -r logical actual image existed; do
     [ -n "$logical" ] || continue
     [ -n "$image" ] || { echo "数据卷 $logical 缺少备份镜像" >&2; return 6; }
-    if ! docker run --rm --network none --entrypoint /bin/sh "$image" -c 'command -v tar >/dev/null && command -v gzip >/dev/null' >/dev/null 2>&1; then
+    if ! timeout 300 docker run --rm --network none --entrypoint /bin/sh "$image" -c 'command -v tar >/dev/null && command -v gzip >/dev/null' >/dev/null 2>&1; then
       echo "备份镜像 $image 缺少 tar 或 gzip" >&2
       return 6
     fi
@@ -218,7 +311,7 @@ snapshot_volumes() {
     backup="$SNAPSHOT/volumes/$logical.tar.gz"
     partial="$backup.part"
     rm -f -- "$partial"
-  docker run --rm --network none -v "$actual:/data:ro" --entrypoint /bin/sh "$image" -c 'tar -czf - -C /data .' > "$partial"
+  timeout 21600 docker run --rm --network none -v "$actual:/data:ro" --entrypoint /bin/sh "$image" -c 'tar -czf - -C /data .' > "$partial"
     mv -f -- "$partial" "$backup"
     gzip -t "$backup"
     tar -tzf "$backup" >/dev/null
@@ -239,7 +332,7 @@ restore_volumes() {
     [ "$(wc -c < "$backup" | tr -d '[:space:]')" = "$bytes" ] || { echo "数据卷备份大小不一致：$logical" >&2; return 7; }
     gzip -t "$backup" || return 7
     tar -tzf "$backup" >/dev/null || return 7
-    docker run --rm --network none -i -v "$actual:/data" --entrypoint /bin/sh "$image" \
+    timeout 21600 docker run --rm --network none -i -v "$actual:/data" --entrypoint /bin/sh "$image" \
       -c 'find /data -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + 2>/dev/null || true; [ -z "$(find /data -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ] && tar -xzf - -C /data' < "$backup" \
       || return 7
   done < "$SNAPSHOT/volume-backups.tsv"
@@ -250,14 +343,18 @@ remove_created_volumes() {
   while IFS=$'\t' read -r logical actual image existed; do
     [ -n "$actual" ] || continue
     if [ "$existed" != yes ]; then
-      if docker volume inspect "$actual" >/dev/null 2>&1; then
-        docker volume rm "$actual" >/dev/null || return 9
+      if timeout 60 docker volume inspect "$actual" >/dev/null 2>&1; then
+        timeout 120 docker volume rm "$actual" >/dev/null || return 9
       fi
     fi
   done < "$INCOMING/volume-specs.tsv"
 }
 
 verify_snapshot() {
+  if [ -f "$TXN/starting.started" ] && { [ ! -f "$SNAPSHOT/files.complete" ] || [ ! -f "$SNAPSHOT/volumes.complete" ]; }; then
+    echo '启动阶段的文件或数据卷快照不完整，无法安全恢复' >&2
+    return 10
+  fi
   if [ -f "$SNAPSHOT/files.complete" ]; then
     [ -f "$SNAPSHOT/files.list" ] || { echo '文件快照清单缺失' >&2; return 10; }
     while IFS=$'\t' read -r existed bytes digest relative; do
@@ -286,19 +383,63 @@ verify_snapshot() {
   fi
 }
 
+verify_previous_resources() {
+  local image
+  if [ "$HAD_DEPLOYMENT" = yes ] && [ -n "$OLD_COMPOSE" ]; then
+    [ -f "$DEPLOY/$OLD_COMPOSE" ] || {
+      echo '上一版本 Compose 清单缺失，无法安全恢复' >&2
+      return 17
+    }
+    [ -n "$OLD_OVERRIDE" ] && [ -f "$OLD_OVERRIDE" ] || {
+      echo '上一版本镜像清单缺失，无法确认将启动的镜像' >&2
+      return 17
+    }
+    if ! grep -q '"image"[[:space:]]*:[[:space:]]*"' "$OLD_OVERRIDE"; then
+      echo '上一版本镜像清单为空，无法安全恢复' >&2
+      return 17
+    fi
+    while IFS= read -r image; do
+      timeout 60 docker image inspect -- "$image" >/dev/null 2>&1 || {
+        echo "上一版本镜像已不存在：$image" >&2
+        return 17
+      }
+    done < <(
+      grep -o '"image"[[:space:]]*:[[:space:]]*"[^"]*"' "$OLD_OVERRIDE" \
+        | sed -E 's/.*"image"[[:space:]]*:[[:space:]]*"([^"]*)"/\1/'
+    )
+  fi
+}
+
+verify_recovery_resources() {
+  local image
+  verify_previous_resources || return 17
+  [ -f "$SNAPSHOT/volume-backups.tsv" ] || return 0
+  while IFS=$'\t' read -r logical actual image digest bytes; do
+    [ -n "$logical" ] || continue
+    timeout 60 docker image inspect -- "$image" >/dev/null 2>&1 || {
+      echo "数据卷备份镜像已不存在：$image" >&2
+      return 17
+    }
+    timeout 300 docker run --rm --network none --entrypoint /bin/sh "$image" \
+      -c 'command -v tar >/dev/null && command -v gzip >/dev/null' >/dev/null 2>&1 || {
+      echo "数据卷备份镜像缺少 tar 或 gzip：$image" >&2
+      return 17
+    }
+  done < "$SNAPSHOT/volume-backups.tsv"
+}
+
 apply_files() {
   if [ -f "$INCOMING/remove-paths.txt" ]; then
     while IFS= read -r relative; do
       [ -n "$relative" ] || continue
-      case "$relative" in
-        /*|*../*|../*|*\\*) echo "非法清理路径：$relative" >&2; return 5 ;;
-      esac
+      validate_artifact_path "$relative" || { echo "非法清理路径：$relative" >&2; return 5; }
       rm -rf -- "$INSTALL/$relative"
     done < "$INCOMING/remove-paths.txt"
   fi
   [ -f "$INCOMING/upload-paths.txt" ] || return 0
   while IFS= read -r relative; do
     [ -n "$relative" ] || continue
+    validate_artifact_path "$relative" || { echo "非法写入路径：$relative" >&2; return 8; }
     source="$INCOMING/tree/$relative"
     [ -e "$source" ] || { echo "暂存内容缺少 $relative" >&2; return 8; }
     rm -rf -- "$INSTALL/$relative"
@@ -319,6 +460,7 @@ recover_previous() {
   CURRENT_PHASE=recovering
   write_status recovering recovering "$reason"
   verify_snapshot || return 10
+  verify_recovery_resources || return 17
   if [ -f "$TXN/starting.started" ]; then
     [ -f "$DEPLOY/$NEW_COMPOSE" ] || { echo '失败版本的 Compose 清单缺失，无法确认服务已停止' >&2; return 11; }
     compose_down "$NEW_COMPOSE" || return 11
@@ -353,6 +495,10 @@ on_error() {
       RECOVERY_REASON=$message
       CURRENT_PHASE=recovering
       write_status recovering recovering "$message"
+      if ! verify_previous_resources; then
+        write_status recovery_failed recovery_failed "$message" "自动恢复失败，现场保留在 $SNAPSHOT"
+        exit "$code"
+      fi
       if compose_up "$OLD_COMPOSE" "$OLD_OVERRIDE" && wait_services "$OLD_COMPOSE" "$OLD_SERVICES" "$OLD_FRONTEND_PORT"; then
         CURRENT_PHASE=recovered
         write_status recovered recovered "$message"
@@ -402,6 +548,14 @@ if [ "$MODE" = recover ]; then
     write_status recovered recovered '本次事务在修改目标前已停止，无需恢复服务、文件或数据卷'
     exit 0
   fi
+  if ! acquire_project_lock; then
+    write_status recovery_failed recovery_failed '同一 Compose 项目正在其他部署目录执行任务'
+    exit 1
+  fi
+  if ! validate_project_scope; then
+    write_status recovery_failed recovery_failed 'Compose 项目工作目录与当前部署目录不一致'
+    exit 1
+  fi
   [ -n "$OLD_SERVICES" ] || OLD_SERVICES=$(services_from_compose "$OLD_COMPOSE")
   [ -n "$NEW_SERVICES" ] || NEW_SERVICES=$(services_from_compose "$NEW_COMPOSE")
   TRANSACTION_STARTED=yes
@@ -415,19 +569,28 @@ if [ "$MODE" = recover ]; then
   exit 9
 fi
 
+if ! acquire_project_lock; then
+  write_status preparing failed '同一 Compose 项目正在其他部署目录执行任务'
+  exit 1
+fi
+if ! validate_project_scope; then
+  write_status preparing failed 'Compose 项目工作目录与当前部署目录不一致'
+  exit 1
+fi
 CURRENT_PHASE=preparing
 write_status preparing running
-docker info >/dev/null 2>&1 || { echo 'Docker 未运行或当前用户无权访问' >&2; false; }
+timeout 60 docker info >/dev/null 2>&1 || { echo 'Docker 未运行或当前用户无权访问' >&2; false; }
 command -v tar >/dev/null 2>&1 || { echo '目标机缺少 tar' >&2; false; }
 command -v gzip >/dev/null 2>&1 || { echo '目标机缺少 gzip' >&2; false; }
 command -v sha256sum >/dev/null 2>&1 || { echo '目标机缺少 sha256sum' >&2; false; }
+command -v timeout >/dev/null 2>&1 || { echo '目标机缺少 timeout，无法限制备份与恢复耗时' >&2; false; }
 for other in "$INSTALL/.deploy-desktop/transactions/"*; do
   [ -d "$other" ] && [ "$other" != "$TXN" ] || continue
   if [ -f "$other/status.env" ]; then
     grep -Eq '^state=(committed|recovered)$' "$other/status.env" || {
       echo "存在其他未完成事务：$other" >&2; false;
     }
-  else
+  elif [ -f "$other/journal.json" ]; then
     grep -Eq '"state"[[:space:]]*:[[:space:]]*"(committed|recovered)"' "$other/journal.json" || {
       echo "存在其他未完成事务或无效记录：$other" >&2; false;
     }
@@ -445,6 +608,12 @@ while IFS= read -r relative; do
 done < "$INCOMING/managed-paths.txt"
 deployment_managed_bytes "$INSTALL" "${managed_paths[@]}" >/dev/null
 check_volume_tools
+if [ "$HAD_DEPLOYMENT" = yes ]; then
+  if ! verify_previous_resources; then
+    write_status preparing failed '上一版本恢复资源缺失，已在停服前中止'
+    exit 1
+  fi
+fi
 touch "$TXN/deployment.started"
 TRANSACTION_STARTED=yes
 

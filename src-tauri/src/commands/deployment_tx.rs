@@ -16,6 +16,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const TRANSACTIONS_DIR: &str = ".deploy-desktop/transactions";
 pub const DEPLOY_LOCK: &str = ".deploy-desktop/deploy.lock";
+const DEPLOYED_RECORD_PATH: &str = ".deploy-desktop/deployed.json";
 pub const PHASE_PREPARING: &str = "preparing";
 pub const PHASE_SNAPSHOTTING_FILES: &str = "snapshotting_files";
 pub const PHASE_SNAPSHOTTING_DATA: &str = "snapshotting_data";
@@ -227,8 +228,24 @@ impl Drop for DeploymentLock {
 
 impl DeploymentLock {
     pub fn acquire(install_dir: &Path) -> Result<Self, String> {
-        let path = install_dir.join(DEPLOY_LOCK);
+        Self::acquire_path(install_dir.join(DEPLOY_LOCK))
+    }
+
+    pub fn acquire_project(project_name: &str) -> Result<Self, String> {
+        if project_name.trim().is_empty() {
+            return Err("Compose 项目名称为空，无法建立部署锁".to_string());
+        }
+        Self::acquire_path(project_lock_path(project_name))
+    }
+
+    fn acquire_path(path: PathBuf) -> Result<Self, String> {
         if let Some(parent) = path.parent() {
+            if fs::symlink_metadata(parent)
+                .map(|metadata| metadata.file_type().is_symlink())
+                .unwrap_or(false)
+            {
+                return Err("部署锁目录不能使用符号链接".to_string());
+            }
             fs::create_dir_all(parent).map_err(|error| format!("创建部署锁目录失败：{error}"))?;
         }
         if fs::symlink_metadata(&path)
@@ -253,6 +270,13 @@ impl DeploymentLock {
             .map_err(|error| format!("无法写入部署锁：{error}"))?;
         Ok(Self { _file: file })
     }
+}
+
+pub fn project_lock_path(project_name: &str) -> PathBuf {
+    let digest = super::bundle::sha256_hex(project_name.trim().as_bytes());
+    std::env::temp_dir()
+        .join("deploy-desktop-project-locks")
+        .join(format!("{digest}.lock"))
 }
 
 pub fn transaction_dir(install_dir: &Path, id: &str) -> PathBuf {
@@ -311,6 +335,15 @@ fn transactions(install_dir: &Path) -> Result<Vec<DeploymentTransaction>, String
     let mut transactions = Vec::with_capacity(entries.len());
     for entry in entries.into_iter().rev() {
         let path = entry.path().join("journal.json");
+        if !path.exists() {
+            if entry.path().join("status.env").exists() {
+                return Err(format!(
+                    "部署事务目录 {} 缺少 journal 但存在运行状态，请检查现场后再部署",
+                    entry.path().display()
+                ));
+            }
+            continue;
+        }
         let text = fs::read_to_string(&path).map_err(|error| {
             format!(
                 "部署事务目录 {} 的记录无法读取：{error}。请检查现场后再部署",
@@ -359,7 +392,9 @@ pub fn relative_install_path(install_dir: &Path, path: &Path) -> Result<String, 
     if relative.as_os_str().is_empty() || path_guard::has_parent_dir(relative) {
         return Err("部署事务路径无效".to_string());
     }
-    Ok(relative.to_string_lossy().replace('\\', "/"))
+    let relative = relative.to_string_lossy().replace('\\', "/");
+    validate_managed_relative(&relative)?;
+    Ok(relative)
 }
 
 pub fn snapshot_managed_files(
@@ -506,8 +541,6 @@ pub fn backup_volume_local(
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent).map_err(|error| format!("创建数据卷备份目录失败：{error}"))?;
     }
-    let output =
-        File::create(destination).map_err(|error| format!("创建数据卷备份文件失败：{error}"))?;
     let mut command = crate::commands::docker_setup::docker_command();
     command
         .args(["run", "--rm", "--network", "none", "-v"])
@@ -515,25 +548,81 @@ pub fn backup_volume_local(
         .arg("--entrypoint")
         .arg("/bin/sh")
         .arg(image)
-        .args(["-c", "tar -czf - -C /data ."])
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(output))
-        .stderr(Stdio::piped());
-    let result = command
-        .output()
-        .map_err(|error| format!("启动数据卷备份失败：{error}"))?;
-    if !result.status.success() {
-        let _ = fs::remove_file(destination);
-        return Err(format!(
-            "数据卷 {actual_name} 备份失败：{}",
-            String::from_utf8_lossy(&result.stderr).trim()
-        ));
-    }
+        .args(["-c", "tar -czf - -C /data ."]);
+    let stderr = run_to_file_with_timeout(
+        command,
+        destination,
+        Duration::from_secs(6 * 60 * 60),
+    )
+    .map_err(|error| format!("数据卷 {actual_name} 备份失败：{error}"))?;
+    let _ = stderr;
     verify_gzip_tar(destination)?;
     let bytes = fs::metadata(destination)
         .map_err(|error| format!("读取数据卷备份大小失败：{error}"))?
         .len();
     Ok((crate::commands::bundle::sha256_path(destination)?, bytes))
+}
+
+fn run_to_file_with_timeout(
+    mut command: std::process::Command,
+    destination: &Path,
+    timeout: Duration,
+) -> Result<String, String> {
+    let output =
+        File::create(destination).map_err(|error| format!("创建备份文件失败：{error}"))?;
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(output))
+        .stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("启动备份进程失败：{error}"))?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "无法读取备份进程错误输出".to_string())?;
+    let reader = std::thread::spawn(move || {
+        let mut captured = Vec::new();
+        let mut buffer = [0u8; 8192];
+        loop {
+            let read = match stderr.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => read,
+                Err(_) => break,
+            };
+            if captured.len() < 64 * 1024 {
+                let remaining = 64 * 1024 - captured.len();
+                captured.extend_from_slice(&buffer[..read.min(remaining)]);
+            }
+        }
+        String::from_utf8_lossy(&captured).trim().to_string()
+    });
+    let started = std::time::Instant::now();
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| format!("等待备份进程失败：{error}"))?
+        {
+            let stderr = reader.join().unwrap_or_default();
+            if !status.success() {
+                let _ = fs::remove_file(destination);
+                return Err(if stderr.is_empty() {
+                    format!("备份进程退出码 {}", status.code().unwrap_or(1))
+                } else {
+                    stderr
+                });
+            }
+            return Ok(stderr);
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = reader.join();
+            let _ = fs::remove_file(destination);
+            return Err("备份超时，已停止备份进程".to_string());
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
 }
 
 pub fn restore_volume_local(image: &str, actual_name: &str, backup: &Path) -> Result<(), String> {
@@ -628,9 +717,23 @@ pub fn check_backup_tools_local(image: &str) -> Result<(), String> {
 }
 
 fn reject_relative(path: &str) -> Result<(), String> {
-    let value = Path::new(path);
-    if value.is_absolute() || path_guard::has_parent_dir(value) || path.contains(['\\', '\0']) {
-        return Err("部署事务包含无效路径".to_string());
+    validate_managed_relative(path)
+}
+
+pub fn validate_managed_relative(path: &str) -> Result<(), String> {
+    path_guard::check_relative(path)
+        .map_err(|_| "部署事务包含无效路径".to_string())?;
+    let path = path.replace('\\', "/");
+    if super::bundle::is_internal_deploy_path(&path) && path != DEPLOYED_RECORD_PATH {
+        return Err("部署事务路径指向内部状态目录".to_string());
+    }
+    Ok(())
+}
+
+pub fn validate_artifact_relative(path: &str) -> Result<(), String> {
+    validate_managed_relative(path)?;
+    if super::bundle::is_internal_deploy_path(path) {
+        return Err("部署事务路径指向内部状态目录".to_string());
     }
     Ok(())
 }
@@ -791,6 +894,22 @@ mod tests {
     }
 
     #[test]
+    fn project_lock_is_shared_across_install_directories() {
+        let project = format!(
+            "project-lock-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let lock = DeploymentLock::acquire_project(&project).unwrap();
+        assert!(DeploymentLock::acquire_project(&project).is_err());
+        drop(lock);
+        assert!(DeploymentLock::acquire_project(&project).is_ok());
+    }
+
+    #[test]
     fn successful_snapshot_cleanup_preserves_the_journal() {
         let install = temp_dir("committed-journal");
         let mut transaction = new_transaction(&install);
@@ -815,6 +934,21 @@ mod tests {
             fs::write(second.join(name), name).unwrap();
         }
         assert_eq!(hash_path(&first).unwrap(), hash_path(&second).unwrap());
+    }
+
+    #[test]
+    fn transaction_paths_reject_internal_state_and_dot_entries() {
+        assert!(validate_managed_relative(".").is_err());
+        assert!(validate_managed_relative(".deploy-desktop").is_err());
+        assert!(validate_managed_relative(".deploy-desktop/transactions/deploy-1").is_err());
+        assert!(validate_managed_relative(".DEPLOY-DESKTOP/deployed.json").is_err());
+        assert!(validate_managed_relative(".deploy-desktop./transactions/deploy-1").is_err());
+        assert!(validate_managed_relative(".deploy-desktop /transactions/deploy-1").is_err());
+        assert!(validate_managed_relative(".deploy-desktop:stream").is_err());
+        assert!(validate_managed_relative(".deploy-desktop/deployed.json").is_ok());
+        assert!(validate_managed_relative("deploy/docker-compose.yml").is_ok());
+        assert!(validate_artifact_relative(".deploy-desktop/deployed.json").is_err());
+        assert!(validate_artifact_relative("deploy/docker-compose.yml").is_ok());
     }
 
     fn temp_dir(label: &str) -> PathBuf {
@@ -861,6 +995,16 @@ mod tests {
         assert!(incomplete_transaction(&install).unwrap().is_some());
         let message = ensure_no_incomplete_transaction(&install).unwrap_err();
         assert!(message.contains("人工处理"));
+    }
+
+    #[test]
+    fn orphan_transaction_directory_without_journal_does_not_block_deployment() {
+        let install = temp_dir("orphan");
+        let orphan = transaction_dir(&install, "deploy-orphan");
+        fs::create_dir_all(orphan.join("incoming")).unwrap();
+        assert!(ensure_no_incomplete_transaction(&install).is_ok());
+        fs::write(orphan.join("status.env"), "state=running\n").unwrap();
+        assert!(ensure_no_incomplete_transaction(&install).is_err());
     }
 
     #[test]

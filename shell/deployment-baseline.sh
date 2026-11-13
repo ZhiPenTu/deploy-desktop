@@ -20,8 +20,14 @@ deployment_managed_bytes() {
   shift
   for relative in "$@"; do
     case "$relative" in
-      ""|/*|..|../*|*/../*|*/..|*\\*) echo '受管路径无效' >&2; return 1 ;;
+      ""|.|./*|/*|..|../*|*/../*|*/..|*\\*) echo '受管路径无效' >&2; return 1 ;;
     esac
+    if deployment_path_is_internal "$relative"; then
+      [ "$relative" = ".deploy-desktop/deployed.json" ] || {
+        echo '受管路径指向内部状态目录' >&2
+        return 1
+      }
+    fi
     file="$install/$relative"
     ancestor=$file
     while [ "$ancestor" != / ] && [ -n "$ancestor" ]; do
@@ -37,4 +43,25 @@ deployment_managed_bytes() {
     fi
   done
   printf '%s\n' "$total"
+}
+
+deployment_path_is_internal() {
+  local first=${1%%/*}
+  local alias=${first%%:*}
+  alias=$(printf '%s' "$alias" | tr '[:upper:]' '[:lower:]' | sed 's/[. ]*$//')
+  [ "$alias" = ".deploy-desktop" ] && return 0
+  local body=${alias#[.]} head tail
+  case "$body" in
+    *~*) ;;
+    *) return 1 ;;
+  esac
+  head=${body%%~*}
+  tail=${body#*~}
+  case "$tail" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ -n "$head" ] && [ "${#head}" -le 6 ] || return 1
+  case "$head" in
+    *[!a-z0-9]*) return 1 ;;
+  esac
 }

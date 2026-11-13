@@ -38,7 +38,10 @@ pub(crate) fn inspect_remote_transaction(
 ROOT={root}
 [ -d "$ROOT" ] || exit 0
 find "$ROOT" -mindepth 1 -maxdepth 1 -type d -name 'deploy-*' | sort -r | while IFS= read -r dir; do
-  [ -f "$dir/journal.json" ] || {{ echo '部署事务缺少 journal，请检查现场后再部署' >&2; exit 4; }}
+  if [ ! -f "$dir/journal.json" ]; then
+    [ ! -f "$dir/status.env" ] || {{ echo '部署事务缺少 journal 但存在运行状态，请检查现场后再部署' >&2; exit 4; }}
+    continue
+  fi
   printf 'JOURNAL_B64='
   base64 < "$dir/journal.json" | tr -d '\n'
   printf '\n'
@@ -169,6 +172,17 @@ pub(crate) fn recover_remote_transaction(
     if remote_deploy_lock_active(host, port, user, key.as_deref(), &install)? {
         return Err("目标机部署任务仍在执行，请等待事务结束或确认进程已退出后再恢复".to_string());
     }
+    if !transaction.project_name.trim().is_empty()
+        && remote_project_lock_active(
+            host,
+            port,
+            user,
+            key.as_deref(),
+            &transaction.project_name,
+        )?
+    {
+        return Err("同一 Compose 项目正在其他部署目录执行任务，暂不能恢复".to_string());
+    }
     let txn = format!("{install}/.deploy-desktop/transactions/{}", transaction.id);
     let worker = format!("{txn}/worker.sh");
     let exists = run_ssh_script(
@@ -188,7 +202,29 @@ pub(crate) fn recover_remote_transaction(
             transaction.snapshot_dir
         ));
     }
+    if !transaction.project_name.trim().is_empty() {
+        write_remote_text(
+            host,
+            port,
+            user,
+            key.as_deref(),
+            &format!("{txn}/project-lock"),
+            &remote_project_lock_path(&transaction.project_name),
+            false,
+        )?;
+        write_remote_text(
+            host,
+            port,
+            user,
+            key.as_deref(),
+            &format!("{txn}/project-name"),
+            transaction.project_name.trim(),
+            false,
+        )?;
+    }
     progress(window, "恢复上一版本", 8, "running", "启动远端恢复任务");
+    let initial_state = transaction.state.clone();
+    let initial_updated_at = transaction.updated_at.clone();
     launch_worker(
         host,
         port,
@@ -225,6 +261,7 @@ pub(crate) fn recover_remote_transaction(
         user,
         key.as_deref(),
         &install,
+        Some((&initial_state, &initial_updated_at)),
         Duration::from_secs(6 * 60 * 60),
     )?;
     transaction = final_transaction;
@@ -403,6 +440,7 @@ pub(crate) fn deploy_remote_full(
             .map_err(|_| "远程产物路径超出部署目录".to_string())?
             .to_string_lossy()
             .replace('\\', "/");
+        crate::commands::deployment_tx::validate_artifact_relative(&relative)?;
         upload_paths.push(relative.clone());
         let remote = format!("{incoming}/tree/{relative}");
         let percent = 18 + index * 28 / artifacts.len().max(1);
@@ -461,6 +499,24 @@ pub(crate) fn deploy_remote_full(
         key.as_deref(),
         &format!("{incoming}/upload-paths.txt"),
         &format!("{}\n", upload_paths.join("\n")),
+        false,
+    )?;
+    write_remote_text(
+        &host,
+        port,
+        &user,
+        key.as_deref(),
+        &format!("{txn}/project-name"),
+        plan.project_name.trim(),
+        false,
+    )?;
+    write_remote_text(
+        &host,
+        port,
+        &user,
+        key.as_deref(),
+        &format!("{txn}/project-lock"),
+        &remote_project_lock_path(&plan.project_name),
         false,
     )?;
     write_remote_text(
@@ -622,17 +678,15 @@ pub(crate) fn deploy_remote_full(
         false,
     )?;
     let old_override_file = format!("{txn}/old-image-override.compose.json");
-    if !plan.old_image_override.is_empty() {
-        write_remote_text(
-            &host,
-            port,
-            &user,
-            key.as_deref(),
-            &old_override_file,
-            &plan.old_image_override,
-            false,
-        )?;
-    }
+    write_remote_text(
+        &host,
+        port,
+        &user,
+        key.as_deref(),
+        &old_override_file,
+        &plan.old_image_override,
+        false,
+    )?;
     if let Some(guard) = upload_cleanup.take() {
         std::mem::forget(guard);
     }
@@ -679,6 +733,7 @@ pub(crate) fn deploy_remote_full(
         &user,
         key.as_deref(),
         &install,
+        None,
         Duration::from_secs(12 * 60 * 60),
     )?;
     let log = read_remote_tail(&host, port, &user, key.as_deref(), &txn)?;
@@ -955,23 +1010,32 @@ fi
         .and_then(Value::as_str)
         .map(str::to_string)
         .ok_or_else(|| "新版本 Compose 清单缺少项目名称".to_string())?;
-    let project_containers = run_ssh_script(
+    let project_container_output = run_ssh_script(
         host,
         port,
         user,
         key,
         &format!(
-            "test -n \"$(docker ps -a -q --filter {})\"",
+            "docker ps -a --filter {} --format '{{{{.Label \"com.docker.compose.project.working_dir\"}}}}|{{{{.Label \"com.docker.compose.project.config_files\"}}}}'",
             shell_quote(&format!("label=com.docker.compose.project={project_name}"))
         ),
-    )?
-    .status
-    .success();
-    if !has_deployment || project_containers {
-        crate::commands::version_deploy::validate_new_deployment_isolation(
-            &incoming,
-            project_containers,
-        )?;
+    )?;
+    if !project_container_output.status.success() {
+        return Err("无法检查 Compose 项目容器边界".to_string());
+    }
+    let project_containers = crate::commands::version_deploy::validate_project_container_scope(
+        &project_name,
+        Path::new(install),
+        Path::new(&deploy_dir),
+        &String::from_utf8_lossy(&project_container_output.stdout),
+    )?;
+    if !has_deployment && project_containers {
+        return Err(format!(
+            "Compose 项目 {project_name} 已有容器，但当前目录没有可恢复的部署记录，已阻止部署"
+        ));
+    }
+    if !has_deployment {
+        crate::commands::version_deploy::validate_new_deployment_isolation(&incoming, false)?;
     }
     if let Some(current) = &current {
         let current_name = current
@@ -1017,9 +1081,10 @@ fi
     }
     let image_refs = unique_image_refs(&incoming);
     let old_image_refs = current.as_ref().map(unique_image_refs).unwrap_or_default();
+    let recorded_old_images = recorded_old_image_map(record.as_ref())?;
     let mut volume_plans =
         remote_volume_plans(bundle, &incoming, current.as_ref(), has_deployment)?;
-    let resources = remote_preflight_resources(
+    let mut resources = remote_preflight_resources(
         host,
         port,
         user,
@@ -1027,10 +1092,19 @@ fi
         install,
         &image_refs,
         &old_image_refs,
+        &recorded_old_images,
         &volume_plans,
         &project_name,
     )?;
-    volume_plans = resources.volumes;
+    volume_plans = std::mem::take(&mut resources.volumes);
+    resources.old_images = pin_recorded_old_images(
+        host,
+        port,
+        user,
+        key,
+        record.as_ref(),
+        std::mem::take(&mut resources.old_images),
+    )?;
     let mut required = volume_plans
         .iter()
         .map(|volume| volume.bytes)
@@ -1078,6 +1152,7 @@ fi
                 "deploy" => remote_join(&bundle.deploy_source_rel(), &artifact.path),
                 _ => continue,
             };
+            crate::commands::deployment_tx::validate_artifact_relative(&relative)?;
             managed_paths.insert(relative.clone());
             if !new_managed_paths.contains(&relative) {
                 retired_paths.insert(relative);
@@ -1102,6 +1177,9 @@ fi
     let mut retired_paths: Vec<String> = retired_paths.into_iter().collect();
     retired_paths.sort();
     retired_paths = minimal_retired_paths(retired_paths);
+    for path in managed_paths.iter().chain(retired_paths.iter()) {
+        crate::commands::deployment_tx::validate_managed_relative(path)?;
+    }
     crate::commands::version_deploy::validate_deployment_mounts(
         bundle,
         install,
@@ -1569,6 +1647,7 @@ fn remote_preflight_resources(
     install: &str,
     image_refs: &[String],
     old_image_refs: &[String],
+    recorded_old_images: &BTreeMap<String, String>,
     volumes: &[RemoteVolumePlan],
     project_name: &str,
 ) -> Result<RemoteResources, String> {
@@ -1597,9 +1676,13 @@ fn remote_preflight_resources(
         .iter()
         .enumerate()
         .map(|(index, reference)| {
+            let target = recorded_old_images
+                .get(reference)
+                .cloned()
+                .unwrap_or_else(|| identity(reference));
             format!(
                 "if ! docker image inspect --format 'OLD_IMAGE|{index}|{{{{.Id}}}}|{{{{.Os}}}}/{{{{.Architecture}}}}' -- {reference} 2>/dev/null; then echo '缺少上一版本镜像 {reference}' >&2; exit 5; fi",
-                reference = shell_quote(&identity(reference))
+                reference = shell_quote(&target)
             )
         })
         .collect::<Vec<_>>()
@@ -1638,6 +1721,7 @@ docker info >/dev/null 2>&1 || {{ echo 'Docker 未运行或当前用户无权访
 command -v tar >/dev/null 2>&1 || {{ echo '目标机缺少 tar' >&2; exit 2; }}
 command -v gzip >/dev/null 2>&1 || {{ echo '目标机缺少 gzip' >&2; exit 2; }}
 command -v sha256sum >/dev/null 2>&1 || {{ echo '目标机缺少 sha256sum' >&2; exit 2; }}
+command -v timeout >/dev/null 2>&1 || {{ echo '目标机缺少 timeout，无法限制备份与恢复耗时' >&2; exit 2; }}
 command -v flock >/dev/null 2>&1 || {{ echo '目标机缺少 flock，无法获取部署锁' >&2; exit 2; }}
 {image_checks}
 {old_image_checks}
@@ -1667,7 +1751,7 @@ echo "FREE_KB=$(df -Pk "$SPACE_PATH" | awk 'NR==2{{print $4}}')"
         .unwrap_or(0);
     let mut new_images = BTreeMap::new();
     for line in raw.lines().filter(|line| line.starts_with("NEW_IMAGE|")) {
-        let parts: Vec<&str> = line.split('|').collect();
+        let parts: Vec<&str> = line.splitn(4, '|').collect();
         if parts.len() != 4 {
             continue;
         }
@@ -1689,7 +1773,7 @@ echo "FREE_KB=$(df -Pk "$SPACE_PATH" | awk 'NR==2{{print $4}}')"
     }
     let mut old_images = Vec::new();
     for line in raw.lines().filter(|line| line.starts_with("OLD_IMAGE|")) {
-        let parts: Vec<&str> = line.split('|').collect();
+        let parts: Vec<&str> = line.splitn(4, '|').collect();
         if parts.len() != 4 {
             continue;
         }
@@ -1728,6 +1812,87 @@ echo "FREE_KB=$(df -Pk "$SPACE_PATH" | awk 'NR==2{{print $4}}')"
         old_images,
         volumes: checked_volumes,
     })
+}
+
+fn pin_recorded_old_images(
+    host: &str,
+    port: u16,
+    user: &str,
+    key: Option<&str>,
+    record: Option<&DeployedRecord>,
+    images: Vec<ImageSnapshot>,
+) -> Result<Vec<ImageSnapshot>, String> {
+    let Some(record) = record else {
+        return Ok(images);
+    };
+    let mut updated = images;
+    let mut checks = Vec::new();
+    for (index, image) in updated.iter().enumerate() {
+        let Some(recorded) = record
+            .images
+            .iter()
+            .find(|recorded| recorded.reference == image.reference)
+        else {
+            continue;
+        };
+        if !crate::commands::deployment_image_bindings::valid_image_id(&recorded.image_id) {
+            return Err(format!(
+                "上一版本部署记录中的镜像 {} 标识无效",
+                image.reference
+            ));
+        }
+        checks.push(format!(
+            "value=$(docker image inspect --format '{{{{.Id}}}}|{{{{.Os}}}}/{{{{.Architecture}}}}' -- {id} 2>/dev/null) || {{ echo '上一版本镜像已不存在' >&2; exit 5; }}\nprintf 'RECORDED_OLD|{index}|%s\\n' \"$value\"",
+            id = shell_quote(&recorded.image_id)
+        ));
+    }
+    if checks.is_empty() {
+        return Ok(updated);
+    }
+    let output = run_ssh_script(host, port, user, key, &format!("set -e\n{}", checks.join("\n")))?;
+    if !output.status.success() {
+        return Err("上一版本部署记录中的镜像已不存在，无法安全恢复".to_string());
+    }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let mut found = 0usize;
+    for line in raw.lines().filter(|line| line.starts_with("RECORDED_OLD|")) {
+        let parts: Vec<&str> = line.splitn(4, '|').collect();
+        if parts.len() != 4 {
+            continue;
+        }
+        let Ok(index) = parts[1].parse::<usize>() else {
+            continue;
+        };
+        let Some(image) = updated.get_mut(index) else {
+            continue;
+        };
+        image.image_id = parts[2].to_string();
+        image.platform = parts[3].to_string();
+        found += 1;
+    }
+    if found != checks.len() {
+        return Err("上一版本部署记录中的镜像状态核对不完整".to_string());
+    }
+    Ok(updated)
+}
+
+fn recorded_old_image_map(
+    record: Option<&DeployedRecord>,
+) -> Result<BTreeMap<String, String>, String> {
+    let mut result = BTreeMap::new();
+    let Some(record) = record else {
+        return Ok(result);
+    };
+    for image in &record.images {
+        if !crate::commands::deployment_image_bindings::valid_image_id(&image.image_id) {
+            return Err(format!(
+                "上一版本部署记录中的镜像 {} 标识无效",
+                image.reference
+            ));
+        }
+        result.insert(image.reference.clone(), image.image_id.clone());
+    }
+    Ok(result)
 }
 
 #[derive(Clone)]
@@ -2004,6 +2169,7 @@ fn poll_remote_transaction(
     user: &str,
     key: Option<&str>,
     install: &str,
+    initial: Option<(&str, &str)>,
     timeout: Duration,
 ) -> Result<DeploymentTransaction, String> {
     let deadline = Instant::now() + timeout;
@@ -2033,10 +2199,7 @@ fn poll_remote_transaction(
                     "目标机后台部署任务执行中",
                 );
             }
-            if matches!(
-                transaction.state.as_str(),
-                "committed" | "recovered" | "recovery_failed" | "failed"
-            ) {
+            if is_terminal_transaction(&transaction.state, &transaction.updated_at, initial) {
                 return Ok(transaction);
             }
         }
@@ -2046,6 +2209,25 @@ fn poll_remote_transaction(
             ));
         }
         std::thread::sleep(Duration::from_secs(2));
+    }
+}
+
+fn is_terminal_transaction(
+    state: &str,
+    updated_at: &str,
+    initial: Option<(&str, &str)>,
+) -> bool {
+    if !matches!(
+        state,
+        "committed" | "recovered" | "recovery_failed" | "failed"
+    ) {
+        return false;
+    }
+    match initial {
+        None => true,
+        Some((previous_state, previous_updated_at)) => {
+            state != previous_state || updated_at != previous_updated_at
+        }
     }
 }
 
@@ -2114,6 +2296,34 @@ fi
     )?;
     if !output.status.success() {
         return Err("无法检查目标机部署锁，请确认 flock 可用".to_string());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).contains("ACTIVE"))
+}
+
+fn remote_project_lock_active(
+    host: &str,
+    port: u16,
+    user: &str,
+    key: Option<&str>,
+    project_name: &str,
+) -> Result<bool, String> {
+    let lock = remote_project_lock_path(project_name);
+    let output = run_ssh_script(
+        host,
+        port,
+        user,
+        key,
+        &format!(
+            r#"command -v flock >/dev/null 2>&1 || exit 2
+if [ -f {lock} ] && ! flock -n {lock} -c true; then
+  echo ACTIVE
+fi
+"#,
+            lock = shell_quote(&lock)
+        ),
+    )?;
+    if !output.status.success() {
+        return Err("无法检查目标机 Compose 项目锁，请确认 flock 可用".to_string());
     }
     Ok(String::from_utf8_lossy(&output.stdout).contains("ACTIVE"))
 }
@@ -2199,6 +2409,13 @@ fn remote_join(base: &str, child: &str) -> String {
     }
 }
 
+fn remote_project_lock_path(project_name: &str) -> String {
+    format!(
+        "/tmp/deploy-desktop-project-locks/{}.lock",
+        crate::commands::bundle::sha256_hex(project_name.trim().as_bytes())
+    )
+}
+
 fn local_temp_file(label: &str, content: &[u8]) -> Result<TempFile, String> {
     let path = std::env::temp_dir().join(format!(
         "deploy-desktop-{label}-{}-{}.tmp",
@@ -2262,7 +2479,7 @@ fn progress(window: &tauri::Window, step: &str, percent: usize, status: &str, me
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_stored_effective_compose;
+    use super::{is_terminal_transaction, resolve_stored_effective_compose};
 
     #[test]
     fn stored_effective_compose_must_exist() {
@@ -2327,5 +2544,25 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("其他目录"));
+    }
+
+    #[test]
+    fn recovery_polling_ignores_the_previous_terminal_state() {
+        assert!(is_terminal_transaction("recovered", "2026-01-02T00:00:00Z", None));
+        assert!(!is_terminal_transaction(
+            "failed",
+            "2026-01-02T00:00:00Z",
+            Some(("failed", "2026-01-02T00:00:00Z"))
+        ));
+        assert!(is_terminal_transaction(
+            "recovery_failed",
+            "2026-01-02T00:00:01Z",
+            Some(("failed", "2026-01-02T00:00:00Z"))
+        ));
+        assert!(!is_terminal_transaction(
+            "recovering",
+            "2026-01-02T00:00:01Z",
+            Some(("failed", "2026-01-02T00:00:00Z"))
+        ));
     }
 }

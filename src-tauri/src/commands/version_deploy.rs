@@ -241,6 +241,14 @@ fn run_full_deploy(
         Some(lock)
     };
     let plan = build_plan(bundle_dir, install_dir)?;
+    let _project_lock = if dry_run || plan.project_name.trim().is_empty() {
+        None
+    } else {
+        Some(DeploymentLock::acquire_project(&plan.project_name)?)
+    };
+    if !dry_run {
+        validate_current_project_scope(&plan.install_root, &plan.deploy_dir, &plan.project_name)?;
+    }
     if dry_run {
         let output = dry_run_output(&plan);
         progress(
@@ -641,6 +649,18 @@ fn recover_local(window: &tauri::Window, install_dir: &str) -> Result<VersionDep
     let _lock = DeploymentLock::acquire(&install)?;
     let mut transaction = deployment_tx::incomplete_transaction(&install)?
         .ok_or_else(|| "未找到需要恢复的部署事务".to_string())?;
+    let _project_lock = if transaction.project_name.trim().is_empty() {
+        None
+    } else {
+        Some(DeploymentLock::acquire_project(&transaction.project_name)?)
+    };
+    if !transaction.project_name.trim().is_empty() {
+        validate_current_project_scope(
+            &install,
+            Path::new(&transaction.deploy_dir),
+            &transaction.project_name,
+        )?;
+    }
     if !matches!(
         transaction.state.as_str(),
         "pending" | "running" | "failed" | "recovering" | "recovery_failed"
@@ -730,20 +750,64 @@ fn recover_from_transaction(
     install: &Path,
     transaction: &mut DeploymentTransaction,
 ) -> Result<(), String> {
+    let deploy_dir = PathBuf::from(&transaction.deploy_dir);
+    let new_compose = transaction_compose_path(install, &transaction.new_compose);
+    let mut previous = None;
+    if transaction.deployment_started {
+        deployment_tx::verify_recovery_snapshot(transaction)?;
+        if transaction.startup_attempted && !new_compose.is_file() {
+            return Err(
+                "失败版本的 Compose 清单缺失，无法确认服务已停止；请检查后人工恢复".to_string(),
+            );
+        }
+        for image in &transaction.old_images {
+            if !super::deployment_image_bindings::valid_image_id(&image.image_id) {
+                return Err(format!(
+                    "上一版本部署记录中的镜像 {} 标识无效，无法安全恢复",
+                    image.reference
+                ));
+            }
+            if inspect_image(&image.image_id)?.is_none() {
+                return Err(format!("上一版本镜像 {} 已不存在，无法安全恢复", image.reference));
+            }
+        }
+        if transaction.startup_attempted {
+            for volume in transaction.volumes.iter().filter(|volume| volume.existed) {
+                if !super::deployment_image_bindings::valid_image_id(&volume.image) {
+                    return Err(format!(
+                        "数据卷 {} 的备份镜像标识无效，无法安全恢复",
+                        volume.logical_name
+                    ));
+                }
+                if inspect_image(&volume.image)?.is_none() {
+                    return Err(format!(
+                        "数据卷 {} 的备份镜像已不存在，无法安全恢复",
+                        volume.logical_name
+                    ));
+                }
+                deployment_tx::check_backup_tools_local(&volume.image)?;
+            }
+        }
+        if transaction.had_deployment && !transaction.previous_compose.is_empty() {
+            let old_compose = transaction_compose_path(install, &transaction.previous_compose);
+            if !old_compose.is_file() {
+                return Err(format!(
+                    "上一版本 Compose 清单缺失，无法安全恢复：{}",
+                    old_compose.display()
+                ));
+            }
+            let old_config = compose_config(install, &deploy_dir, &old_compose, false)?;
+            let old_override =
+                image_override_document(&old_config, &transaction.old_images)?;
+            previous = Some((old_compose, old_override, old_config));
+        }
+    }
     transaction.recover(install)?;
     if !transaction.deployment_started {
         transaction.recovered(install)?;
         return Ok(());
     }
-    deployment_tx::verify_recovery_snapshot(transaction)?;
-    let deploy_dir = PathBuf::from(&transaction.deploy_dir);
-    let new_compose = transaction_compose_path(install, &transaction.new_compose);
     if transaction.startup_attempted {
-        if !new_compose.is_file() {
-            return Err(
-                "失败版本的 Compose 清单缺失，无法确认服务已停止；请检查后人工恢复".to_string(),
-            );
-        }
         compose_checked(
             install,
             &deploy_dir,
@@ -770,21 +834,13 @@ fn recover_from_transaction(
             Path::new(&volume.file),
         )?;
     }
-    if transaction.had_deployment && !transaction.previous_compose.is_empty() {
-        let old_compose = transaction_compose_path(install, &transaction.previous_compose);
-        if !old_compose.is_file() {
-            return Err(format!(
-                "上一版本 Compose 清单未恢复：{}",
-                old_compose.display()
-            ));
-        }
-        let old_config = compose_config(install, &deploy_dir, &old_compose, false)?;
+    if let Some((old_compose, old_override, old_config)) = previous {
         compose_checked(
             install,
             &deploy_dir,
             &old_compose,
             &["up", "-d", "--remove-orphans"],
-            image_override_document(&old_config, &transaction.old_images)?.as_deref(),
+            old_override.as_deref(),
             Duration::from_secs(1800),
         )?;
         let services = if transaction.previous_services.is_empty() {
@@ -917,6 +973,59 @@ pub(crate) fn validate_new_deployment_isolation(
     Ok(())
 }
 
+pub(crate) fn validate_project_container_scope(
+    project_name: &str,
+    install: &Path,
+    deploy_dir: &Path,
+    raw: &str,
+) -> Result<bool, String> {
+    let mut found = false;
+    for line in raw.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        found = true;
+        let working_dir = line
+            .split_once('|')
+            .map(|(working, _)| working.trim())
+            .unwrap_or(line);
+        if working_dir.is_empty() {
+            return Err(format!(
+                "Compose 项目 {project_name} 的容器缺少工作目录标签，无法确认部署边界"
+            ));
+        }
+        if !path_guard::path_is_within(deploy_dir, Path::new(working_dir)) {
+            return Err(format!(
+                "Compose 项目 {project_name} 已被其他部署目录使用（{working_dir}），已阻止部署"
+            ));
+        }
+        if !path_guard::path_is_within(install, Path::new(working_dir)) {
+            return Err(format!(
+                "Compose 项目 {project_name} 的工作目录不在当前部署目录内，已阻止部署"
+            ));
+        }
+    }
+    Ok(found)
+}
+
+fn validate_current_project_scope(
+    install: &Path,
+    deploy_dir: &Path,
+    project_name: &str,
+) -> Result<(), String> {
+    let raw = docker_checked(
+        &[
+            "ps",
+            "-a",
+            "--filter",
+            &format!("label=com.docker.compose.project={project_name}"),
+            "--format",
+            "{{.Label \"com.docker.compose.project.working_dir\"}}|{{.Label \"com.docker.compose.project.config_files\"}}",
+        ],
+        "检查 Compose 项目容器边界",
+        Duration::from_secs(60),
+    )?;
+    validate_project_container_scope(project_name, install, deploy_dir, &raw)?;
+    Ok(())
+}
+
 pub(crate) fn published_frontend_port(
     config: &Value,
     service: &str,
@@ -1021,22 +1130,31 @@ fn build_plan(bundle_dir: &str, install_dir: &str) -> Result<FullDeployPlan, Str
         compose_config_bundle(&new_compose_source, &deploy_dir, env_content.as_deref())?;
     let project_name = compose_project_name(&incoming_config)
         .ok_or_else(|| "新版本 Compose 清单缺少项目名称".to_string())?;
-    let project_containers = had_deployment
-        && !docker_checked(
-            &[
-                "ps",
-                "-a",
-                "-q",
-                "--filter",
-                &format!("label=com.docker.compose.project={project_name}"),
-            ],
-            "检查旧版本容器",
-            Duration::from_secs(60),
-        )?
-        .trim()
-        .is_empty();
-    if !had_deployment || project_containers {
-        validate_new_deployment_isolation(&incoming_config, project_containers)?;
+    let project_container_scope = docker_checked(
+        &[
+            "ps",
+            "-a",
+            "--filter",
+            &format!("label=com.docker.compose.project={project_name}"),
+            "--format",
+            "{{.Label \"com.docker.compose.project.working_dir\"}}|{{.Label \"com.docker.compose.project.config_files\"}}",
+        ],
+        "检查 Compose 项目容器边界",
+        Duration::from_secs(60),
+    )?;
+    let project_containers = validate_project_container_scope(
+        &project_name,
+        &install_root,
+        &deploy_dir,
+        &project_container_scope,
+    )?;
+    if !had_deployment && project_containers {
+        return Err(format!(
+            "Compose 项目 {project_name} 已有容器，但当前目录没有可恢复的部署记录，已阻止部署"
+        ));
+    }
+    if !had_deployment {
+        validate_new_deployment_isolation(&incoming_config, false)?;
     }
     let current_config = if let Some(compose) = &old_compose {
         let current = compose_config(&install_root, &deploy_dir, compose, false)?;
@@ -1063,11 +1181,9 @@ fn build_plan(bundle_dir: &str, install_dir: &str) -> Result<FullDeployPlan, Str
     image_snapshots(&install_root, &incoming_config)?;
     let old_images = current_config
         .as_ref()
-        .map(|config| image_snapshots(&install_root, config))
+        .map(|config| previous_image_snapshots(&install_root, config, record.as_ref()))
         .transpose()?
-        .unwrap_or_default()
-        .into_values()
-        .collect();
+        .unwrap_or_default();
     let volumes = volume_plans(
         &install_root,
         &bundle,
@@ -1094,6 +1210,7 @@ fn build_plan(bundle_dir: &str, install_dir: &str) -> Result<FullDeployPlan, Str
                 }
                 _ => continue,
             };
+            deployment_tx::validate_artifact_relative(&relative)?;
             managed_paths.insert(relative.clone());
             if !new_paths.contains(&relative) {
                 retired_paths.insert(relative);
@@ -1135,8 +1252,7 @@ fn build_plan(bundle_dir: &str, install_dir: &str) -> Result<FullDeployPlan, Str
 
     let mut file_bytes = 0u64;
     for relative in &managed_paths {
-        path_guard::check_relative(relative)
-            .map_err(|_| "旧部署记录包含无效受管路径".to_string())?;
+        deployment_tx::validate_managed_relative(relative)?;
         let target = install_root.join(relative);
         for ancestor in target
             .ancestors()
@@ -1155,6 +1271,11 @@ fn build_plan(bundle_dir: &str, install_dir: &str) -> Result<FullDeployPlan, Str
         file_bytes = file_bytes.saturating_add(tree_bytes(&target)?);
     }
     let volume_bytes = volumes.iter().map(|volume| volume.bytes).sum::<u64>();
+    let incoming_bytes = artifacts
+        .iter()
+        .try_fold(0u64, |total, artifact| {
+            tree_bytes(&artifact.source).map(|bytes| total.saturating_add(bytes))
+        })?;
     let image_bytes = bundle
         .image_files()
         .iter()
@@ -1162,6 +1283,7 @@ fn build_plan(bundle_dir: &str, install_dir: &str) -> Result<FullDeployPlan, Str
         .map(|metadata| metadata.len())
         .sum::<u64>();
     let required_backup_bytes = file_bytes
+        .saturating_add(incoming_bytes)
         .saturating_add(volume_bytes)
         .saturating_add(image_bytes)
         .saturating_add(512 * 1024 * 1024);
@@ -1961,6 +2083,54 @@ fn image_snapshots(
     Ok(result)
 }
 
+fn previous_image_snapshots(
+    install: &Path,
+    config: &Value,
+    record: Option<&DeployedRecord>,
+) -> Result<Vec<ImageSnapshot>, String> {
+    let recorded = record
+        .map(|record| record.images.as_slice())
+        .unwrap_or_default();
+    let mut fallback: Option<BTreeMap<String, ImageSnapshot>> = None;
+    let mut result = BTreeMap::new();
+    for service in active_service_configs(config) {
+        let reference = service
+            .get("image")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "上一版本服务未声明镜像".to_string())?;
+        if result.contains_key(reference) {
+            continue;
+        }
+        if let Some(image) = recorded.iter().find(|image| image.reference == reference) {
+            if !super::deployment_image_bindings::valid_image_id(&image.image_id) {
+                return Err(format!("上一版本部署记录中的镜像 {reference} 标识无效"));
+            }
+            let inspected = inspect_image(&image.image_id)?
+                .ok_or_else(|| format!("上一版本镜像 {reference} 已不存在，无法安全恢复"))?;
+            result.insert(
+                reference.to_string(),
+                ImageSnapshot {
+                    reference: reference.to_string(),
+                    image_id: inspected.image_id,
+                    platform: inspected.platform,
+                },
+            );
+            continue;
+        }
+        if fallback.is_none() {
+            fallback = Some(image_snapshots(install, config)?);
+        }
+        let image = fallback
+            .as_ref()
+            .and_then(|images| images.get(reference))
+            .cloned()
+            .ok_or_else(|| format!("无法确认上一版本镜像 {reference}"))?;
+        result.insert(reference.to_string(), image);
+    }
+    Ok(result.into_values().collect())
+}
+
 fn inspect_image(reference: &str) -> Result<Option<ImageSnapshot>, String> {
     let output = docker_output(
         &[
@@ -2719,5 +2889,32 @@ mod tests {
             minimal_retired_paths(paths),
             vec!["config".to_string(), "site/old".to_string()]
         );
+    }
+
+    #[test]
+    fn compose_project_containers_must_belong_to_the_current_deploy_directory() {
+        let install = Path::new("/srv/app");
+        let deploy = Path::new("/srv/app/deploy");
+        assert_eq!(
+            validate_project_container_scope(
+                "demo",
+                install,
+                deploy,
+                "/srv/app/deploy|/srv/app/deploy/docker-compose.yml\n"
+            )
+            .unwrap(),
+            true
+        );
+        assert!(validate_project_container_scope(
+            "demo",
+            install,
+            deploy,
+            "/srv/other/deploy|/srv/other/deploy/docker-compose.yml\n"
+        )
+        .unwrap_err()
+        .contains("其他部署目录"));
+        assert!(validate_project_container_scope("demo", install, deploy, "|\n")
+            .unwrap_err()
+            .contains("工作目录标签"));
     }
 }

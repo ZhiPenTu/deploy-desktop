@@ -727,6 +727,165 @@
       }
     },
     {
+      "name": "artifact-targets-transaction-directory",
+      "reason": "受管产物不能写入部署事务内部目录",
+      "patch": {
+        "components": [
+          {
+            "key": "config",
+            "label": "配置",
+            "artifacts": [
+              "compose",
+              "injected"
+            ],
+            "services": [
+              "api"
+            ]
+          }
+        ],
+        "artifacts": [
+          {
+            "key": "compose",
+            "label": "编排文件",
+            "source": "app/docker-compose.yml",
+            "root": "deploy",
+            "path": "docker-compose.yml",
+            "type": "file"
+          },
+          {
+            "key": "injected",
+            "label": "注入文件",
+            "source": "app/injected.txt",
+            "root": "install",
+            "path": ".deploy-desktop/injected.yml",
+            "type": "file"
+          }
+        ],
+        "files": [
+          {
+            "path": "app/docker-compose.yml",
+            "size": 128,
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          },
+          {
+            "path": "app/injected.txt",
+            "size": 1,
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          }
+        ]
+      },
+      "expect": {
+        "rust": "reject",
+        "mcp": "reject"
+      }
+    },
+    {
+      "name": "artifact-targets-transaction-directory-case-variant",
+      "reason": "受管产物不能通过大小写变体写入部署事务内部目录",
+      "patch": {
+        "components": [
+          {
+            "key": "config",
+            "label": "配置",
+            "artifacts": [
+              "compose",
+              "injected"
+            ],
+            "services": [
+              "api"
+            ]
+          }
+        ],
+        "artifacts": [
+          {
+            "key": "compose",
+            "label": "编排文件",
+            "source": "app/docker-compose.yml",
+            "root": "deploy",
+            "path": "docker-compose.yml",
+            "type": "file"
+          },
+          {
+            "key": "injected",
+            "label": "注入文件",
+            "source": "app/injected.txt",
+            "root": "install",
+            "path": ".Deploy-Desktop/injected.yml",
+            "type": "file"
+          }
+        ],
+        "files": [
+          {
+            "path": "app/docker-compose.yml",
+            "size": 128,
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          },
+          {
+            "path": "app/injected.txt",
+            "size": 1,
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          }
+        ]
+      },
+      "expect": {
+        "rust": "reject",
+        "mcp": "reject"
+      }
+    },
+    {
+      "name": "artifact-targets-transaction-directory-short-name",
+      "reason": "受管产物不能通过 Windows 8.3 短名写入部署事务内部目录",
+      "patch": {
+        "components": [
+          {
+            "key": "config",
+            "label": "配置",
+            "artifacts": [
+              "compose",
+              "injected"
+            ],
+            "services": [
+              "api"
+            ]
+          }
+        ],
+        "artifacts": [
+          {
+            "key": "compose",
+            "label": "编排文件",
+            "source": "app/docker-compose.yml",
+            "root": "deploy",
+            "path": "docker-compose.yml",
+            "type": "file"
+          },
+          {
+            "key": "injected",
+            "label": "注入文件",
+            "source": "app/injected.txt",
+            "root": "install",
+            "path": ".DEPL~1/injected.yml",
+            "type": "file"
+          }
+        ],
+        "files": [
+          {
+            "path": "app/docker-compose.yml",
+            "size": 128,
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          },
+          {
+            "path": "app/injected.txt",
+            "size": 1,
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          }
+        ]
+      },
+      "expect": {
+        "rust": "reject",
+        "mcp": "reject"
+      }
+    },
+    {
       "name": "preserved-path-conflicts-with-artifact",
       "reason": "受管产物不能覆盖声明为 preserve 的数据目录",
       "patch": {

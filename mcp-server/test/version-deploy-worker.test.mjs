@@ -23,6 +23,12 @@ fi
 if [ "\${1:-}" = info ]; then
   exit 0
 fi
+if [ "\${1:-}" = ps ]; then
+  if [ -n "\${MOCK_PROJECT_WORKING_DIR:-}" ]; then
+    printf '%s\\n' "\${MOCK_PROJECT_WORKING_DIR}"
+  fi
+  exit 0
+fi
 if [ "\${1:-}" = inspect ]; then
   case " $* " in
     *'.State.Status'*) printf 'running\\n' ;;
@@ -137,6 +143,10 @@ exec /usr/bin/perl -e 'open my $handle, "+<&=$ARGV[0]" or die $!; flock($handle,
     await fs.writeFile(path.join(bin, 'setsid'), `#!/bin/sh
 exec /usr/bin/perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die $!;' "$@"
 `, { mode: 0o755 });
+    await fs.writeFile(path.join(bin, 'timeout'), `#!/bin/sh
+shift
+exec "$@"
+`, { mode: 0o755 });
   }
   await fs.writeFile(path.join(deploy, 'compose.old.yml'), 'services: {}\n');
   await fs.writeFile(path.join(deploy, 'app.txt'), 'old-file');
@@ -145,7 +155,10 @@ exec /usr/bin/perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die $!;' "$@"
   await fs.writeFile(path.join(incoming, 'tree', 'deploy', 'new.txt'), 'new-entry');
   await fs.writeFile(path.join(incoming, 'tree', 'deploy', 'compose.new.yml'), 'services: {}\n');
   await fs.writeFile(path.join(txn, 'image-override.compose.json'), '{}\n');
-  await fs.writeFile(path.join(txn, 'old-image-override.compose.json'), '{}\n');
+  await fs.writeFile(
+    path.join(txn, 'old-image-override.compose.json'),
+    '{"services":{"frontend":{"image":"sha256:mockold","pull_policy":"never"}}}\n'
+  );
   await fs.writeFile(
     path.join(incoming, 'managed-paths.txt'),
     'deploy/app.txt\ndeploy/new.txt\ndeploy/compose.old.yml\ndeploy/compose.new.yml\n'
@@ -175,7 +188,9 @@ async function runWorker(context, {
   hadDeployment = true,
   frontendPort = '',
   detached = false,
-  newUpDelay = ''
+  newUpDelay = '',
+  projectName = '',
+  projectWorkingDir = ''
 } = {}) {
   const args = [
     mode,
@@ -192,6 +207,9 @@ async function runWorker(context, {
     path.join(context.txn, 'image-override.compose.json'),
     path.join(context.txn, 'old-image-override.compose.json')
   ];
+  if (projectName) {
+    await fs.writeFile(path.join(context.txn, 'project-name'), `${projectName}\n`);
+  }
   if (detached) await fs.writeFile(path.join(context.txn, 'worker.sh'), versionDeployScript);
   const options = {
     env: {
@@ -202,7 +220,8 @@ async function runWorker(context, {
       MOCK_FAIL_NEW_DOWN: failNewDown ? 'yes' : 'no',
       MOCK_FAIL_OLD_DOWN: failOldDown ? 'yes' : 'no',
       MOCK_NEW_UP_DELAY: newUpDelay,
-      MOCK_FAIL_RESTORE: failRestore ? 'yes' : 'no'
+      MOCK_FAIL_RESTORE: failRestore ? 'yes' : 'no',
+      MOCK_PROJECT_WORKING_DIR: projectWorkingDir
     },
     timeoutMs: 30000
   };
@@ -402,4 +421,64 @@ test('已完成恢复的事务再次恢复不会重写文件或数据卷', async
   const after = await fs.readFile(path.join(context.root, 'docker.log'), 'utf8');
   assert.equal(after.slice(before.length).trim(), 'compose version');
   assert.equal(await fs.readFile(path.join(context.deploy, 'app.txt'), 'utf8'), 'old-file');
+});
+
+test('启动阶段缺少完整快照时恢复失败且不启动旧版本', async (t) => {
+  const context = await fixture(t);
+  await fs.writeFile(path.join(context.txn, 'deployment.started'), 'yes\n');
+  await fs.writeFile(path.join(context.txn, 'starting.started'), 'yes\n');
+  await fs.writeFile(path.join(context.deploy, 'app.txt'), 'new-file');
+  await fs.writeFile(path.join(context.volume, 'value.txt'), 'new-volume');
+  const result = await runWorker(context, { mode: 'recover' });
+  assert.notEqual(result.code, 0);
+  const status = await fs.readFile(path.join(context.txn, 'status.env'), 'utf8');
+  assert.match(status, /state=recovery_failed/);
+  assert.match(result.stderr, /快照不完整/);
+  assert.equal(await fs.readFile(path.join(context.deploy, 'app.txt'), 'utf8'), 'new-file');
+  assert.equal(await fs.readFile(path.join(context.volume, 'value.txt'), 'utf8'), 'new-volume');
+  const dockerLog = await fs.readFile(path.join(context.root, 'docker.log'), 'utf8');
+  assert.ok(!dockerLog.includes(' up -d '));
+});
+
+test('受管路径为点或事务内部目录时在写入前失败', async (t) => {
+  const context = await fixture(t);
+  await fs.writeFile(path.join(context.txn, 'incoming', 'managed-paths.txt'), '.\n');
+  const result = await runWorker(context);
+  assert.notEqual(result.code, 0);
+  assert.equal(await fs.readFile(path.join(context.deploy, 'app.txt'), 'utf8'), 'old-file');
+  const status = await fs.readFile(path.join(context.txn, 'status.env'), 'utf8');
+  assert.match(status, /state=failed/);
+  assert.match(result.stderr, /受管路径无效/);
+});
+
+test('Compose 项目属于其他部署目录时在停服前中止', async (t) => {
+  const context = await fixture(t);
+  const result = await runWorker(context, {
+    projectName: 'demo',
+    projectWorkingDir: path.join(context.root, 'other', 'deploy')
+  });
+  assert.notEqual(result.code, 0);
+  assert.equal(await fs.readFile(path.join(context.deploy, 'app.txt'), 'utf8'), 'old-file');
+  const dockerLog = await fs.readFile(path.join(context.root, 'docker.log'), 'utf8');
+  assert.ok(!dockerLog.includes(' down '));
+  const status = await fs.readFile(path.join(context.txn, 'status.env'), 'utf8');
+  assert.match(status, /state=failed/);
+  assert.match(result.stderr, /其他部署目录/);
+});
+
+test('上一版本镜像清单缺失时在停服前中止', async (t) => {
+  const context = await fixture(t);
+  await fs.rm(path.join(context.txn, 'old-image-override.compose.json'));
+  const result = await runWorker(context);
+  assert.notEqual(result.code, 0);
+  const status = await fs.readFile(path.join(context.txn, 'status.env'), 'utf8');
+  assert.match(status, /state=failed/);
+  assert.match(result.stderr, /上一版本镜像清单缺失/);
+  assert.equal(await fs.readFile(path.join(context.deploy, 'app.txt'), 'utf8'), 'old-file');
+  const dockerLog = await fs.readFile(path.join(context.root, 'docker.log'), 'utf8');
+  assert.ok(!dockerLog.includes(' down '));
+  const oldUp = dockerLog
+    .split('\n')
+    .find((line) => line.includes('compose.old.yml') && line.includes(' up -d '));
+  assert.equal(oldUp, undefined);
 });

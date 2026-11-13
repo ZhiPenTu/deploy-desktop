@@ -5,11 +5,13 @@ import {
   assertFullComponents,
   assertNoBlockingTransaction,
   buildImageOverrideDocument,
+  isTerminalTransaction,
   parseTransactionStatus,
   publishedFrontendPort,
   redactDiagnostics,
   resolveStoredEffectiveCompose,
   uniqueImageRefs,
+  validateProjectContainerScope,
   validateMountContract
 } from '../src/version-deploy.mjs';
 import { Bundle } from '../src/bundle.mjs';
@@ -18,6 +20,30 @@ const mountCases = JSON.parse(readFileSync(new URL('../../fixtures/deployment/mo
 test('未知或损坏的事务状态阻止新部署', () => {
   assert.throws(() => assertNoBlockingTransaction({ state: 'invalid', id: 'corrupt', phase: 'applying' }));
   assert.doesNotThrow(() => assertNoBlockingTransaction({ state: 'committed' }));
+});
+test('恢复轮询忽略启动前的旧终态', () => {
+  assert.equal(isTerminalTransaction({ state: 'recovered', updatedAt: '2026-01-02T00:00:00Z' }), true);
+  assert.equal(
+    isTerminalTransaction(
+      { state: 'failed', updatedAt: '2026-01-02T00:00:00Z' },
+      { state: 'failed', updatedAt: '2026-01-02T00:00:00Z' }
+    ),
+    false
+  );
+  assert.equal(
+    isTerminalTransaction(
+      { state: 'recovery_failed', updatedAt: '2026-01-02T00:00:01Z' },
+      { state: 'failed', updatedAt: '2026-01-02T00:00:00Z' }
+    ),
+    true
+  );
+  assert.equal(
+    isTerminalTransaction(
+      { state: 'recovering', updatedAt: '2026-01-02T00:00:01Z' },
+      { state: 'failed', updatedAt: '2026-01-02T00:00:00Z' }
+    ),
+    false
+  );
 });
 test('MCP 返回的事务日志隐藏凭据与私钥', () => {
   const text = redactDiagnostics('PASSWORD=example-private-value Bearer example-access-token https://name:pass@example.invalid/?token=value');
@@ -188,5 +214,30 @@ test('旧部署镜像预检只包含实际启用的服务', () => {
       }
     }),
     ['demo/api:1']
+  );
+});
+
+test('同名 Compose 项目不能跨部署目录复用', () => {
+  assert.equal(
+    validateProjectContainerScope(
+      'demo',
+      '/srv/app',
+      '/srv/app/deploy',
+      '/srv/app/deploy|/srv/app/deploy/docker-compose.yml\n'
+    ),
+    true
+  );
+  assert.throws(
+    () => validateProjectContainerScope(
+      'demo',
+      '/srv/app',
+      '/srv/app/deploy',
+      '/srv/other/deploy|/srv/other/deploy/docker-compose.yml\n'
+    ),
+    (error) => error.code === 'COMPOSE_PROJECT_CONFLICT'
+  );
+  assert.throws(
+    () => validateProjectContainerScope('demo', '/srv/app', '/srv/app/deploy', '|\n'),
+    (error) => error.code === 'COMPOSE_PROJECT_SCOPE_UNKNOWN'
   );
 });

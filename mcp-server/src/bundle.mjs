@@ -67,6 +67,18 @@ export function safeRelative(value, label) {
   return parts.join('/');
 }
 
+export function isInternalDeployPath(value) {
+  const normalized = String(value || '').trim().replaceAll('\\', '/');
+  const first = normalized.split('/')[0] || '';
+  const alias = first
+    .split(':')[0]
+    .replace(/[. ]+$/g, '')
+    .toLowerCase();
+  if (alias === '.deploy-desktop') return true;
+  // Windows 8.3 短名（例如 `.depl~1`）可能指向同名目录，同样按内部目录处理。
+  return /^\.[a-z0-9]{2,6}~[0-9]+$/.test(alias);
+}
+
 function normalizeService(value, index) {
   assertFields(value, FIELDS.service, `runtime.services[${index}]`);
   const key = text(value.key, `runtime.services[${index}].key`, { allowEmpty: false });
@@ -132,10 +144,11 @@ function normalizeData(value) {
     assertFields(item, FIELDS.dataPath, `runtime.data.paths[${index}]`);
     const mode = text(item.mode, `runtime.data.paths[${index}].mode`, { allowEmpty: false });
     if (mode !== 'preserve') throw fail(`保留数据目录 ${index} 的 mode 必须是 preserve`);
-    return {
-      path: safeRelative(item.path, '保留数据目录'),
-      mode
-    };
+    const path = safeRelative(item.path, '保留数据目录');
+    if (isInternalDeployPath(path)) {
+      throw fail('保留数据目录不能使用部署事务内部路径');
+    }
+    return { path, mode };
   });
   return { volumes, paths };
 }
@@ -313,6 +326,12 @@ export function validateDescriptor(raw) {
 
   const ownership = new Map();
   for (const artifact of artifacts) {
+    const installPath = artifact.root === 'install'
+      ? artifact.path
+      : (deployRel ? `${deployRel}/${artifact.path}` : artifact.path);
+    if (isInternalDeployPath(installPath)) {
+      throw fail(`产物 ${artifact.key} 不能写入部署事务内部路径`);
+    }
     const owned = artifact.kind === 'file'
       ? [artifact.source]
       : [...filePaths].filter((item) => item.startsWith(`${artifact.source}/`));

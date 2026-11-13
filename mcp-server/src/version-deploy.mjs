@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { Bundle } from './bundle.mjs';
+import { Bundle, isInternalDeployPath } from './bundle.mjs';
 import { appVersion } from './config.mjs';
 import { DeployError } from './errors.mjs';
 import { verifyImagesRemote } from './image-lock.mjs';
@@ -45,6 +45,22 @@ function relativeInstallPath(install, target) {
   const relative = path.posix.relative(trimSlashes(install), String(target).replaceAll('\\', '/'));
   if (!relative || relative.startsWith('..') || path.posix.isAbsolute(relative)) {
     throw new DeployError('部署事务路径超出部署目录', { code: 'TRANSACTION_PATH_INVALID' });
+  }
+  validateManagedRelative(relative, { allowRecord: false });
+  return relative;
+}
+
+function validateManagedRelative(value, { allowRecord = true } = {}) {
+  const relative = String(value || '').trim().replaceAll('\\', '/');
+  const parts = relative.split('/');
+  if (!relative
+    || path.posix.isAbsolute(relative)
+    || parts.some((part) => part === '' || part === '.' || part === '..')) {
+    throw new DeployError('部署事务路径无效', { code: 'TRANSACTION_PATH_INVALID' });
+  }
+  const internal = isInternalDeployPath(relative);
+  if (internal && !(allowRecord && relative === '.deploy-desktop/deployed.json')) {
+    throw new DeployError('部署事务路径指向内部状态目录', { code: 'TRANSACTION_PATH_INVALID' });
   }
   return relative;
 }
@@ -122,7 +138,10 @@ export async function inspectRemoteTransaction(hostConfig, installDir) {
 ROOT=${shellQuote(root)}
 [ -d "$ROOT" ] || exit 0
 find "$ROOT" -mindepth 1 -maxdepth 1 -type d -name 'deploy-*' | sort -r | while IFS= read -r dir; do
-  [ -f "$dir/journal.json" ] || { echo '部署事务缺少 journal，请检查现场后再部署' >&2; exit 4; }
+  if [ ! -f "$dir/journal.json" ]; then
+    [ ! -f "$dir/status.env" ] || { echo '部署事务缺少 journal 但存在运行状态，请检查现场后再部署' >&2; exit 4; }
+    continue
+  fi
   printf 'JOURNAL_B64='
   base64 < "$dir/journal.json" | tr -d '\\n'
   printf '\\n'
@@ -331,6 +350,32 @@ function activeServices(config) {
     .map(([name]) => name);
 }
 
+export function validateProjectContainerScope(projectName, installDir, deployDir, raw) {
+  const normalize = (value) => path.posix.normalize(String(value || '').replaceAll('\\', '/'));
+  const inside = (base, target) => {
+    const root = normalize(base).replace(/\/+$/, '');
+    const value = normalize(target);
+    return value === root || value.startsWith(`${root}/`);
+  };
+  let found = false;
+  for (const line of String(raw || '').split('\n').map((item) => item.trim()).filter(Boolean)) {
+    found = true;
+    const workingDir = line.split('|')[0].trim();
+    if (!workingDir) {
+      throw new DeployError(`Compose 项目 ${projectName} 的容器缺少工作目录标签，无法确认部署边界`, {
+        code: 'COMPOSE_PROJECT_SCOPE_UNKNOWN'
+      });
+    }
+    if (!inside(deployDir, workingDir) || !inside(installDir, workingDir)) {
+      throw new DeployError(
+        `Compose 项目 ${projectName} 已被其他部署目录使用（${workingDir}），已阻止部署`,
+        { code: 'COMPOSE_PROJECT_CONFLICT' }
+      );
+    }
+  }
+  return found;
+}
+
 function validateNewDeploymentIsolation(config, hasProjectContainers) {
   if (hasProjectContainers) return;
   for (const [name, service] of Object.entries(config?.services || {})) {
@@ -471,6 +516,7 @@ function managedPathsFor(bundle, installDir, deployDir, record, oldCompose, newC
       ? artifact.path
       : remoteJoin(bundle.deploySourceRel(), artifact.path);
     if (relative) {
+      validateManagedRelative(relative, { allowRecord: false });
       result.add(relative);
       if (!newManaged.has(relative)) retired.add(relative);
     }
@@ -479,6 +525,7 @@ function managedPathsFor(bundle, installDir, deployDir, record, oldCompose, newC
     result.add(oldCompose);
     if (!newManaged.has(oldCompose)) retired.add(oldCompose);
   }
+  for (const relative of [...result, ...retired]) validateManagedRelative(relative);
   return { managed: [...result], retired: minimalRetired([...retired]) };
 }
 
@@ -591,17 +638,25 @@ if [ -e ${shellQuote(file)} ]; then cat ${shellQuote(file)}; fi
   }
 }
 
-function volumeCheckScript(plans, oldImages, bindings = new Map(), projectName = '') {
+function volumeCheckScript(
+  plans,
+  oldImages,
+  bindings = new Map(),
+  projectName = '',
+  recordedOldImages = new Map()
+) {
   const lines = [
     'set -e',
     'docker info >/dev/null 2>&1 || { echo "Docker 未运行或当前用户无权访问" >&2; exit 2; }',
     'command -v tar >/dev/null 2>&1 || { echo "目标机缺少 tar" >&2; exit 2; }',
     'command -v gzip >/dev/null 2>&1 || { echo "目标机缺少 gzip" >&2; exit 2; }',
     'command -v sha256sum >/dev/null 2>&1 || { echo "目标机缺少 sha256sum" >&2; exit 2; }',
+    'command -v timeout >/dev/null 2>&1 || { echo "目标机缺少 timeout，无法限制备份与恢复耗时" >&2; exit 2; }',
     'command -v flock >/dev/null 2>&1 || { echo "目标机缺少 flock，无法获取部署锁" >&2; exit 2; }'
   ];
   oldImages.forEach((reference, index) => {
-    lines.push(`OLD_PROBE=$(docker image inspect --format '{{.Id}}|{{.Os}}/{{.Architecture}}' -- ${shellQuote(bindings.get(reference) || reference)} 2>/dev/null) || { echo ${shellQuote(`缺少上一版本镜像 ${reference}`)} >&2; exit 5; }
+    const target = recordedOldImages.get(reference) || bindings.get(reference) || reference;
+    lines.push(`OLD_PROBE=$(docker image inspect --format '{{.Id}}|{{.Os}}/{{.Architecture}}' -- ${shellQuote(target)} 2>/dev/null) || { echo ${shellQuote(`缺少上一版本镜像 ${reference}`)} >&2; exit 5; }
 printf 'OLD_IMAGE|${index}|%s\\n' "$OLD_PROBE"`);
   });
   plans.forEach((volume, index) => {
@@ -649,10 +704,21 @@ async function preflightRemote({ hostConfig, bundle, profile, installDir }) {
     const current = hasDeployment ? parseMarkedBase64(configResult.stdout, 'CURRENT_CONFIG_B64') : null;
     const projectName = String(incoming.name || '').trim();
     if (!projectName) throw new DeployError('新版本 Compose 清单缺少项目名称', { code: 'COMPOSE_PROJECT_MISSING' });
-    const projectContainers = (await runRemote(hostConfig,
-      `test -n "$(docker ps -a -q --filter ${shellQuote(`label=com.docker.compose.project=${projectName}`)})"`,
-      { timeoutMs: 60000, throwOnError: false })).code === 0;
-    if (!hasDeployment || projectContainers) validateNewDeploymentIsolation(incoming, projectContainers);
+    const projectContainers = validateProjectContainerScope(
+      projectName,
+      installDir,
+      deployDir,
+      (await runRemote(hostConfig,
+        `docker ps -a --filter ${shellQuote(`label=com.docker.compose.project=${projectName}`)} --format '{{.Label "com.docker.compose.project.working_dir"}}|{{.Label "com.docker.compose.project.config_files"}}'`,
+        { timeoutMs: 60000 })).stdout
+    );
+    if (!hasDeployment && projectContainers) {
+      throw new DeployError(
+        `Compose 项目 ${projectName} 已有容器，但当前目录没有可恢复的部署记录，已阻止部署`,
+        { code: 'COMPOSE_PROJECT_UNRECORDED' }
+      );
+    }
+    if (!hasDeployment) validateNewDeploymentIsolation(incoming, false);
     if (current && String(current.name || '') !== projectName) {
       throw new DeployError(`新旧版本 Compose 项目名称不同（${current.name} -> ${projectName}），已阻止部署`, {
         code: 'COMPOSE_PROJECT_CHANGED'
@@ -720,7 +786,22 @@ async function preflightRemote({ hostConfig, bundle, profile, installDir }) {
       }
       volume.image = image.imageId;
     }
-    const checkScript = volumeCheckScript(volumePlans, oldImages, bindings, projectName);
+    const recordedOldImages = new Map();
+    for (const image of record?.images || []) {
+      if (!/^(?:sha256:)?[a-f0-9]{64}$/i.test(String(image.imageId || ''))) {
+        throw new DeployError(`上一版本部署记录中的镜像 ${image.reference} 标识无效`, {
+          code: 'OLD_IMAGE_RECORD_INVALID'
+        });
+      }
+      recordedOldImages.set(image.reference, image.imageId);
+    }
+    const checkScript = volumeCheckScript(
+      volumePlans,
+      oldImages,
+      bindings,
+      projectName,
+      recordedOldImages
+    );
     const spaceResult = await runRemote(hostConfig, `set -e
 ${checkScript}
 SPACE_PATH=${shellQuote(installDir)}
@@ -738,7 +819,7 @@ printf 'FREE_KB=%s\\n' "$(df -Pk "$SPACE_PATH" | awk 'NR==2{print $4}')"
     const oldImageChecks = [];
     for (const line of spaceResult.stdout.split('\n')) {
       if (!line.startsWith('OLD_IMAGE|')) continue;
-      const [, rawIndex, imageId, osArch] = line.split('|');
+      const [, rawIndex, imageId, osArch] = line.split('|', 4);
       const index = Number(rawIndex);
       const reference = oldImages[index];
       if (!reference || !imageId) continue;
@@ -748,6 +829,38 @@ printf 'FREE_KB=%s\\n' "$(df -Pk "$SPACE_PATH" | awk 'NR==2{print $4}')"
       throw new DeployError('上一版本镜像状态核对不完整', {
         code: 'OLD_IMAGE_PRECHECK_INCOMPLETE'
       });
+    }
+    const recordedChecks = [];
+    for (const [index, image] of oldImageChecks.entries()) {
+      const recorded = (record?.images || []).find((item) => item.reference === image.ref);
+      if (!recorded) continue;
+      if (!/^(?:sha256:)?[a-f0-9]{64}$/i.test(String(recorded.imageId || ''))) {
+        throw new DeployError(`上一版本部署记录中的镜像 ${image.ref} 标识无效`, {
+          code: 'OLD_IMAGE_RECORD_INVALID'
+        });
+      }
+      recordedChecks.push({ index, image, recorded });
+    }
+    if (recordedChecks.length > 0) {
+      const script = recordedChecks.map(({ index, recorded }) =>
+        `value=$(docker image inspect --format '{{.Id}}|{{.Os}}/{{.Architecture}}' -- ${shellQuote(recorded.imageId)} 2>/dev/null) || { echo '上一版本镜像已不存在' >&2; exit 5; }
+printf 'RECORDED_OLD|${index}|%s\\n' "$value"`
+      ).join('\n');
+      const pinned = await runRemote(hostConfig, `set -e\n${script}`, { timeoutMs: 120000 });
+      const found = new Set();
+      for (const line of pinned.stdout.split('\n').filter((item) => item.startsWith('RECORDED_OLD|'))) {
+        const [, rawIndex, imageId, osArch] = line.split('|', 4);
+        const index = Number(rawIndex);
+        if (!oldImageChecks[index] || !imageId) continue;
+        oldImageChecks[index].imageId = imageId;
+        oldImageChecks[index].osArch = osArch;
+        found.add(index);
+      }
+      if (found.size !== recordedChecks.length) {
+        throw new DeployError('上一版本部署记录中的镜像状态核对不完整', {
+          code: 'OLD_IMAGE_RECORD_INCOMPLETE'
+        });
+      }
     }
     for (const volume of volumePlans) {
       if (!hadDeployment && volume.exists) {
@@ -933,6 +1046,11 @@ function workerArgs({
   ];
 }
 
+function projectLockPath(projectName) {
+  const digest = crypto.createHash('sha256').update(String(projectName || '').trim()).digest('hex');
+  return `/tmp/deploy-desktop-project-locks/${digest}.lock`;
+}
+
 function bundleFrontendService(plan) {
   return String(plan.frontendService || '');
 }
@@ -949,7 +1067,7 @@ async function launchWorker(hostConfig, txn, mode, args) {
   await runRemote(hostConfig, versionDeployLaunchScript(txn, mode, args), { timeoutMs: 60000 });
 }
 
-async function pollTransaction(hostConfig, installDir, timeoutMs, onProgress = () => {}) {
+async function pollTransaction(hostConfig, installDir, timeoutMs, onProgress = () => {}, initial = null) {
   const deadline = Date.now() + timeoutMs;
   let lastPhase = '';
   let lastPercent = 50;
@@ -972,7 +1090,7 @@ async function pollTransaction(hostConfig, installDir, timeoutMs, onProgress = (
         lastPercent = Math.max(lastPercent, percent);
         onProgress(lastPercent, phaseLabel(transaction.phase));
       }
-      if (TERMINAL_STATES.has(transaction.state)) return transaction;
+      if (isTerminalTransaction(transaction, initial)) return transaction;
     }
     await new Promise((resolve) => setTimeout(resolve, 2000));
   }
@@ -993,6 +1111,12 @@ function phaseLabel(phase) {
     recovered: '已恢复上一版本',
     recovery_failed: '自动恢复失败'
   }[phase] || '部署事务执行中';
+}
+
+export function isTerminalTransaction(transaction, initial = null) {
+  if (!TERMINAL_STATES.has(transaction?.state)) return false;
+  if (!initial) return true;
+  return transaction.state !== initial.state || transaction.updatedAt !== initial.updatedAt;
 }
 
 async function readWorkerTail(hostConfig, txn) {
@@ -1113,12 +1237,13 @@ export async function deployVersionRemote(profile, hostConfig, options = {}) {
     const oldOverrideDocument = buildImageOverrideDocument(plan.current, {
       checks: plan.oldImageChecks
     });
-    oldOverrideFile = oldOverrideDocument
-      ? `${txn}/old-image-override.compose.json`
-      : '';
-    if (oldOverrideFile) {
-      await writeRemoteText(hostConfig, oldOverrideFile, `${oldOverrideDocument}\n`, true);
-    }
+    oldOverrideFile = `${txn}/old-image-override.compose.json`;
+    await writeRemoteText(
+      hostConfig,
+      oldOverrideFile,
+      `${oldOverrideDocument || '{"services":{}}'}\n`,
+      true
+    );
     await writeRemoteText(hostConfig, `${txn}/journal.json`, `${JSON.stringify(transactionJournal({
       id,
       bundle,
@@ -1127,6 +1252,8 @@ export async function deployVersionRemote(profile, hostConfig, options = {}) {
       plan
     }), null, 2)}\n`);
     await writeRemoteText(hostConfig, `${txn}/worker.sh`, versionDeployScript);
+    await writeRemoteText(hostConfig, `${txn}/project-name`, plan.projectName);
+    await writeRemoteText(hostConfig, `${txn}/project-lock`, projectLockPath(plan.projectName));
     await writeRemoteText(hostConfig, `${txn}/baseline.sh`, deploymentBaselineScript);
     if (!/^[a-f0-9]{64}$/.test(plan.baseline)) {
       throw new DeployError('目标机预检缺少部署基线摘要', { code: 'PREFLIGHT_INCOMPLETE' });
@@ -1203,6 +1330,11 @@ export async function recoverVersionRemote(profile, hostConfig, options = {}) {
       code: 'DEPLOY_IN_PROGRESS'
     });
   }
+  if (transaction.projectName && await remoteProjectLockActive(hostConfig, transaction.projectName)) {
+    throw new DeployError('同一 Compose 项目正在其他部署目录执行任务，暂不能恢复', {
+      code: 'COMPOSE_PROJECT_CONFLICT'
+    });
+  }
   const txn = `${installDir}/.deploy-desktop/transactions/${transaction.id}`;
   const check = await runRemote(hostConfig, `test -f ${shellQuote(`${txn}/worker.sh`)} && test -f ${shellQuote(`${txn}/incoming/volume-specs.tsv`)} && printf 'READY\\n'`, {
     timeoutMs: 60000,
@@ -1222,6 +1354,8 @@ export async function recoverVersionRemote(profile, hostConfig, options = {}) {
     frontendService: transaction.frontendService,
     frontendPort: transaction.frontendPort
   };
+  await writeRemoteText(hostConfig, `${txn}/project-name`, transaction.projectName || '');
+  await writeRemoteText(hostConfig, `${txn}/project-lock`, projectLockPath(transaction.projectName));
   await launchWorker(hostConfig, txn, 'recover', workerArgs({
     installDir,
     deployDir: transaction.deployDir,
@@ -1230,7 +1364,13 @@ export async function recoverVersionRemote(profile, hostConfig, options = {}) {
     overrideFile: `${txn}/image-override.compose.json`,
     oldOverrideFile: `${txn}/old-image-override.compose.json`
   }));
-  const finalTransaction = await pollTransaction(hostConfig, installDir, 6 * 60 * 60 * 1000, options.onProgress);
+  const finalTransaction = await pollTransaction(
+    hostConfig,
+    installDir,
+    6 * 60 * 60 * 1000,
+    options.onProgress,
+    { state: transaction.state, updatedAt: transaction.updatedAt }
+  );
   const log = await readWorkerTail(hostConfig, txn);
   const recovered = finalTransaction.state === 'recovered' && transaction.hadDeployment && finalTransaction.deploymentStarted;
   const firstDeployCleaned = finalTransaction.state === 'recovered' && !transaction.hadDeployment;
@@ -1254,6 +1394,16 @@ export async function recoverVersionRemote(profile, hostConfig, options = {}) {
 
 async function remoteDeployLockActive(hostConfig, installDir) {
   const lock = `${trimSlashes(installDir)}/.deploy-desktop/deploy.lock`;
+  const result = await runRemote(hostConfig, `command -v flock >/dev/null 2>&1 || exit 2
+if [ -f ${shellQuote(lock)} ] && ! flock -n ${shellQuote(lock)} -c true; then
+  printf 'ACTIVE\\n'
+fi
+`, { timeoutMs: 60000 });
+  return result.stdout.includes('ACTIVE');
+}
+
+async function remoteProjectLockActive(hostConfig, projectName) {
+  const lock = projectLockPath(projectName);
   const result = await runRemote(hostConfig, `command -v flock >/dev/null 2>&1 || exit 2
 if [ -f ${shellQuote(lock)} ] && ! flock -n ${shellQuote(lock)} -c true; then
   printf 'ACTIVE\\n'
