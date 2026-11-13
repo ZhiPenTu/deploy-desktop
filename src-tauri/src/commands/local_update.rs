@@ -334,7 +334,7 @@ fn run_update(
             "重启受影响的服务并等待就绪",
         );
         if plan.config_selected || plan.image_selected {
-            apply_compose_update(&plan, &effective, effective_config)?;
+            apply_compose_update(&plan, &effective)?;
         }
         if !plan.services.is_empty() {
             let mut args = vec!["restart"];
@@ -1404,11 +1404,7 @@ fn stop_update_services(plan: &UpdatePlan, services: &[String]) -> Result<(), St
     compose_output(plan, &plan.compose, &args).map(|_| ())
 }
 
-fn apply_compose_update(
-    plan: &UpdatePlan,
-    compose: &Path,
-    config: &Value,
-) -> Result<String, String> {
+fn apply_compose_update(plan: &UpdatePlan, compose: &Path) -> Result<String, String> {
     // 禁止联网拉取或隐式构建，离线更新仅使用预检/导入的镜像。
     match compose_output(
         plan,
@@ -1417,7 +1413,18 @@ fn apply_compose_update(
     ) {
         Ok(output) => Ok(output),
         Err(error) if compose_rejects_pull_flag(&error) => {
-            if !compose_pull_is_offline_safe(config) {
+            let config = match compose_config(plan, compose) {
+                Ok(config) => config,
+                Err(check_error) => {
+                    log::warn!(
+                        target: "deploy",
+                        "当前 Compose 不支持 --pull，但无法确认镜像拉取策略，未自动回退：目录={} 错误={check_error}",
+                        plan.deploy_dir.display()
+                    );
+                    return Err(error);
+                }
+            };
+            if !compose_pull_is_offline_safe(&config) {
                 log::warn!(
                     target: "deploy",
                     "当前 Compose 不支持 --pull，但配置可能重新拉取镜像，未自动回退：目录={}",
@@ -1450,13 +1457,21 @@ fn compose_rejects_pull_flag(error: &str) -> bool {
 }
 
 /// 去掉 `--pull never` 后，Compose 会按服务的 pull_policy 决定是否拉取镜像。
-/// 只有显式 never 或摘要固定、且不会随 `latest` 重新拉取的配置才允许回退。
+/// 只有显式 never，或预检已确认存在且不会随 `latest` 重新拉取的配置才允许回退。
 fn compose_pull_is_offline_safe(config: &Value) -> bool {
     let Some(services) = config.get("services").and_then(Value::as_object) else {
         return false;
     };
-    services.values().all(|service| {
-        match service.get("pull_policy").and_then(Value::as_str) {
+    services
+        .values()
+        .filter(|service| {
+            service
+                .get("profiles")
+                .and_then(Value::as_array)
+                .map(|profiles| profiles.is_empty())
+                .unwrap_or(true)
+        })
+        .all(|service| match service.get("pull_policy").and_then(Value::as_str) {
             Some("always") | Some("build") => false,
             Some("never") => true,
             _ => service
@@ -1464,8 +1479,7 @@ fn compose_pull_is_offline_safe(config: &Value) -> bool {
                 .and_then(Value::as_str)
                 .map(|image| !image_pulls_when_missing(image))
                 .unwrap_or(false),
-        }
-    })
+        })
 }
 
 fn image_pulls_when_missing(image: &str) -> bool {
@@ -1810,6 +1824,21 @@ mod tests {
         })));
         assert!(!compose_pull_is_offline_safe(&json!({
             "services": { "api": { "image": "demo/api:1", "pull_policy": "always" } }
+        })));
+        assert!(compose_pull_is_offline_safe(&json!({
+            "services": {
+                "api": { "image": "demo/api:1" },
+                "debug": { "image": "demo/debug:latest", "profiles": ["debug"] }
+            }
+        })));
+        assert!(compose_pull_is_offline_safe(&json!({
+            "services": { "api": { "image": "demo/api:1", "pull_policy": "missing" } }
+        })));
+        assert!(compose_pull_is_offline_safe(&json!({
+            "services": { "api": { "image": "demo/api:tag@sha256:aaaa" } }
+        })));
+        assert!(!compose_pull_is_offline_safe(&json!({
+            "services": { "api": { "image": "demo/api@sha256:aaaa", "pull_policy": "always" } }
         })));
     }
 

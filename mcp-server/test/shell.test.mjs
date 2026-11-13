@@ -244,6 +244,9 @@ test('Compose 不支持 --pull 时改用不拉取覆盖文件重试', async (t) 
   await fs.mkdir(bin);
   const calls = path.join(root, 'calls');
   const overrideCopy = path.join(root, 'override.yml');
+  const tmp = path.join(root, 'tmp');
+  await fs.mkdir(tmp);
+  const imageOverride = path.join(root, 'images.compose.json');
   await fs.writeFile(path.join(root, 'docker-compose.yml'), 'services: {}');
   await fs.writeFile(path.join(bin, 'docker'), `#!/bin/bash
 printf '%s\\n' "$*" >> "$CALLS"
@@ -252,7 +255,7 @@ case "$*" in
  *'up -d --pull never --no-build --remove-orphans'*)
    echo 'unknown flag: --pull' >&2
    exit 1;;
- *'config --services'*) printf 'api\\n';;
+ *'config --services'*) printf 'api\\nworker\\n';;
  *'up -d --no-build --remove-orphans'*)
    last=
    prev=
@@ -268,7 +271,13 @@ case "$*" in
 esac
 `, { mode: 0o755 });
   const options = {
-    env: { PATH: `${bin}:${process.env.PATH}`, CALLS: calls, OVERRIDE_COPY: overrideCopy }
+    env: {
+      PATH: `${bin}:${process.env.PATH}`,
+      CALLS: calls,
+      OVERRIDE_COPY: overrideCopy,
+      DEPLOY_IMAGE_OVERRIDE: imageOverride,
+      TMPDIR: tmp
+    }
   };
   const script = applyScript({
     deployDir: root,
@@ -285,7 +294,48 @@ esac
   assert.match(updates[0], /up -d --pull never --no-build --remove-orphans/);
   assert.match(updates[1], /up -d --no-build --remove-orphans/);
   assert.doesNotMatch(updates[1], /--pull/);
+  assert.match(
+    updates[1],
+    /-f docker-compose\.yml -f \S*images\.compose\.json -f \S*deploy-no-pull/
+  );
   const override = await fs.readFile(overrideCopy, 'utf8');
   assert.match(override, /services:/);
   assert.match(override, /api:\n    pull_policy: never/);
+  assert.match(override, /worker:\n    pull_policy: never/);
+  assert.deepEqual(await fs.readdir(tmp), []);
+});
+
+test('Compose 启动失败不是 --pull 时不重试并保留错误原因', async (t) => {
+  const root = await fixture(t);
+  const bin = path.join(root, 'bin');
+  await fs.mkdir(bin);
+  const calls = path.join(root, 'calls');
+  await fs.writeFile(path.join(root, 'docker-compose.yml'), 'services: {}');
+  await fs.writeFile(path.join(bin, 'docker'), `#!/bin/bash
+printf '%s\\n' "$*" >> "$CALLS"
+case "$*" in
+ 'compose version') exit 0;;
+ *'up -d --pull never --no-build --remove-orphans'*)
+   echo 'Error response from daemon: Ports are not available: exposing port TCP 0.0.0.0:8080' >&2
+   exit 1;;
+ *'up -d '*) echo 'SHOULD-NOT-RETRY' >&2; exit 9;;
+ *'ps -a -q'*) echo actual-container-id;;
+ 'inspect --format {{.State.Status}} actual-container-id') echo running;;
+ inspect*) echo none;;
+esac
+`, { mode: 0o755 });
+  const options = { env: { PATH: `${bin}:${process.env.PATH}`, CALLS: calls } };
+  const script = applyScript({
+    deployDir: root,
+    compose: 'docker-compose.yml',
+    config: true,
+    restart: [],
+    wait: []
+  });
+  const result = await local(script, options);
+  assert.notEqual(result.code, 0);
+  const callsText = (await fs.readFile(calls, 'utf8')).trim().split('\n');
+  assert.equal(callsText.filter((line) => line.includes(' up -d ')).length, 1);
+  assert.match(result.stderr, /Ports are not available/);
+  assert.doesNotMatch(result.stdout + result.stderr, /SHOULD-NOT-RETRY/);
 });

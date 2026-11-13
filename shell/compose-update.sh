@@ -36,7 +36,10 @@ for ((index=0; index<RESTART_COUNT; index++)); do RESTART_SERVICES+=("$1"); shif
 WAIT_SERVICES=("$@")
 if [ "$APPLY_CONFIG" = yes ]; then
   echo '==> 应用部署配置'
-  compose_log=$(mktemp "${TMPDIR:-/tmp}/deploy-compose.XXXXXX") || exit 2
+  compose_log=$(mktemp "${TMPDIR:-/tmp}/deploy-compose.XXXXXX") || {
+    echo '无法创建临时文件，请检查目标机临时目录权限' >&2
+    exit 2
+  }
   no_pull_override=
   cleanup_compose_log() { rm -f "$compose_log" ${no_pull_override:+"$no_pull_override"}; }
   trap cleanup_compose_log EXIT
@@ -47,7 +50,10 @@ if [ "$APPLY_CONFIG" = yes ]; then
     if [ "$COMPOSE_V2" = yes ] && { grep -qi 'unknown flag.*pull' "$compose_log" || grep -qi 'flag provided but not defined.*pull' "$compose_log"; }; then
       services=$("${COMPOSE[@]}" -f "$COMPOSE_FILE" config --services 2>/dev/null) || services=
       if [ -n "$services" ]; then
-        no_pull_override=$(mktemp "${TMPDIR:-/tmp}/deploy-no-pull.XXXXXX") || exit 2
+        no_pull_override=$(mktemp "${TMPDIR:-/tmp}/deploy-no-pull.XXXXXX") || {
+          echo '无法创建临时文件，请检查目标机临时目录权限' >&2
+          exit 2
+        }
         {
           printf 'services:\n'
           printf '%s\n' "$services" | while IFS= read -r service; do
@@ -57,9 +63,11 @@ if [ "$APPLY_CONFIG" = yes ]; then
         echo '==> 当前 Compose 不支持 --pull，改为固定不拉取镜像后重试' >&2
         compose_with_extra "$no_pull_override" up -d --no-build --remove-orphans || exit $?
       else
+        cat "$compose_log" >&2
         exit "$compose_status"
       fi
     else
+      cat "$compose_log" >&2
       exit "$compose_status"
     fi
   fi
