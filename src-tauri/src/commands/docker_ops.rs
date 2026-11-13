@@ -167,26 +167,65 @@ pub(crate) fn compose_failure_message(stderr: &str) -> String {
             .iter()
             .any(|line| line.to_ascii_lowercase().contains(marker))
     };
+    if contains("unknown flag") || contains("flag provided but not defined") {
+        if contains("pull") {
+            return String::from(
+                "当前 Docker Compose 版本不支持 --pull，请升级 Docker Compose 后重试",
+            );
+        }
+        return String::from(
+            "当前 Docker Compose 版本不支持本次更新所需的命令参数，请升级 Docker Compose 后重试",
+        );
+    }
+    if contains("all predefined address pools have been fully subnetted") {
+        return String::from("Docker 网络地址池已用完，请清理未使用的 Docker 网络后重试");
+    }
+    if contains("container name") && contains("already in use") {
+        return String::from("存在同名容器仍在使用，请先停止并移除冲突容器后重试");
+    }
+    if contains("dependency failed to start") || contains("is unhealthy") {
+        return String::from("依赖服务未能正常启动，请查看执行详情中的容器日志，处理后重试");
+    }
+    if contains("no such image") || contains("pull access denied") || contains("manifest unknown") {
+        return String::from("本机缺少服务所需镜像，请补齐镜像后重新比对");
+    }
+    if contains("does not match the specified platform")
+        || contains("no matching manifest")
+        || (contains("operating system") && contains("cannot be used"))
+    {
+        return String::from(
+            "镜像与当前 Docker 平台不匹配，请确认 Docker 使用 Linux 容器，并导入与目标架构一致的镜像",
+        );
+    }
+    if contains("has active endpoints") {
+        return String::from("Docker 网络仍被运行中的容器占用，请先停止相关服务后重试");
+    }
+    if contains("no space left on device") {
+        return String::from("目标磁盘空间不足，请清理磁盘后重试");
+    }
     if contains("ports are not available")
         || contains("port is already allocated")
         || contains("only one usage of each socket address")
         || (contains("bind:") && contains("access permissions"))
+        || (contains("bind:") && contains("requested address is not valid"))
     {
         return String::from(
-            "Docker 无法绑定服务端口：端口可能已被占用，或被 Windows 的保留端口范围占用。请调整 Compose 清单中的端口，或关闭占用该端口的程序后重试",
+            "Docker 无法绑定服务端口：端口可能已被占用、监听地址无效，或被 Windows 的保留端口范围占用。请检查 Compose 清单中的端口与监听地址，或关闭占用端口的程序后重试",
         );
     }
     if contains("invalid mount config") || contains("bind source path does not exist") {
         return String::from(
-            "Compose 清单中的挂载路径在本机不存在或不可访问，请确认交付包已完整分发到部署目录后重试",
+            "Docker 未找到要挂载的部署文件，请确认交付包已完整写入部署目录，并确认 Docker 可以访问该磁盘后重试",
         );
     }
     if contains("mount denied")
         || contains("mounts denied")
+        || contains("path is not shared")
+        || contains("is not shared from the host")
         || (contains("source path") && contains("\\\\?\\"))
     {
         return String::from(
-            "Docker 无法挂载部署目录，请确认部署目录位于本机磁盘目录，避免使用网络共享目录后重试",
+            "Docker 无法访问部署目录，请确认部署目录位于本机磁盘，并在 Docker Desktop 中允许共享该磁盘后重试",
         );
     }
     let hint = compose_failure_hint(&lines.join("\n"));
@@ -646,20 +685,19 @@ mod tests {
         let mount = compose_failure_message(
             "Error response from daemon: invalid mount config for type \"bind\": bind source path does not exist: /opt/demo",
         );
-        assert!(mount.contains("挂载路径"));
+        assert!(mount.contains("未找到要挂载的部署文件"), "{mount}");
 
         let verbatim = compose_failure_message(
             "Error response from daemon: mount denied: the source path \\\\?\\D:\\400mbushu\\deploy\\site is not a valid Windows path",
         );
-        assert!(verbatim.contains("无法挂载部署目录"), "{verbatim}");
+        assert!(verbatim.contains("无法访问部署目录"), "{verbatim}");
         assert!(!verbatim.contains("扩展前缀"), "{verbatim}");
 
         let plural = compose_failure_message("Mounts denied: path D:\\deploy is not shared");
-        assert!(plural.contains("无法挂载部署目录"), "{plural}");
+        assert!(plural.contains("无法访问部署目录"), "{plural}");
 
         let other = compose_failure_message("unknown flag: --remove-orphans");
-        assert!(other.contains("unknown flag"));
-        assert!(other.contains("执行详情"));
+        assert!(other.contains("升级 Docker Compose"), "{other}");
 
         let warned = compose_failure_message(
             "WARN[0000] The \"OPTIONAL_X\" variable is not set. Defaulting to a blank string.\nError response from daemon: Ports are not available: exposing port TCP 0.0.0.0:9000 -> 0.0.0.0:0: listen tcp4 0.0.0.0:9000: bind: An attempt was made to access a socket in a way forbidden by its access permissions.",
@@ -680,6 +718,31 @@ mod tests {
         assert!(quoted.contains("https://registry.example.com/v2/?…"));
 
         assert!(compose_failure_message("").contains("命令未执行成功"));
+    }
+
+    #[test]
+    fn compose_failures_cover_platform_and_resource_conflicts() {
+        let pull = compose_failure_message("unknown flag: --pull");
+        assert!(pull.contains("不支持 --pull"), "{pull}");
+
+        let network = compose_failure_message(
+            "Error response from daemon: all predefined address pools have been fully subnetted",
+        );
+        assert!(network.contains("网络地址池"), "{network}");
+
+        let platform = compose_failure_message(
+            "Error response from daemon: image with reference demo/api:1 was found but does not match the specified platform",
+        );
+        assert!(platform.contains("平台不匹配"), "{platform}");
+
+        let conflict = compose_failure_message(
+            "Error response from daemon: Conflict. The container name \"/demo-api-1\" is already in use by container \"abc\".",
+        );
+        assert!(conflict.contains("同名容器"), "{conflict}");
+
+        let dependency =
+            compose_failure_message("dependency failed to start: container demo-api-1 is unhealthy");
+        assert!(dependency.contains("依赖服务"), "{dependency}");
     }
 
     #[test]
