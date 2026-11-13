@@ -219,6 +219,12 @@ pub struct DeploymentLock {
     _file: File,
 }
 
+impl Drop for DeploymentLock {
+    fn drop(&mut self) {
+        let _ = self._file.unlock();
+    }
+}
+
 impl DeploymentLock {
     pub fn acquire(install_dir: &Path) -> Result<Self, String> {
         let path = install_dir.join(DEPLOY_LOCK);
