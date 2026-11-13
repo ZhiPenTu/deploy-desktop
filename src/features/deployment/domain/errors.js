@@ -20,7 +20,7 @@ function actionableReason(text) {
     // 原始命令输出与替换详情属于诊断内容，只在执行详情中展示，不作为主提示。
     if (/^(原始输出|替换详情|原始错误)[：:]/.test(line)) continue;
     if (
-      !/(未在等待时间内就绪|未就绪|未创建|不一致|未声明|未包含|缺少|不足|尚未|未安装|未运行|未找到|被占用|占用|正在使用|无法替换|无法写入|无法挂载|未能恢复|恢复失败|自动恢复失败|备份目录|临时旧文件)/.test(
+      !/(未在等待时间内就绪|未就绪|未创建|不一致|未声明|未包含|缺少|不足|尚未|未安装|未运行|未找到|被占用|占用|正在使用|无法替换|无法写入|无法挂载|无法访问|不匹配|地址池|已用完|同名容器|依赖服务|不支持|未能恢复|恢复失败|自动恢复失败|备份目录|临时旧文件)/.test(
         line
       )
     )
@@ -62,7 +62,7 @@ export function failureText(error, action, { remote } = {}) {
       : `${action}失败，请检查目标主机登录权限或目标目录权限后重试。`;
   }
   if (/Docker|docker|Compose|compose/.test(text))
-    return `${action}失败，请确认 Docker 和 Compose 正常运行，并检查服务配置。`;
+    return `${action}失败，Docker 未能完成操作，请查看执行详情或运行日志中的具体原因后重试。`;
   if (/镜像|image/i.test(text)) return `${action}失败，请补齐所需镜像后重新比对。`;
   if (/目录|文件|路径|bundle|交付包/.test(text)) return `${action}失败，请检查交付包与部署目录后重试。`;
   return `${action}失败，请检查目标主机连接后重试。`;

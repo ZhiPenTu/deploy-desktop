@@ -219,6 +219,39 @@ test('mount failures are reported as mount problems instead of permission proble
   assert.doesNotMatch(bare, /目录或文件权限/);
 });
 
+test('compose failures name the actual cause instead of a generic docker hint', () => {
+  const pull = failureText(
+    'Compose 操作失败：当前 Docker Compose 版本不支持本次更新所需的命令参数，请升级 Docker Compose 后重试\n原始输出：unknown flag: --pull',
+    '增量更新',
+    { remote: false }
+  );
+  assert.match(pull, /升级 Docker Compose/);
+  assert.doesNotMatch(pull, /Docker 和 Compose/);
+
+  const mount = failureText(
+    'Compose 操作失败：Docker 未找到要挂载的部署文件，请确认交付包已完整写入部署目录，并确认 Docker 可以访问该磁盘后重试\n原始输出：bind source path does not exist',
+    '增量更新',
+    { remote: false }
+  );
+  assert.match(mount, /未找到要挂载的部署文件/);
+  assert.doesNotMatch(mount, /目录或文件权限/);
+
+  const platform = failureText(
+    'Compose 操作失败：镜像与当前 Docker 平台不匹配，请确认 Docker 使用 Linux 容器，并导入与目标架构一致的镜像',
+    '增量更新',
+    { remote: false }
+  );
+  assert.match(platform, /平台不匹配/);
+
+  const fallback = failureText(
+    'Compose 操作失败：命令未执行成功，请检查部署目录与服务配置后重试\n原始输出：unrecognized daemon error',
+    '增量更新',
+    { remote: false }
+  );
+  assert.match(fallback, /执行详情|运行日志/);
+  assert.doesNotMatch(fallback, /Docker 和 Compose 正常运行/);
+});
+
 test('diagnostic lines stay out of the main failure message', () => {
   const text = failureText(
     '替换原部署文件失败，文件可能正被其他程序占用，请关闭占用后重试\n替换详情：阶段=MoveAside 错误=os error 5 旧文件=D:\\deploy\\site',

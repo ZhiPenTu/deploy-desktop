@@ -237,3 +237,55 @@ esac
   assert.match(missing.stderr, /服务 api 未创建/);
   assert.equal((await local(applyScript({ deployDir: root, compose: "compose ' $(literal).yml", config: false, restart: [], wait: [] }), options)).code, 0);
 });
+
+test('Compose 不支持 --pull 时改用不拉取覆盖文件重试', async (t) => {
+  const root = await fixture(t);
+  const bin = path.join(root, 'bin');
+  await fs.mkdir(bin);
+  const calls = path.join(root, 'calls');
+  const overrideCopy = path.join(root, 'override.yml');
+  await fs.writeFile(path.join(root, 'docker-compose.yml'), 'services: {}');
+  await fs.writeFile(path.join(bin, 'docker'), `#!/bin/bash
+printf '%s\\n' "$*" >> "$CALLS"
+case "$*" in
+ 'compose version') exit 0;;
+ *'up -d --pull never --no-build --remove-orphans'*)
+   echo 'unknown flag: --pull' >&2
+   exit 1;;
+ *'config --services'*) printf 'api\\n';;
+ *'up -d --no-build --remove-orphans'*)
+   last=
+   prev=
+   for arg in "$@"; do
+     if [ "$prev" = "-f" ]; then last=$arg; fi
+     prev=$arg
+   done
+   cp "$last" "$OVERRIDE_COPY"
+   exit 0;;
+ *'ps -a -q'*) echo actual-container-id;;
+ 'inspect --format {{.State.Status}} actual-container-id') echo running;;
+ inspect*) echo none;;
+esac
+`, { mode: 0o755 });
+  const options = {
+    env: { PATH: `${bin}:${process.env.PATH}`, CALLS: calls, OVERRIDE_COPY: overrideCopy }
+  };
+  const script = applyScript({
+    deployDir: root,
+    compose: 'docker-compose.yml',
+    config: true,
+    restart: ['api'],
+    wait: ['api']
+  });
+  const result = await local(script, options);
+  assert.equal(result.code, 0, result.stderr);
+  const callsText = (await fs.readFile(calls, 'utf8')).trim().split('\n');
+  const updates = callsText.filter((line) => line.includes(' up -d '));
+  assert.equal(updates.length, 2);
+  assert.match(updates[0], /up -d --pull never --no-build --remove-orphans/);
+  assert.match(updates[1], /up -d --no-build --remove-orphans/);
+  assert.doesNotMatch(updates[1], /--pull/);
+  const override = await fs.readFile(overrideCopy, 'utf8');
+  assert.match(override, /services:/);
+  assert.match(override, /api:\n    pull_policy: never/);
+});

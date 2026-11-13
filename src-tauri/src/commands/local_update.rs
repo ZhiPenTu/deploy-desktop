@@ -334,12 +334,7 @@ fn run_update(
             "重启受影响的服务并等待就绪",
         );
         if plan.config_selected || plan.image_selected {
-            // 禁止联网拉取或隐式构建，离线更新仅使用预检/导入的镜像。
-            compose_output(
-                &plan,
-                &effective,
-                &["up", "-d", "--pull", "never", "--no-build", "--remove-orphans"],
-            )?;
+            apply_compose_update(&plan, &effective, effective_config)?;
         }
         if !plan.services.is_empty() {
             let mut args = vec!["restart"];
@@ -1409,6 +1404,81 @@ fn stop_update_services(plan: &UpdatePlan, services: &[String]) -> Result<(), St
     compose_output(plan, &plan.compose, &args).map(|_| ())
 }
 
+fn apply_compose_update(
+    plan: &UpdatePlan,
+    compose: &Path,
+    config: &Value,
+) -> Result<String, String> {
+    // 禁止联网拉取或隐式构建，离线更新仅使用预检/导入的镜像。
+    match compose_output(
+        plan,
+        compose,
+        &["up", "-d", "--pull", "never", "--no-build", "--remove-orphans"],
+    ) {
+        Ok(output) => Ok(output),
+        Err(error) if compose_rejects_pull_flag(&error) => {
+            if !compose_pull_is_offline_safe(config) {
+                log::warn!(
+                    target: "deploy",
+                    "当前 Compose 不支持 --pull，但配置可能重新拉取镜像，未自动回退：目录={}",
+                    plan.deploy_dir.display()
+                );
+                return Err(error);
+            }
+            // Compose v2.8 之前没有 up --pull。预检已确认镜像存在，回退到默认
+            // 拉取策略不会联网补齐缺失镜像，也不会跳过导入后的镜像核对。
+            log::warn!(
+                target: "deploy",
+                "当前 Compose 不支持 --pull，改用默认拉取策略继续更新：目录={}",
+                plan.deploy_dir.display()
+            );
+            compose_output(
+                plan,
+                compose,
+                &["up", "-d", "--no-build", "--remove-orphans"],
+            )
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn compose_rejects_pull_flag(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("不支持 --pull")
+        || ((lower.contains("unknown flag") || lower.contains("flag provided but not defined"))
+            && lower.contains("pull"))
+}
+
+/// 去掉 `--pull never` 后，Compose 会按服务的 pull_policy 决定是否拉取镜像。
+/// 只有显式 never 或摘要固定、且不会随 `latest` 重新拉取的配置才允许回退。
+fn compose_pull_is_offline_safe(config: &Value) -> bool {
+    let Some(services) = config.get("services").and_then(Value::as_object) else {
+        return false;
+    };
+    services.values().all(|service| {
+        match service.get("pull_policy").and_then(Value::as_str) {
+            Some("always") | Some("build") => false,
+            Some("never") => true,
+            _ => service
+                .get("image")
+                .and_then(Value::as_str)
+                .map(|image| !image_pulls_when_missing(image))
+                .unwrap_or(false),
+        }
+    })
+}
+
+fn image_pulls_when_missing(image: &str) -> bool {
+    if image.contains('@') {
+        return false;
+    }
+    let name = image.rsplit('/').next().unwrap_or(image);
+    match name.rsplit_once(':') {
+        None => true,
+        Some((_, tag)) => tag.eq_ignore_ascii_case("latest"),
+    }
+}
+
 fn wait_for_services(plan: &UpdatePlan, compose: &Path, services: &[String]) -> Result<(), String> {
     for service in services {
         let mut ready = false;
@@ -1705,6 +1775,42 @@ mod tests {
         assert!(args.windows(2).any(|pair| {
             pair[0] == "-f" && pair[1] == r"D:\400mbushu\deploy\docker-compose.yml"
         }));
+    }
+
+    #[test]
+    fn recognizes_compose_versions_without_pull_flag() {
+        assert!(compose_rejects_pull_flag(
+            "Compose 操作失败：命令未执行成功\n原始输出：unknown flag: --pull"
+        ));
+        assert!(compose_rejects_pull_flag(
+            "Compose 操作失败：当前 Docker Compose 版本不支持 --pull，请升级 Docker Compose 后重试\n原始输出：WARN[0000] first\nWARN[0000] second"
+        ));
+        assert!(compose_rejects_pull_flag(
+            "flag provided but not defined: -pull"
+        ));
+        assert!(!compose_rejects_pull_flag("unknown flag: --remove-orphans"));
+        assert!(!compose_rejects_pull_flag(
+            "pull access denied for demo/api, repository does not exist"
+        ));
+    }
+
+    #[test]
+    fn compose_pull_fallback_keeps_updates_offline() {
+        assert!(compose_pull_is_offline_safe(&json!({
+            "services": { "api": { "image": "demo/api@sha256:aaaa" } }
+        })));
+        assert!(compose_pull_is_offline_safe(&json!({
+            "services": { "api": { "image": "demo/api:latest", "pull_policy": "never" } }
+        })));
+        assert!(!compose_pull_is_offline_safe(&json!({
+            "services": { "api": { "image": "demo/api:latest" } }
+        })));
+        assert!(!compose_pull_is_offline_safe(&json!({
+            "services": { "api": { "image": "demo/api" } }
+        })));
+        assert!(!compose_pull_is_offline_safe(&json!({
+            "services": { "api": { "image": "demo/api:1", "pull_policy": "always" } }
+        })));
     }
 
     #[test]
