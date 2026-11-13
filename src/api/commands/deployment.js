@@ -160,6 +160,42 @@ export async function updateLocalDeployment(bundleDir, installDir, components, b
   return await invokeDesktop('update_local_deployment', { bundleDir, installDir, components, backup, dryRun });
 }
 
+export async function deployLocalVersion(bundleDir, installDir, dryRun = false) {
+  return await invokeDesktop('deploy_local_version', { bundleDir, installDir, dryRun });
+}
+
+export async function deployRemoteVersion(host, port, user, keyPath, bundleDir, installDir, dryRun = false) {
+  return await invokeDesktop('deploy_remote_version', {
+    host,
+    port,
+    user,
+    keyPath,
+    bundleDir,
+    installDir,
+    dryRun
+  });
+}
+
+export async function inspectDeploymentTransaction(installDir, target = null) {
+  return await invokeRead('inspect_deployment_transaction', {
+    installDir,
+    host: target?.host || null,
+    port: target?.port ?? null,
+    user: target?.user || null,
+    keyPath: target?.keyPath || null
+  });
+}
+
+export async function recoverDeploymentTransaction(installDir, target = null) {
+  return await invokeDesktop('recover_deployment_transaction', {
+    installDir,
+    host: target?.host || null,
+    port: target?.port ?? null,
+    user: target?.user || null,
+    keyPath: target?.keyPath || null
+  });
+}
+
 export async function installBundle(mode, host, port, user, keyPath, bundleDir, installDir) {
   return await invokeDesktop("install_bundle", {
     mode,

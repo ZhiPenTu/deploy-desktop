@@ -3,7 +3,7 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">部署向导</h2>
-      <p class="page-subtitle">选择项目与制品，核对目标环境的服务、镜像与制品文件后执行首次部署或增量更新</p>
+      <p class="page-subtitle">选择项目与制品，核对目标环境的服务、镜像与制品文件后部署完整版本</p>
       </div>
     </div>
     <DeploymentStepper :steps="steps" :active-step="activeStep" />
@@ -123,17 +123,17 @@
       :target-label="targetLabel"
       :install-dir="config.installDir"
       :version="preparedBundle?.version || ''"
-      :action="deploymentAction"
-      :components="selectedComponents"
-      :component-options="componentOptions"
-      :backup="backup"
+      :plan="bundlePlan"
       :review="review"
+      :transaction="transaction"
       :busy="busy"
       :can-execute="canExecute"
       :artifact-selection-issue="artifactSelectionIssue"
       :preflighting="preflighting"
       :preflight-passed="preflightPassed"
+      :preflight-message="preflightMessage"
       :executing="executing"
+      :recovering-transaction="recoveringTransaction"
       :phase="phase"
       :operation-error="operationError"
       :progress-percent="progressPercent"
@@ -142,12 +142,10 @@
       :elapsed-text="elapsedText"
       :result="result"
       :diagnostics="diagnostics"
-      @update:action="deploymentAction = $event"
-      @update:components="selectedComponents = $event"
-      @update:backup="backup = $event"
       @previous="previousStep"
       @preflight="runPreflight"
       @execute="executeDeployment"
+      @recover="restorePreviousVersion"
       @go-dashboard="emit('go-dashboard')"
     />
   </div>
@@ -210,6 +208,7 @@ const {
   candidate,
   preparedBundle,
   artifactBusy,
+  bundlePlan,
   review,
   reviewError,
   checkingReview,
@@ -228,19 +227,18 @@ const {
   imageDiagnostics,
   imageResult,
   importingImages,
-  deploymentAction,
-  selectedComponents,
-  backup,
+  transaction,
+  recoveringTransaction,
   executing,
   preflighting,
   preflightPassed,
+  preflightMessage,
   phase,
   operationError,
   diagnostics,
   result,
   busy,
   environmentReady,
-  componentOptions,
   canExecute,
   artifactSelectionIssue,
   artifactChosen,
@@ -257,6 +255,7 @@ const {
   setImagePullSelection,
   runPreflight,
   executeDeployment,
+  restorePreviousVersion,
   progressStep,
   progressPercent,
   progressMessage,

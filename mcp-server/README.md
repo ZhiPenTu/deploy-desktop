@@ -125,7 +125,7 @@ env = { DEPLOY_DESKTOP_ROOT = "/absolute/path/to/deploy-desktop" }
 
 ## 工具覆盖
 
-共 51 个工具，按能力分组：
+共 54 个工具，按能力分组：
 
 桌面应用的「高级 / MCP 服务」页面按以下分类展示全部能力，可按名称、用途和操作类型筛选。该页面用于查看能力，服务仍由 MCP 客户端启动与调用，连接状态请在客户端中查看。MCP 的主机、镜像仓库与更新源配置独立保存。
 
@@ -140,10 +140,12 @@ env = { DEPLOY_DESKTOP_ROOT = "/absolute/path/to/deploy-desktop" }
 | 离线包 | `deploy_bundle_scan`、`deploy_bundle_upload`、`deploy_bundle_import`、`deploy_bundle_deploy`、`deploy_bundle_remove` |
 | 制品中心 | `deploy_artifact_source_list`、`deploy_artifact_source_save`、`deploy_artifact_source_remove`、`deploy_artifact_releases`、`deploy_artifact_download` |
 | 部署运维 | `deploy_compose`、`deploy_inspect`、`deploy_remote_run`、`deploy_logs`、`deploy_db_check`、`deploy_db_import`、`deploy_docker_install` |
-| 更新 | `deploy_update_remote`、`deploy_update_settings`、`deploy_app_update_check` |
+| 更新 | `deploy_version_remote`、`deploy_transaction_status`、`deploy_transaction_recover`、`deploy_update_remote`、`deploy_update_settings`、`deploy_app_update_check` |
 | 日志 | `deploy_runtime_logs_read`、`deploy_runtime_logs_summary`（本机运行日志，只读） |
 
 大多数工具接受 `target: "local" | "remote"`；远程模式使用 `host`（已保存的主机配置名或 IP/域名）以及可选的 `port`、`user`、`keyPath`。
+
+完整版本部署与事务恢复工具只支持远程 SSH 目标，不提供 MCP 本机部署入口。
 
 项目管理与制品源直接读写桌面端的应用配置目录，与桌面界面共享同一份数据：
 
@@ -201,18 +203,18 @@ deploy_bundle_deploy { target: "remote", host: "lan-01", bundleDir: "/data/bundl
 deploy_inspect       { target: "remote", host: "lan-01" }
 ```
 
-`deploy_bundle_deploy` 会依次完成镜像上传（可选）、`docker load`、`docker compose up -d`、可选 SQL 导入，并返回部署状态。首次部署或整机重建推荐使用它。
+`deploy_bundle_deploy` 会依次完成镜像上传（可选）、`docker load`、`docker compose up -d`、可选 SQL 导入，并返回部署状态。它保留给手工分发镜像或导入 SQL 的场景；完整版本部署使用下一节的 `deploy_version_remote`。
 
-### 5. 增量更新
+### 5. 完整版本部署
 
 ```text
-deploy_update_remote { host: "lan-01", bundleDir: "/data/update", components: ["backend", "frontend"], dryRun: true }
-deploy_update_remote { host: "lan-01", bundleDir: "/data/update", components: ["backend", "frontend"], confirm: true }
+deploy_version_remote { host: "lan-01", bundleDir: "/data/update", dryRun: true }
+deploy_version_remote { host: "lan-01", bundleDir: "/data/update", confirm: true }
+deploy_transaction_status { host: "lan-01" }
+deploy_transaction_recover { host: "lan-01", confirm: true }
 ```
 
-更新包目录需要包含 `app/` 与 `deploy/` 产物。组件可选 `backend`、`gateway`、`frontend`、`config`。
-
-`deploy_update_remote` 在预检阶段会读取交付包附带的镜像锁 `deploy/images.lock.json`，逐个核对目标机的基础镜像：镜像是否已导入、实际架构是否与目标机一致、镜像内容（config digest）是否与镜像锁中该架构的记录一致。任一项不通过都会在 `dryRun` 阶段直接失败（错误码 `IMAGE_PRECHECK_FAILED`），不会开始上传或重启。镜像锁同时记录了 `linux/amd64` 与 `linux/arm64` 两种架构，镜像只支持单一架构时交付包无法构建。
+完整版本部署会停止全部服务，备份受管文件与交付包声明的数据卷，再写入全部组件并验证服务就绪。失败时自动恢复上一版本；恢复失败会保留事务快照并阻止下次部署，直到人工处理。部署预检会读取交付包附带的镜像锁 `deploy/images.lock.json`，逐个核对目标机的镜像：镜像是否已导入、实际架构是否与目标机一致、镜像内容（config digest）是否与镜像锁中该架构的记录一致。任一项不通过都会在 `dryRun` 阶段直接失败（错误码 `IMAGE_PRECHECK_FAILED`），不会开始上传或重启。`deploy_update_remote` 仅作为兼容别名，传入不完整组件或 `backup=false` 会被拒绝。
 
 ### 6. 应用更新检查
 

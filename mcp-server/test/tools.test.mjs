@@ -35,7 +35,7 @@ function parseResult(result) {
 const tools = captureTools();
 
 test('注册完整工具集且名称唯一', () => {
-  assert.equal(tools.size, 51);
+  assert.equal(tools.size, 54);
   for (const name of [
     'deploy_project_list',
     'deploy_project_create',
@@ -59,6 +59,9 @@ test('注册完整工具集且名称唯一', () => {
     'deploy_inspect',
     'deploy_db_import',
     'deploy_update_remote',
+    'deploy_version_remote',
+    'deploy_transaction_status',
+    'deploy_transaction_recover',
     'deploy_app_update_check'
   ]) {
     assert.equal(tools.has(name), true, `缺少工具 ${name}`);
@@ -78,7 +81,9 @@ test('破坏性工具标记 destructiveHint', () => {
     'deploy_remote_run',
     'deploy_db_import',
     'deploy_docker_install',
-    'deploy_update_remote'
+    'deploy_update_remote',
+    'deploy_version_remote',
+    'deploy_transaction_recover'
   ]) {
     assert.equal(tools.get(name).definition.annotations?.destructiveHint, true, `${name} 应标记为破坏性操作`);
   }

@@ -4,22 +4,17 @@ import { selectLocalPath as open } from '../../../api/tauri.js';
 import { connectionInventory } from '../../connections/state.js';
 import { useDesktopProgress } from '../../../shared/composables/useDesktopProgress.js';
 import {
-  dockerComposeAction,
-  remoteDockerComposeAction,
-  installBundle,
+  inspectDeploymentTransaction,
   inspectBundlePlan,
   inspectDeploymentReview,
   isDesktopApp,
   listRegistrySources,
   onImageLibraryProgress,
-  onImageManagerProgress
+  onImageManagerProgress,
+  recoverDeploymentTransaction
 } from '../../../api/tauri.js';
 import { validInstallDir, createDeploymentContext, contextTarget } from '../domain/context.js';
 import {
-  componentLabels,
-  componentOptions as planComponentOptions,
-  deploymentComponents,
-  missingArtifactIssue,
   servicesAreReady
 } from '../domain/components.js';
 import { safeText, failureText } from '../domain/errors.js';
@@ -31,7 +26,7 @@ import {
   pendingImages,
   pullableImages
 } from '../domain/images.js';
-import { invokeIncremental } from '../services/operations.js';
+import { invokeVersionDeployment } from '../services/operations.js';
 import {
   prepareImagePackages,
   prepareRelayImagePackages,
@@ -47,7 +42,7 @@ const DIGEST_TRANSFER_HINT =
   '离线包中的镜像无法与仓库摘要核对，请从镜像仓库拉取；局域网目标可选择本机拉取后传入';
 
 export function useDeploymentWizard(config, emit) {
-  const steps = ['选择项目', '检测环境', '选择制品', '解压制品', '清单比对', '选择更新'];
+  const steps = ['选择项目', '检测环境', '选择制品', '解压制品', '清单比对', '部署版本'];
 
   const activeStep = ref(0);
 
@@ -178,13 +173,13 @@ export function useDeploymentWizard(config, emit) {
   useDesktopProgress(onImageLibraryProgress, receiveImageProgress);
   useDesktopProgress(onImageManagerProgress, receiveImageProgress);
 
-  const deploymentAction = ref('first'),
-    selectedComponents = ref([]),
-    backup = ref(true);
+  const transaction = ref(null),
+    recoveringTransaction = ref(false);
 
   const executing = ref(false),
     preflighting = ref(false),
     preflightPassed = ref(false),
+    preflightMessage = ref(''),
     phase = ref(''),
     operationError = ref(''),
     diagnostics = ref(''),
@@ -228,24 +223,24 @@ export function useDeploymentWizard(config, emit) {
       preflighting.value
   );
 
-  const componentOptions = computed(() => planComponentOptions(bundlePlan.value));
-  const componentLabelMap = computed(() => componentLabels(bundlePlan.value));
-  const artifactSelectionIssue = computed(() =>
-    deploymentAction.value === 'incremental'
-      ? missingArtifactIssue(bundlePlan.value, review.value, selectedComponents.value)
-      : ''
-  );
+  const artifactSelectionIssue = computed(() => '');
+  const transactionReadError = ref('');
+  const checkingTransaction = ref(false);
+  let transactionReadSequence = 0;
 
   const canExecute = computed(
     () =>
       hostReady.value &&
       environmentReady.value &&
       preparedBundle.value &&
+      !checkingTransaction.value &&
+      !transactionReadError.value &&
+      !(
+        transaction.value &&
+        !['committed', 'recovered'].includes(transaction.value.state)
+      ) &&
       review.value?.ready &&
-      !artifactSelectionIssue.value &&
-      (deploymentAction.value === 'first'
-        ? review.value.canFirstDeploy
-        : review.value.canIncrementalUpdate && selectedComponents.value.length > 0)
+      !artifactSelectionIssue.value
   );
 
   let revision = 0,
@@ -284,10 +279,42 @@ export function useDeploymentWizard(config, emit) {
 
   function clearExecution() {
     preflightPassed.value = false;
+    preflightMessage.value = '';
     result.value = null;
     phase.value = '';
     operationError.value = '';
     diagnostics.value = '';
+  }
+
+  async function inspectTransaction() {
+    const sequence = ++transactionReadSequence;
+    if (!config.installDir?.trim()) {
+      transaction.value = null;
+      transactionReadError.value = '';
+      checkingTransaction.value = false;
+      return;
+    }
+    checkingTransaction.value = true;
+    try {
+      const response = await inspectDeploymentTransaction(config.installDir.trim(), target());
+      if (sequence !== transactionReadSequence || disposed) return;
+      if (operationError.value === transactionReadError.value) operationError.value = '';
+      transactionReadError.value = '';
+      transaction.value = response?.transaction
+        ? {
+            ...response.transaction,
+            error: safeText(response.transaction.error),
+            recoveryError: safeText(response.transaction.recoveryError)
+          }
+        : null;
+    } catch (error) {
+      if (sequence !== transactionReadSequence || disposed) return;
+      transaction.value = null;
+      transactionReadError.value = failureText(error, '读取部署事务', { remote: isRemote.value });
+      operationError.value = transactionReadError.value;
+    } finally {
+      if (sequence === transactionReadSequence) checkingTransaction.value = false;
+    }
   }
 
   function clearReview() {
@@ -334,8 +361,6 @@ export function useDeploymentWizard(config, emit) {
     if (activeStep.value > 0) activeStep.value = 0;
   });
 
-  watch(() => [deploymentAction.value, selectedComponents.value.join(','), backup.value], clearExecution);
-
   function artifactChosen(value) {
     candidate.value = value;
     preparedBundle.value = null;
@@ -358,9 +383,8 @@ export function useDeploymentWizard(config, emit) {
       activeStep.value = 4;
       await loadReview();
     } else if (activeStep.value === 4 && review.value?.ready) {
-      deploymentAction.value = review.value.hasDeployment ? 'incremental' : 'first';
-      selectedComponents.value = componentOptions.value.map((component) => component.key);
       activeStep.value = 5;
+      await inspectTransaction();
     }
   }
 
@@ -398,6 +422,7 @@ export function useDeploymentWizard(config, emit) {
       imageRegistrySources.value = registry.sources;
       imageRegistryLoadError.value = registry.error;
       if (pendingImages(checked.images || []).length) reviewTab.value = 'images';
+      await inspectTransaction();
     } catch (error) {
       if (current === revision && !disposed) reviewError.value = failureText(error, '清单比对');
     } finally {
@@ -599,6 +624,7 @@ export function useDeploymentWizard(config, emit) {
 
   async function preflight(context) {
     preflightPassed.value = false;
+    preflightMessage.value = '';
     desktopGuard();
     const checked = await inspectDeploymentReview(
       context.bundleDir,
@@ -607,19 +633,11 @@ export function useDeploymentWizard(config, emit) {
       context.imageDir
     );
     review.value = checked;
-    if (context.action === 'incremental') {
-      const issue = missingArtifactIssue(bundlePlan.value, checked, context.components);
-      if (issue) throw new Error(issue);
-    }
-    if (
-      !checked.ready ||
-      (context.action === 'first' ? !checked.canFirstDeploy : !checked.canIncrementalUpdate)
-    )
+    if (!checked.ready)
       throw new Error('清单、镜像或目标部署状态已变化，请返回重新比对');
-    if (context.action === 'incremental') {
-      const response = await invokeIncremental(context, true);
-      diagnostics.value = safeText(response.output);
-    }
+    const response = await invokeVersionDeployment(context, true);
+    diagnostics.value = safeText(response.output);
+    preflightMessage.value = safeText(response.output);
     preflightPassed.value = true;
   }
 
@@ -628,6 +646,7 @@ export function useDeploymentWizard(config, emit) {
     preflighting.value = true;
     operationError.value = '';
     preflightPassed.value = false;
+    preflightMessage.value = '';
     let context;
     try {
       context = executionContext();
@@ -656,24 +675,21 @@ export function useDeploymentWizard(config, emit) {
     } finally {
       preflighting.value = false;
     }
-    const action = context.action === 'first' ? '首次部署' : '增量更新';
-    const scope =
-      context.action === 'first'
-        ? '写入交付包并启动全部清单服务'
-        : `替换${context.components.map((key) => componentLabelMap.value[key] || key).join('、')}并重启受影响的服务${
-            context.backup ? '，更新前保留备份' : '，本次不备份'
-          }`;
+    const action = '完整版本部署';
+    const serviceCount = bundlePlan.value?.services?.length || review.value?.services?.length || 0;
+    const volumeNames = (bundlePlan.value?.dataVolumes || []).map((volume) => volume.name);
+    const scope = `部署全部 ${serviceCount} 个服务，停止全部服务后备份数据卷并启动新版本；保留的数据卷：${volumeNames.join('、') || '无'}；失败时自动恢复上一版本`;
     executing.value = true;
     try {
       try {
         await ElMessageBox.confirm(
           `目标：${context.label}；目录：${context.installDir}；版本：${
             context.version || '未标记'
-          }。将${scope}。是否继续？`,
+          }。${scope}。部署期间业务会短暂停机，失败恢复期间的新写入会撤回。是否继续？`,
           `确认${action}`,
           {
             type: 'warning',
-            confirmButtonText: `开始${action}`,
+            confirmButtonText: '开始部署',
             cancelButtonText: '取消',
             closeOnClickModal: false
           }
@@ -685,39 +701,32 @@ export function useDeploymentWizard(config, emit) {
         phase.value = message;
       });
       phase.value = `正在${action}，请等待执行结果`;
-      let response;
-      if (context.action === 'incremental') {
-        response = await invokeIncremental(context, false);
-      } else {
-        phase.value = '正在写入交付包';
-        const installed = await installBundle(
-          context.remote ? 'remote' : 'local',
-          context.host,
-          context.port,
-          context.user,
-          context.keyPath,
-          context.bundleDir,
-          context.installDir
-        );
-        if (!installed.success) throw new Error(installed.error || '交付包写入失败');
-        diagnostics.value = safeText(installed.output);
-        phase.value = '正在启动清单中的服务';
-        response = context.remote
-          ? await remoteDockerComposeAction(
-              context.host,
-              context.port,
-              context.user,
-              context.keyPath,
-              context.installDir,
-              'up'
-            )
-          : await dockerComposeAction(context.installDir, 'up');
-        if (!response.success) {
-          diagnostics.value += `\n${safeText(response.output)}`;
-          throw new Error(response.error || '服务启动失败');
-        }
-      }
+      const response = await invokeVersionDeployment(context, false);
       diagnostics.value += `\n${safeText(response.output)}`;
+      transaction.value = response.status || null;
+      if (!response.success) {
+        const reason = response.error
+          ? failureText(response.error, '新版本部署', { remote: context.remote })
+          : '请展开执行详情查看失败阶段和原因。';
+        result.value = {
+          success: false,
+          recovered: Boolean(response.recovered),
+          recoveryFailed: Boolean(response.recoveryFailed),
+          backupDir: null,
+          snapshotDir: response.snapshotDir || '',
+          transactionId: response.transactionId || '',
+          message: response.status?.deploymentStarted === false
+            ? `本次部署在修改目标前停止，目标文件与数据未被本次部署修改。${reason}`
+            : response.recovered
+            ? `上一版本 ${response.previousVersion || '部署前版本'} 已恢复运行。${reason}`
+            : response.recoveryFailed
+            ? `自动恢复未完成，备份与事务现场已保留。${reason}`
+            : reason
+        };
+        operationError.value = '';
+        phase.value = '';
+        return;
+      }
       phase.value = '正在检查服务运行状态';
       const verified = await inspectDeploymentReview(
         context.bundleDir,
@@ -739,7 +748,10 @@ export function useDeploymentWizard(config, emit) {
       result.value = {
         success: ready,
         pending: !ready,
-        backupDir: response.backup_dir,
+        recovered: false,
+        recoveryFailed: false,
+        snapshotDir: response.snapshotDir || '',
+        transactionId: response.transactionId || '',
         message: ready
           ? '服务已运行，可前往集群监控检查业务状态。'
           : '执行命令已完成，部分服务的就绪状态仍需确认，请前往集群监控检查。'
@@ -748,7 +760,8 @@ export function useDeploymentWizard(config, emit) {
     } catch (error) {
       result.value = {
         ...result.value,
-        backupDir: error.result?.backup_dir || result.value?.backupDir,
+        snapshotDir: error.result?.snapshotDir || result.value?.snapshotDir,
+        transactionId: error.result?.transactionId || result.value?.transactionId,
         success: false,
         message: '执行未完成，请查看执行详情，处理后重新比对。'
       };
@@ -761,14 +774,68 @@ export function useDeploymentWizard(config, emit) {
     }
   }
 
+  async function restorePreviousVersion() {
+    if (busy.value || !config.installDir?.trim()) return;
+    try {
+      await ElMessageBox.confirm(
+        `目标：${targetLabel.value}；目录：${config.installDir}。将从部署事务快照恢复上一版本和业务数据，恢复期间服务会停机。是否继续？`,
+        '恢复上一版本',
+        {
+          type: 'warning',
+          confirmButtonText: '开始恢复',
+          cancelButtonText: '取消',
+          closeOnClickModal: false
+        }
+      );
+    } catch {
+      return;
+    }
+    recoveringTransaction.value = true;
+    operationError.value = '';
+    try {
+      const response = await recoverDeploymentTransaction(
+        config.installDir.trim(),
+        target()
+      );
+      diagnostics.value = safeText(response.output);
+      transaction.value = response.status || null;
+      result.value = {
+        success: false,
+        recovered: Boolean(response.recovered),
+        recoveryFailed: Boolean(response.recoveryFailed),
+        snapshotDir: response.snapshotDir || '',
+        transactionId: response.transactionId || '',
+        message: response.recovered
+          ? `上一版本 ${response.previousVersion || '部署前版本'} 已恢复运行。`
+          : response.status?.deploymentStarted === false
+          ? '本次事务已结束，无需恢复服务、文件或数据卷。'
+          : response.recoveryFailed
+          ? '恢复未完成，备份与事务现场已保留，请展开执行详情并联系工程师处理。'
+          : '首次部署的服务与数据卷已清理。'
+      };
+      if (response.error) operationError.value = safeText(response.error);
+    } catch (error) {
+      operationError.value = failureText(error, '恢复上一版本', {
+        remote: isRemote.value
+      });
+      diagnostics.value = safeText(error);
+    } finally {
+      recoveringTransaction.value = false;
+      await inspectTransaction();
+    }
+  }
+
   function executionContext() {
-    return createDeploymentContext({ connection: config, remote: isRemote.value, bundle: preparedBundle.value,
-      components: selectedComponents.value, backup: backup.value, action: deploymentAction.value,
-      label: targetLabel.value, imageDir: imageMediaDir.value,
-      allowedComponents: deploymentComponents(bundlePlan.value) });
+    return createDeploymentContext({
+      connection: config,
+      remote: isRemote.value,
+      bundle: preparedBundle.value,
+      label: targetLabel.value,
+      imageDir: imageMediaDir.value
+    });
   }
 
   const { progressStep, progressPercent, progressMessage, elapsedText } = executionFeedback;
 
-  return { steps, activeStep, selectedHost, isRemote, targetLabel, hostReady, testingSsh, settingKey, sshMessage, sshOk, envData, envError, checkingEnv, installingDocker, artifactPicker, candidate, preparedBundle, artifactBusy, review, reviewError, checkingReview, reviewTab, imageMediaDir, imageSource, imagePullGroups, imagePending, imagePullable, pendingDigestImages, imageCounts, imageBlockedCount, imageNextBlockedReason, imageRegistryLoadError, imagePhase, imageProgress, imageDiagnostics, imageResult, importingImages, deploymentAction, selectedComponents, backup, executing, preflighting, preflightPassed, phase, operationError, diagnostics, result, busy, environmentReady, componentOptions, canExecute, artifactSelectionIssue, artifactChosen, artifactPrepared, testConnection, setupAccess, checkEnvironment, installDocker, nextStep, previousStep, loadReview, pickImageDirectory, prepareImages, setImagePullSelection, runPreflight, executeDeployment, progressStep, progressPercent, progressMessage, elapsedText };
+  return { steps, activeStep, selectedHost, isRemote, targetLabel, hostReady, testingSsh, settingKey, sshMessage, sshOk, envData, envError, checkingEnv, installingDocker, artifactPicker, candidate, preparedBundle, artifactBusy, review, reviewError, checkingReview, reviewTab, imageMediaDir, imageSource, imagePullGroups, imagePending, imagePullable, pendingDigestImages, imageCounts, imageBlockedCount, imageNextBlockedReason, imageRegistryLoadError, imagePhase, imageProgress, imageDiagnostics, imageResult, importingImages, bundlePlan, transaction, recoveringTransaction, executing, preflighting, preflightPassed, preflightMessage, phase, operationError, diagnostics, result, busy, environmentReady, canExecute, artifactSelectionIssue, artifactChosen, artifactPrepared, testConnection, setupAccess, checkEnvironment, installDocker, nextStep, previousStep, loadReview, pickImageDirectory, prepareImages, setImagePullSelection, runPreflight, executeDeployment, restorePreviousVersion, progressStep, progressPercent, progressMessage, elapsedText };
 }

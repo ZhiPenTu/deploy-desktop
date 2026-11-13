@@ -4,7 +4,7 @@
 
 前端使用 Vue 3、Vite 和 Element Plus，桌面端使用 Tauri 2 / Rust。
 
-准备 Node.js 20+（CI 使用 22）、Rust stable 和对应平台的 [Tauri 系统依赖](https://v2.tauri.app/start/prerequisites/)。
+准备 Node.js 20+（CI 使用 22）、Rust 1.89+ stable 和对应平台的 [Tauri 系统依赖](https://v2.tauri.app/start/prerequisites/)。
 
 ```bash
 npm ci

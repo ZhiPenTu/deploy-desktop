@@ -628,6 +628,285 @@
         "rust": "reject",
         "mcp": "reject"
       }
+    },
+    {
+      "name": "service-roles-and-data-volumes",
+      "reason": "服务角色与持久数据卷声明完整时应接受，数据库卷必须由数据库服务挂载",
+      "patch": {
+        "runtime": {
+          "services": [
+            { "key": "api", "label": "接口服务", "role": "app", "port": 8080, "protocol": "TCP" },
+            { "key": "db", "label": "数据库", "role": "data", "port": 5432, "protocol": "TCP" }
+          ],
+          "data": {
+            "volumes": [
+              { "name": "db-data", "service": "db", "image": "db-image", "required": true }
+            ],
+            "paths": [
+              { "path": "deploy/backups", "mode": "preserve" }
+            ]
+          }
+        },
+        "images": [
+          { "name": "db-image", "ref": "demo/db:1.0.0", "role": "base", "required": true }
+        ]
+      },
+      "expect": {
+        "rust": "ok",
+        "mcp": "ok"
+      }
+    },
+    {
+      "name": "service-role-invalid",
+      "reason": "服务角色只能是 app 或 data",
+      "patch": {
+        "runtime": {
+          "services": [
+            { "key": "api", "label": "接口服务", "role": "worker" }
+          ]
+        }
+      },
+      "expect": {
+        "rust": "reject",
+        "mcp": "reject"
+      }
+    },
+    {
+      "name": "data-volume-image-unknown",
+      "reason": "数据卷备份镜像必须已在 images 中声明",
+      "patch": {
+        "runtime": {
+          "data": {
+            "volumes": [
+              { "name": "db-data", "service": "db", "image": "missing-image", "required": true }
+            ]
+          }
+        }
+      },
+      "expect": {
+        "rust": "reject",
+        "mcp": "reject"
+      }
+    },
+    {
+      "name": "database-without-declared-volume",
+      "reason": "声明数据库时必须声明数据库服务的持久数据卷",
+      "patch": {
+        "runtime": {
+          "data": {
+            "volumes": []
+          }
+        }
+      },
+      "expect": {
+        "rust": "reject",
+        "mcp": "reject"
+      }
+    },
+    {
+      "name": "data-path-mode-invalid",
+      "reason": "保留数据目录本期只支持 preserve",
+      "patch": {
+        "runtime": {
+          "data": {
+            "volumes": [
+              { "name": "db-data", "service": "db", "image": "db-image", "required": true }
+            ],
+            "paths": [
+              { "path": "deploy/backups", "mode": "delete" }
+            ]
+          }
+        },
+        "images": [
+          { "name": "db-image", "ref": "demo/db:1.0.0", "role": "base", "required": true }
+        ]
+      },
+      "expect": {
+        "rust": "reject",
+        "mcp": "reject"
+      }
+    },
+    {
+      "name": "artifact-targets-transaction-directory",
+      "reason": "受管产物不能写入部署事务内部目录",
+      "patch": {
+        "components": [
+          {
+            "key": "config",
+            "label": "配置",
+            "artifacts": [
+              "compose",
+              "injected"
+            ],
+            "services": [
+              "api"
+            ]
+          }
+        ],
+        "artifacts": [
+          {
+            "key": "compose",
+            "label": "编排文件",
+            "source": "app/docker-compose.yml",
+            "root": "deploy",
+            "path": "docker-compose.yml",
+            "type": "file"
+          },
+          {
+            "key": "injected",
+            "label": "注入文件",
+            "source": "app/injected.txt",
+            "root": "install",
+            "path": ".deploy-desktop/injected.yml",
+            "type": "file"
+          }
+        ],
+        "files": [
+          {
+            "path": "app/docker-compose.yml",
+            "size": 128,
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          },
+          {
+            "path": "app/injected.txt",
+            "size": 1,
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          }
+        ]
+      },
+      "expect": {
+        "rust": "reject",
+        "mcp": "reject"
+      }
+    },
+    {
+      "name": "artifact-targets-transaction-directory-case-variant",
+      "reason": "受管产物不能通过大小写变体写入部署事务内部目录",
+      "patch": {
+        "components": [
+          {
+            "key": "config",
+            "label": "配置",
+            "artifacts": [
+              "compose",
+              "injected"
+            ],
+            "services": [
+              "api"
+            ]
+          }
+        ],
+        "artifacts": [
+          {
+            "key": "compose",
+            "label": "编排文件",
+            "source": "app/docker-compose.yml",
+            "root": "deploy",
+            "path": "docker-compose.yml",
+            "type": "file"
+          },
+          {
+            "key": "injected",
+            "label": "注入文件",
+            "source": "app/injected.txt",
+            "root": "install",
+            "path": ".Deploy-Desktop/injected.yml",
+            "type": "file"
+          }
+        ],
+        "files": [
+          {
+            "path": "app/docker-compose.yml",
+            "size": 128,
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          },
+          {
+            "path": "app/injected.txt",
+            "size": 1,
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          }
+        ]
+      },
+      "expect": {
+        "rust": "reject",
+        "mcp": "reject"
+      }
+    },
+    {
+      "name": "artifact-targets-transaction-directory-short-name",
+      "reason": "受管产物不能通过 Windows 8.3 短名写入部署事务内部目录",
+      "patch": {
+        "components": [
+          {
+            "key": "config",
+            "label": "配置",
+            "artifacts": [
+              "compose",
+              "injected"
+            ],
+            "services": [
+              "api"
+            ]
+          }
+        ],
+        "artifacts": [
+          {
+            "key": "compose",
+            "label": "编排文件",
+            "source": "app/docker-compose.yml",
+            "root": "deploy",
+            "path": "docker-compose.yml",
+            "type": "file"
+          },
+          {
+            "key": "injected",
+            "label": "注入文件",
+            "source": "app/injected.txt",
+            "root": "install",
+            "path": ".DEPL~1/injected.yml",
+            "type": "file"
+          }
+        ],
+        "files": [
+          {
+            "path": "app/docker-compose.yml",
+            "size": 128,
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          },
+          {
+            "path": "app/injected.txt",
+            "size": 1,
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          }
+        ]
+      },
+      "expect": {
+        "rust": "reject",
+        "mcp": "reject"
+      }
+    },
+    {
+      "name": "preserved-path-conflicts-with-artifact",
+      "reason": "受管产物不能覆盖声明为 preserve 的数据目录",
+      "patch": {
+        "runtime": {
+          "data": {
+            "volumes": [
+              { "name": "db-data", "service": "db", "image": "db-image", "required": true }
+            ],
+            "paths": [
+              { "path": "app/docker-compose.yml", "mode": "preserve" }
+            ]
+          }
+        },
+        "images": [
+          { "name": "db-image", "ref": "demo/db:1.0.0", "role": "base", "required": true }
+        ]
+      },
+      "expect": {
+        "rust": "reject",
+        "mcp": "reject"
+      }
     }
   ]
 }

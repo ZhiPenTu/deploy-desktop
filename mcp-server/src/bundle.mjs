@@ -13,8 +13,11 @@ const IGNORED_FILE = '.DS_Store';
 const FIELDS = {
   bundle: ['apiVersion', 'kind', 'metadata', 'runtime', 'components', 'artifacts', 'images', 'plan', 'files'],
   metadata: ['product', 'displayName', 'version', 'buildNumber', 'commit', 'commitShort', 'branch', 'builtAt', 'minToolVersion'],
-  runtime: ['type', 'compose', 'variant', 'containerPrefix', 'services', 'database'],
-  service: ['key', 'label', 'port', 'protocol', 'description', 'container'],
+  runtime: ['type', 'compose', 'variant', 'containerPrefix', 'services', 'data', 'database'],
+  service: ['key', 'label', 'role', 'port', 'protocol', 'description', 'container'],
+  data: ['volumes', 'paths'],
+  dataVolume: ['name', 'service', 'image', 'required'],
+  dataPath: ['path', 'mode'],
   database: ['serviceKey', 'name', 'client', 'port'],
   component: ['key', 'label', 'artifacts', 'services'],
   artifact: ['key', 'label', 'source', 'root', 'path', 'type'],
@@ -64,6 +67,18 @@ export function safeRelative(value, label) {
   return parts.join('/');
 }
 
+export function isInternalDeployPath(value) {
+  const normalized = String(value || '').trim().replaceAll('\\', '/');
+  const first = normalized.split('/')[0] || '';
+  const alias = first
+    .split(':')[0]
+    .replace(/[. ]+$/g, '')
+    .toLowerCase();
+  if (alias === '.deploy-desktop') return true;
+  // Windows 8.3 短名（例如 `.depl~1`）可能指向同名目录，同样按内部目录处理。
+  return /^\.[a-z0-9]{2,6}~[0-9]+$/.test(alias);
+}
+
 function normalizeService(value, index) {
   assertFields(value, FIELDS.service, `runtime.services[${index}]`);
   const key = text(value.key, `runtime.services[${index}].key`, { allowEmpty: false });
@@ -75,9 +90,16 @@ function normalizeService(value, index) {
   if (!['TCP', 'UDP'].includes(protocol.toUpperCase())) {
     throw fail(`服务 ${key} 的协议必须是 TCP 或 UDP`);
   }
+  const role = value.role === undefined || value.role === null
+    ? ''
+    : text(value.role, `runtime.services[${index}].role`, { allowEmpty: false }).toLowerCase();
+  if (role && !['app', 'data'].includes(role)) {
+    throw fail(`服务 ${key} 的 role 必须是 app 或 data`);
+  }
   return {
     serviceKey: key,
     label: text(value.label, `runtime.services[${index}].label`, { allowEmpty: false }),
+    role,
     port,
     protocol: protocol.toUpperCase(),
     description: text(value.description, `runtime.services[${index}].description`),
@@ -100,6 +122,35 @@ function normalizeArtifact(value, index) {
     path: safeRelative(value.path, '产物部署路径'),
     kind
   };
+}
+
+function normalizeData(value) {
+  if (value === undefined || value === null) return null;
+  assertFields(value, FIELDS.data, 'runtime.data');
+  const volumes = list(value.volumes, 'runtime.data.volumes').map((item, index) => {
+    assertFields(item, FIELDS.dataVolume, `runtime.data.volumes[${index}]`);
+    const name = text(item.name, `runtime.data.volumes[${index}].name`, { allowEmpty: false });
+    if (/[\\/\s\0]/.test(name) || name === '.' || name === '..') {
+      throw fail(`交付包声明的数据卷名称无效：${name}`);
+    }
+    return {
+      name,
+      service: text(item.service, `runtime.data.volumes[${index}].service`, { allowEmpty: false }),
+      image: text(item.image, `runtime.data.volumes[${index}].image`, { allowEmpty: false }),
+      required: Boolean(item.required)
+    };
+  });
+  const paths = list(value.paths, 'runtime.data.paths').map((item, index) => {
+    assertFields(item, FIELDS.dataPath, `runtime.data.paths[${index}]`);
+    const mode = text(item.mode, `runtime.data.paths[${index}].mode`, { allowEmpty: false });
+    if (mode !== 'preserve') throw fail(`保留数据目录 ${index} 的 mode 必须是 preserve`);
+    const path = safeRelative(item.path, '保留数据目录');
+    if (isInternalDeployPath(path)) {
+      throw fail('保留数据目录不能使用部署事务内部路径');
+    }
+    return { path, mode };
+  });
+  return { volumes, paths };
 }
 
 export function validateDescriptor(raw) {
@@ -153,16 +204,32 @@ export function validateDescriptor(raw) {
       throw fail(`交付包的数据库服务 ${database.serviceKey} 未在服务清单中声明`);
     }
   }
+  const data = normalizeData(raw.runtime.data);
   const runtime = {
     type: 'compose',
     compose,
     variant: raw.runtime.variant ? safeRelative(raw.runtime.variant, 'Compose 变体路径') : '',
     containerPrefix: prefix,
     services,
+    data,
     database
   };
+  if (data) {
+    const volumeNames = new Set();
+    for (const volume of data.volumes) {
+      if (volumeNames.has(volume.name)) throw fail(`交付包重复声明数据卷 ${volume.name}`);
+      volumeNames.add(volume.name);
+      if (!serviceKeys.has(volume.service)) {
+        throw fail(`交付包数据卷 ${volume.name} 引用了未声明的服务 ${volume.service}`);
+      }
+    }
+    if (database && !data.volumes.some((volume) => volume.service === database.serviceKey)) {
+      throw fail('交付包声明了数据库，但未声明数据库服务的持久数据卷');
+    }
+  }
 
   const artifacts = list(raw.artifacts, 'artifacts').map(normalizeArtifact);
+  const deployRel = path.posix.dirname(compose) === '.' ? '' : path.posix.dirname(compose);
   const artifactKeys = new Set();
   const targets = new Set();
   for (const artifact of artifacts) {
@@ -172,6 +239,16 @@ export function validateDescriptor(raw) {
     const target = `${artifact.root}\0${artifact.path}`;
     if (targets.has(target)) throw fail(`交付包重复声明部署位置 ${artifact.path}`);
     targets.add(target);
+    const installRelative = artifact.root === 'install'
+      ? artifact.path
+      : (deployRel ? `${deployRel}/${artifact.path}` : artifact.path);
+    for (const preserved of data?.paths || []) {
+      if (installRelative === preserved.path
+          || installRelative.startsWith(`${preserved.path}/`)
+          || preserved.path.startsWith(`${installRelative}/`)) {
+        throw fail(`产物 ${artifact.key} 会覆盖保留数据目录 ${preserved.path}`);
+      }
+    }
   }
   if (!artifacts.some((artifact) => artifact.source === compose)) {
     throw fail(`交付包未将 Compose 清单 ${compose} 声明为产物`);
@@ -215,6 +292,13 @@ export function validateDescriptor(raw) {
       bundleFile: value.bundleFile ? safeRelative(value.bundleFile, '镜像包路径') : ''
     };
   });
+  if (data) {
+    for (const volume of data.volumes) {
+      if (!images.some((image) => image.name === volume.image)) {
+        throw fail(`交付包数据卷 ${volume.name} 引用了未声明的备份镜像 ${volume.image}`);
+      }
+    }
+  }
 
   assertFields(raw.plan === undefined ? {} : raw.plan, FIELDS.plan, 'plan');
   const steps = list(raw.plan?.steps, 'plan.steps').map((value, index) => {
@@ -242,6 +326,12 @@ export function validateDescriptor(raw) {
 
   const ownership = new Map();
   for (const artifact of artifacts) {
+    const installPath = artifact.root === 'install'
+      ? artifact.path
+      : (deployRel ? `${deployRel}/${artifact.path}` : artifact.path);
+    if (isInternalDeployPath(installPath)) {
+      throw fail(`产物 ${artifact.key} 不能写入部署事务内部路径`);
+    }
     const owned = artifact.kind === 'file'
       ? [artifact.source]
       : [...filePaths].filter((item) => item.startsWith(`${artifact.source}/`));
@@ -359,8 +449,51 @@ export class Bundle {
     return this.descriptor.artifacts.find((item) => item.source === target) || null;
   }
 
+  effectiveCompose() {
+    const variant = String(this.descriptor.runtime.variant || '').trim();
+    if (variant && this.artifactForSource(variant)) return variant;
+    return this.descriptor.runtime.compose;
+  }
+
   service(key) {
     return this.descriptor.runtime.services.find((item) => item.serviceKey === key) || null;
+  }
+
+  ensureFullDeployMetadata() {
+    const runtime = this.descriptor.runtime;
+    for (const source of [runtime.compose, this.effectiveCompose()]) {
+      if (!source) continue;
+      const artifact = this.artifactForSource(source);
+      if (!artifact) throw fail(`交付包未声明 Compose 清单 ${source} 对应的部署产物`);
+      if (artifact.root !== 'deploy') {
+        throw fail('完整版本部署要求 Compose 清单部署在 Compose 目录（deploy 根）');
+      }
+    }
+    const missing = runtime.services
+      .filter((service) => !service.role)
+      .map((service) => service.serviceKey);
+    if (missing.length > 0) {
+      throw fail(`交付包未声明服务角色：${missing.join('、')}。完整版本部署无法判断应用与数据服务`);
+    }
+    if (runtime.services.some((service) => service.serviceKey.toLowerCase() === 'frontend' && !service.port)) {
+      throw fail('网页服务未声明 HTTP 端口，无法验证完整版本就绪');
+    }
+    if (!runtime.data) {
+      throw fail('交付包未声明持久数据卷，无法保证部署失败后恢复数据');
+    }
+    for (const service of runtime.services) {
+      if (service.role === 'data' && !runtime.data.volumes.some((volume) => volume.service === service.serviceKey)) {
+        throw fail(`数据服务 ${service.serviceKey} 未声明可冷备的持久数据卷`);
+      }
+    }
+    if (runtime.database && !runtime.services.some((service) =>
+      service.serviceKey === runtime.database.serviceKey && service.role === 'data')) {
+      throw fail(`数据库服务 ${runtime.database.serviceKey} 必须声明为数据服务`);
+    }
+    if (runtime.database && !runtime.data.volumes.some((volume) => volume.service === runtime.database.serviceKey)) {
+      throw fail(`交付包未声明数据库服务 ${runtime.database.serviceKey} 的持久数据卷`);
+    }
+    return runtime.data;
   }
 
   selectComponents(keys) {

@@ -95,7 +95,10 @@ export const mcpCategories = [
   {
     id: 'updates', title: '更新', description: '更新远程部署，管理与检查应用更新',
     tools: [
-      { id: 'deploy_update_remote', title: '更新远程部署', description: '预检更新内容，按组件替换文件并重启服务，支持更新前备份。', access: 'write', confirmation: '执行更新需确认' },
+      { id: 'deploy_version_remote', title: '部署完整版本', description: '停止目标服务，备份受管文件和业务数据，部署交付包全部组件；失败时自动恢复上一版本。', access: 'write', confirmation: '执行部署需确认' },
+      { id: 'deploy_transaction_status', title: '查询部署事务', description: '查看最新部署事务的阶段、状态、快照目录和失败原因。', access: 'read' },
+      { id: 'deploy_transaction_recover', title: '恢复上一版本', description: '按部署事务快照恢复部署前的文件和业务数据，并启动上一版本。', access: 'write', confirmation: '执行恢复需确认' },
+      { id: 'deploy_update_remote', title: '更新远程部署', description: '兼容旧调用的完整版本部署；只接受交付包全部组件。', access: 'write', confirmation: '执行更新需确认' },
       { id: 'deploy_update_settings', title: '管理应用更新源', description: '查看或保存 MCP 使用的应用更新地址。', access: 'write', confirmation: '保存时需确认' },
       { id: 'deploy_app_update_check', title: '检查应用更新', description: '查询新版本与下载信息；安装更新请在桌面应用中操作。', access: 'read' }
     ]

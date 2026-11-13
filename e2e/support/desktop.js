@@ -25,6 +25,7 @@ export async function useDesktopBackend(
     bundlePlan = null,
     bundleConfig = null,
     deploymentReview = null,
+    deploymentTransaction = null,
     containers = [],
     bundle = null,
     remoteImageBundle = null
@@ -51,6 +52,7 @@ export async function useDesktopBackend(
     initialBundlePlan,
     initialBundleConfig,
     initialDeploymentReview,
+    initialDeploymentTransaction,
     initialContainers,
     initialBundle,
     initialRemoteImageBundle
@@ -76,6 +78,7 @@ export async function useDesktopBackend(
       bundlePlan: structuredClone(initialBundlePlan),
       bundleConfig: structuredClone(initialBundleConfig),
       deploymentReview: structuredClone(initialDeploymentReview),
+      deploymentTransaction: structuredClone(initialDeploymentTransaction),
       containers: structuredClone(initialContainers),
       boundBundle: structuredClone(initialBundle),
       remoteImageBundle: structuredClone(initialRemoteImageBundle),
@@ -192,6 +195,39 @@ export async function useDesktopBackend(
           case 'inspect_deployment_review':
             if (!state.deploymentReview) throw '当前操作暂不可用，请在桌面应用中重试。';
             return structuredClone(state.deploymentReview);
+          case 'inspect_deployment_transaction':
+            return { transaction: state.deploymentTransaction ? structuredClone(state.deploymentTransaction) : null };
+          case 'deploy_local_version':
+          case 'deploy_remote_version':
+            return {
+              success: true,
+              recovered: false,
+              recoveryFailed: false,
+              stage: 'committed',
+              version: state.preparedBundle?.version || '',
+              previousVersion: '',
+              transactionId: 'test-transaction',
+              snapshotDir: '/srv/deploy-demo/.deploy-desktop/transactions/test-transaction',
+              error: null,
+              output: args.dryRun ? '预检通过：未停止服务，也未修改目标。' : '完整版本部署成功',
+              durationSecs: 1,
+              status: null
+            };
+          case 'recover_deployment_transaction':
+            return {
+              success: false,
+              recovered: true,
+              recoveryFailed: false,
+              stage: 'recovered',
+              version: 'v1.4.0',
+              previousVersion: 'v1.3.0',
+              transactionId: 'test-transaction',
+              snapshotDir: '/srv/deploy-demo/.deploy-desktop/transactions/test-transaction',
+              error: '新版本启动失败',
+              output: '已恢复上一版本',
+              durationSecs: 1,
+              status: null
+            };
           case 'inspect_bundle_plan':
             if (!state.bundlePlan) throw '当前操作暂不可用，请在桌面应用中重试。';
             return structuredClone(state.bundlePlan);
@@ -292,6 +328,7 @@ export async function useDesktopBackend(
     initialBundlePlan: bundlePlan,
     initialBundleConfig: bundleConfig,
     initialDeploymentReview: deploymentReview,
+    initialDeploymentTransaction: deploymentTransaction,
     initialContainers: containers,
     initialBundle: bundle,
     initialRemoteImageBundle: remoteImageBundle

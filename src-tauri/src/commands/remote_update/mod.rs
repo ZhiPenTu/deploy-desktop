@@ -36,6 +36,11 @@ pub(crate) use transfer::upload_file_with_progress;
 mod update;
 pub use update::{__cmd__update_remote_deployment, update_remote_deployment};
 
+mod version_deploy;
+pub(crate) use version_deploy::{
+    deploy_remote_full, inspect_remote_transaction, recover_remote_transaction,
+};
+
 mod install;
 pub use install::{__cmd__install_bundle, install_bundle, InstallBundleResult};
 

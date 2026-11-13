@@ -51,6 +51,10 @@ export {
   inspectDeploymentReview,
   updateRemoteDeployment,
   updateLocalDeployment,
+  deployLocalVersion,
+  deployRemoteVersion,
+  inspectDeploymentTransaction,
+  recoverDeploymentTransaction,
   installBundle,
   onRemoteUpdateProgress
 } from './commands/deployment.js';

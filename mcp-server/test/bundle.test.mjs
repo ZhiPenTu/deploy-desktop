@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
-import { Bundle, normalizeComponents, safeRelative } from '../src/bundle.mjs';
+import { Bundle, isInternalDeployPath, normalizeComponents, safeRelative } from '../src/bundle.mjs';
 import { makeDescriptor, makeTempDir, writeBundle } from './helpers.mjs';
 
 test('load 接受通用命名的合法交付包', async () => {
@@ -39,6 +39,32 @@ test('load 拒绝绝对路径、上级目录与反斜杠', async () => {
     await assert.rejects(Bundle.load(root), /产物部署路径|不合法/);
   }
   assert.throws(() => safeRelative('/abs', '路径'), /绝对路径/);
+});
+
+test('内部状态目录识别覆盖大小写、Windows 别名与 8.3 短名', () => {
+  for (const path of [
+    '.deploy-desktop',
+    '.DEPLOY-DESKTOP/deployed.json',
+    '.deploy-desktop./transactions',
+    '.deploy-desktop /transactions',
+    '.deploy-desktop:stream',
+    '.deploy-desktop\\transactions',
+    '.DEPL~1/transactions'
+  ]) {
+    assert.equal(isInternalDeployPath(path), true, path);
+  }
+  assert.equal(isInternalDeployPath('site/.deploy-desktop'), false);
+  assert.equal(isInternalDeployPath('deploy/readme.md'), false);
+});
+
+test('load 拒绝写入部署事务内部目录的产物路径', async () => {
+  for (const bad of ['.Deploy-Desktop/injected.yml', '.DEPL~1/injected.yml']) {
+    const root = await makeTempDir();
+    await writeBundle(root, { mutate: async ({ descriptor }) => {
+      descriptor.artifacts[1].path = bad;
+    } });
+    await assert.rejects(Bundle.load(root), /内部路径|内部状态目录/);
+  }
 });
 
 test('load 拒绝重复产物标识、重复部署位置与未覆盖文件', async () => {

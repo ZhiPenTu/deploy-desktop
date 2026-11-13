@@ -26,6 +26,7 @@ use commands::{
     remote_ssh::*,
     remote_update::*,
     updater::*,
+    version_deploy::*,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -72,6 +73,10 @@ pub fn run() {
             prepare_local_deployment_images,
             register_deployment_image_bindings,
             update_local_deployment,
+            deploy_local_version,
+            deploy_remote_version,
+            inspect_deployment_transaction,
+            recover_deployment_transaction,
             inspect_bundle_plan,
             inspect_bundle_config,
             install_bundle,

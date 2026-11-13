@@ -66,11 +66,12 @@ macOS 使用覆盖式原生标题栏并隐藏重复的窗口标题，保留系�
 | `transfer.rs` | 分阶段 SSH 上传、替换、失败清理与备份 |
 | `scripts.rs` | 为共用 Bash 模板绑定部署参数 |
 | `install.rs` | 首次分发、本机目录复制 |
-| `update.rs` | 远程增量更新编排 |
+| `update.rs` | 兼容旧调用的远程更新入口；只接受全部组件 |
+| `version_deploy.rs` | 远程完整版本部署、事务轮询与恢复 |
 | `progress.rs` | 部署进度事件 |
 | `tests.rs` | 包结构、路径、Compose 与本地分发回归 |
 
-内部模块显式引用所需的同级函数。解析辅助函数仅在命令模块范围共享，传输与安装实现不作为新的 Tauri 命令开放。既有 Tauri 命令名、参数、序列化字段及进度事件保持兼容；本机更新继续由 `local_update.rs` 实现。
+完整版本部署的本机编排位于 `version_deploy.rs`，事务 journal、部署锁、文件快照与数据卷冷备位于 `deployment_tx.rs`；MCP 对应 `mcp-server/src/version-deploy.mjs`。内部模块显式引用所需的同级函数。解析辅助函数仅在命令模块范围共享，传输与安装实现不作为新的 Tauri 命令开放。既有 Tauri 命令名、参数、序列化字段及进度事件保持兼容；旧版更新入口仍保留注册，但界面不再调用。
 
 交付包描述符的校验用例集中在 `fixtures/bundles/cases.json`，Rust `bundle.rs` 与 MCP `bundle.mjs` 两侧共用同一份用例表，只比较「接受 / 拒绝」，不比较错误文案。用例表通过 `patch` 递归合并到 `base`，便于新增单个规则用例。两侧结论不同的用例必须填写 `divergence` 说明原因：目前 Rust 不限制版本号长度、不校验服务端口为 0、不校验服务协议取值，也不校验数据库名称是否为空，这些差异属于待收敛项，改动任一侧时需同步更新用例表。
 

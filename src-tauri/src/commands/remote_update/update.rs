@@ -3,7 +3,7 @@ use super::inspect::{inspect_remote_deployment_inner, remote_free_kb};
 use super::models::RemoteUpdateResult;
 use super::progress::{emit_progress, ProgressHeartbeat};
 use super::transfer::{create_remote_backup, upload_dir_replace, upload_file_replace};
-use crate::commands::bundle::{ArtifactKind, ArtifactRoot, Bundle};
+use crate::commands::bundle::{default_components, ArtifactKind, ArtifactRoot, Bundle};
 use crate::commands::projects;
 use crate::commands::remote_ssh::{
     explain_ssh_failure, missing_deploy_dir_message, resolve_existing_key, run_ssh_script,
@@ -82,6 +82,17 @@ fn update_remote_deployment_blocking(
     let started = Instant::now();
     emit_progress(window, "校验更新包", 3, "running", "检查本地更新包内容...");
     let (bundle, components) = load_bundle(&bundle_dir, &components)?;
+    if !backup {
+        return Err("当前版本已改为完整版本部署，不支持关闭部署前备份".to_string());
+    }
+    let mut expected = default_components(&bundle);
+    let mut actual = components.clone();
+    expected.sort();
+    actual.sort();
+    actual.dedup();
+    if actual != expected {
+        return Err("当前版本已改为完整版本部署，不支持部分组件更新".to_string());
+    }
     bundle.verify_payload()?;
     verify_service_declarations(&bundle)?;
 
