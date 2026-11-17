@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use crate::core::process;
+use crate::core::{path_guard, process};
 
 use super::bundle::{ArtifactKind, ArtifactRoot, Bundle};
 use super::docker_setup::docker_command;
@@ -302,24 +302,12 @@ struct ArtifactProbe {
     expected: Vec<ArtifactExpectedFile>,
 }
 
-fn posix_join(base: &str, child: &str) -> String {
-    let base = base.trim().trim_end_matches('/');
-    let child = child.trim().trim_start_matches('/');
-    if child.is_empty() {
-        base.to_string()
-    } else if base.is_empty() {
-        child.to_string()
-    } else {
-        format!("{base}/{child}")
-    }
-}
-
 fn artifact_probes(bundle: &Bundle, install: &str, remote: bool) -> Vec<ArtifactProbe> {
     let deploy_rel = bundle.deploy_source_rel();
     let local_install = Path::new(install);
     let local_deploy = local_install.join(&deploy_rel);
     let remote_install = install.trim().trim_end_matches('/');
-    let remote_deploy = posix_join(remote_install, &deploy_rel);
+    let remote_deploy = path_guard::target_join(remote_install, &deploy_rel);
     bundle
         .descriptor
         .artifacts
@@ -348,12 +336,9 @@ fn artifact_probes(bundle: &Bundle, install: &str, remote: bool) -> Vec<Artifact
                 ArtifactRoot::Deploy => (local_deploy.clone(), remote_deploy.as_str()),
             };
             let target = if remote {
-                posix_join(remote_base, &artifact.path)
+                path_guard::target_join(remote_base, &artifact.path)
             } else {
-                local_base
-                    .join(artifact.path.trim())
-                    .to_string_lossy()
-                    .to_string()
+                path_guard::target_join(&local_base.to_string_lossy(), artifact.path.trim())
             };
             let expected: Vec<ArtifactExpectedFile> = owned
                 .iter()
@@ -574,6 +559,20 @@ fn local_artifact_snapshot(probe: &ArtifactProbe) -> ArtifactSnapshot {
         ArtifactKind::File if metadata.is_file() => {
             local_file_snapshot(path, probe.expected.first())
         }
+        ArtifactKind::File if metadata.is_dir() => match local_empty_directory(path) {
+            Ok(true) => ArtifactSnapshot {
+                status: "missing".to_string(),
+                ..Default::default()
+            },
+            Ok(false) => ArtifactSnapshot {
+                status: "invalid".to_string(),
+                ..Default::default()
+            },
+            Err(_) => ArtifactSnapshot {
+                status: "unconfirmed".to_string(),
+                ..Default::default()
+            },
+        },
         ArtifactKind::Dir if metadata.is_dir() => match local_tree_unsafe(path) {
             Ok(true) => ArtifactSnapshot {
                 status: "invalid".to_string(),
@@ -599,6 +598,17 @@ fn local_artifact_snapshot(probe: &ArtifactProbe) -> ArtifactSnapshot {
             status: "invalid".to_string(),
             ..Default::default()
         },
+    }
+}
+
+/// 文件制品的目标被 Docker 提前创建为空目录时，完整版本部署可以直接替换。
+/// 非空目录仍按类型冲突处理，避免误删用户文件。
+fn local_empty_directory(path: &Path) -> std::io::Result<bool> {
+    let mut entries = fs::read_dir(path)?;
+    match entries.next() {
+        None => Ok(true),
+        Some(Ok(_)) => Ok(false),
+        Some(Err(error)) => Err(error),
     }
 }
 
@@ -951,6 +961,11 @@ artifact_parent_state() {{
   if [ -x "/" ]; then return 0; fi
   return 1
 }}
+artifact_dir_empty() {{
+  [ -d "$1" ] || return 1
+  artifact_entries=$(find "$1" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null) || return 1
+  [ -z "$artifact_entries" ]
+}}
 artifact_sha256() {{
   if command -v sha256sum >/dev/null 2>&1; then
     if hash_output=$(sha256sum "$1" 2>/dev/null); then printf '%s' "${{hash_output%% *}}"; fi
@@ -1037,11 +1052,11 @@ fn remote_artifact_probe_script(index: usize, probe: &ArtifactProbe) -> String {
         ArtifactKind::File => {
             let Some(expected) = probe.expected.first() else {
                 return format!(
-                    "ARTIFACT_PATH={path}\nif [ -L \"$ARTIFACT_PATH\" ]; then\n  printf 'ARTIFACT|{index}|invalid|0|0\\n'\nelif [ -f \"$ARTIFACT_PATH\" ]; then\n  printf 'ARTIFACT|{index}|present|%s|1\\n' \"$(artifact_stat \"$ARTIFACT_PATH\")\"\nelif [ -e \"$ARTIFACT_PATH\" ]; then\n  printf 'ARTIFACT|{index}|invalid|0|0\\n'\nelse\n  artifact_parent_state \"$(dirname \"$ARTIFACT_PATH\")\" || artifact_state=$?\n  if [ \"${{artifact_state:-0}}\" -eq 1 ]; then\n    printf 'ARTIFACT|{index}|unconfirmed|0|0\\n'\n  else\n    printf 'ARTIFACT|{index}|missing|0|0\\n'\n  fi\nfi\n"
+                    "ARTIFACT_PATH={path}\nif [ -L \"$ARTIFACT_PATH\" ]; then\n  printf 'ARTIFACT|{index}|invalid|0|0\\n'\nelif [ -f \"$ARTIFACT_PATH\" ]; then\n  printf 'ARTIFACT|{index}|present|%s|1\\n' \"$(artifact_stat \"$ARTIFACT_PATH\")\"\nelif [ -e \"$ARTIFACT_PATH\" ]; then\n  if [ -d \"$ARTIFACT_PATH\" ] && artifact_dir_empty \"$ARTIFACT_PATH\"; then\n    printf 'ARTIFACT|{index}|missing|0|0\\n'\n  else\n    printf 'ARTIFACT|{index}|invalid|0|0\\n'\n  fi\nelse\n  artifact_parent_state \"$(dirname \"$ARTIFACT_PATH\")\" || artifact_state=$?\n  if [ \"${{artifact_state:-0}}\" -eq 1 ]; then\n    printf 'ARTIFACT|{index}|unconfirmed|0|0\\n'\n  else\n    printf 'ARTIFACT|{index}|missing|0|0\\n'\n  fi\nfi\n"
                 );
             };
             format!(
-                "ARTIFACT_PATH={path}\nif [ -L \"$ARTIFACT_PATH\" ]; then\n  printf 'ARTIFACT|{index}|invalid|0|0\\n'\nelif [ -f \"$ARTIFACT_PATH\" ]; then\n  artifact_size=$(artifact_stat \"$ARTIFACT_PATH\")\n  artifact_digest=$(artifact_sha256 \"$ARTIFACT_PATH\")\n  if [ -z \"$artifact_digest\" ]; then\n    printf 'ARTIFACT|{index}|unconfirmed|%s|1\\n' \"$artifact_size\"\n  elif [ \"$artifact_size\" = {size} ] && [ \"$artifact_digest\" = {digest} ]; then\n    printf 'ARTIFACT|{index}|present|%s|1\\n' \"$artifact_size\"\n  else\n    printf 'ARTIFACT|{index}|incomplete|%s|1\\n' \"$artifact_size\"\n  fi\nelif [ -e \"$ARTIFACT_PATH\" ]; then\n  printf 'ARTIFACT|{index}|invalid|0|0\\n'\nelse\n  artifact_state=0\n  artifact_parent_state \"$(dirname \"$ARTIFACT_PATH\")\" || artifact_state=$?\n  if [ \"$artifact_state\" -eq 1 ]; then\n    printf 'ARTIFACT|{index}|unconfirmed|0|0\\n'\n  else\n    printf 'ARTIFACT|{index}|missing|0|0\\n'\n  fi\nfi\n",
+                "ARTIFACT_PATH={path}\nif [ -L \"$ARTIFACT_PATH\" ]; then\n  printf 'ARTIFACT|{index}|invalid|0|0\\n'\nelif [ -f \"$ARTIFACT_PATH\" ]; then\n  artifact_size=$(artifact_stat \"$ARTIFACT_PATH\")\n  artifact_digest=$(artifact_sha256 \"$ARTIFACT_PATH\")\n  if [ -z \"$artifact_digest\" ]; then\n    printf 'ARTIFACT|{index}|unconfirmed|%s|1\\n' \"$artifact_size\"\n  elif [ \"$artifact_size\" = {size} ] && [ \"$artifact_digest\" = {digest} ]; then\n    printf 'ARTIFACT|{index}|present|%s|1\\n' \"$artifact_size\"\n  else\n    printf 'ARTIFACT|{index}|incomplete|%s|1\\n' \"$artifact_size\"\n  fi\nelif [ -e \"$ARTIFACT_PATH\" ]; then\n  if [ -d \"$ARTIFACT_PATH\" ] && artifact_dir_empty \"$ARTIFACT_PATH\"; then\n    printf 'ARTIFACT|{index}|missing|0|0\\n'\n  else\n    printf 'ARTIFACT|{index}|invalid|0|0\\n'\n  fi\nelse\n  artifact_state=0\n  artifact_parent_state \"$(dirname \"$ARTIFACT_PATH\")\" || artifact_state=$?\n  if [ \"$artifact_state\" -eq 1 ]; then\n    printf 'ARTIFACT|{index}|unconfirmed|0|0\\n'\n  else\n    printf 'ARTIFACT|{index}|missing|0|0\\n'\n  fi\nfi\n",
                 size = expected.size,
                 digest = shell_quote(&expected.sha256)
             )
@@ -1049,7 +1064,7 @@ fn remote_artifact_probe_script(index: usize, probe: &ArtifactProbe) -> String {
         ArtifactKind::Dir => {
             let mut checks = String::new();
             for file in &probe.expected {
-                let target = shell_quote(&posix_join(&probe.target, &file.relative));
+                let target = shell_quote(&path_guard::target_join(&probe.target, &file.relative));
                 checks.push_str(&format!(
                     "    if [ \"$artifact_state\" = present ]; then\n      if [ -L {target} ] || [ ! -f {target} ]; then\n        artifact_state=incomplete\n      else\n        artifact_size=$(artifact_stat {target})\n        artifact_digest=$(artifact_sha256 {target})\n        if [ -z \"$artifact_digest\" ]; then\n          artifact_state=unconfirmed\n        elif [ \"$artifact_size\" != {size} ] || [ \"$artifact_digest\" != {digest} ]; then\n          artifact_state=incomplete\n        fi\n      fi\n    fi\n",
                     size = file.size,
@@ -1575,7 +1590,7 @@ fn compare_with_artifacts(
         }
         if invalid > 0 {
             artifact_issues.push(format!(
-                "有 {invalid} 个制品路径与交付包声明的类型不一致或包含符号链接，请在目标机处理该路径后重新检查。"
+                "有 {invalid} 个制品路径与交付包声明的类型不一致或包含符号链接，请先处理非空目录或符号链接后重新检查。"
             ));
         }
     } else {
@@ -1594,7 +1609,7 @@ fn compare_with_artifacts(
         }
         if invalid > 0 {
             artifact_issues.push(format!(
-                "有 {invalid} 个制品路径与交付包声明的类型不一致或包含符号链接，请在目标机处理该路径后重新检查。"
+                "有 {invalid} 个制品路径与交付包声明的类型不一致或包含符号链接，请先处理非空目录或符号链接后重新检查。"
             ));
         }
     }
@@ -2083,7 +2098,7 @@ mod tests {
     }
 
     #[test]
-    fn artifact_type_conflicts_are_reported_as_invalid() {
+    fn empty_directories_at_file_targets_are_replaceable() {
         let root = std::env::temp_dir().join(format!(
             "deploy-review-artifact-type-{}-{:?}",
             std::process::id(),
@@ -2093,6 +2108,13 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         fs::create_dir_all(root.join("conflict")).unwrap();
         let probes = vec![file_probe(&root.join("conflict"), b"ready")];
+        let states = inspect_local_artifacts(&probes);
+        assert_eq!(
+            artifact_reviews(&probes, &states)[0].status.as_str(),
+            "missing"
+        );
+
+        fs::write(root.join("conflict/keep.txt"), b"keep").unwrap();
         let states = inspect_local_artifacts(&probes);
         assert_eq!(
             artifact_reviews(&probes, &states)[0].status.as_str(),
@@ -2123,13 +2145,20 @@ mod tests {
     }
 
     #[test]
-    fn remote_artifact_targets_use_posix_paths() {
+    fn remote_artifact_targets_follow_the_target_path_style() {
         assert_eq!(
-            posix_join("/srv/demo", "deploy/docker-compose.yml"),
+            path_guard::target_join("/srv/demo", "deploy/docker-compose.yml"),
             "/srv/demo/deploy/docker-compose.yml"
         );
-        assert_eq!(posix_join("/srv/demo/", "/deploy/app"), "/srv/demo/deploy/app");
-        assert_eq!(posix_join("/srv/demo", ""), "/srv/demo");
+        assert_eq!(
+            path_guard::target_join(r"D:\400mbushu", "deploy/docker-compose.yml"),
+            r"D:\400mbushu\deploy\docker-compose.yml"
+        );
+        assert_eq!(
+            path_guard::target_join("/srv/demo/", "/deploy/app"),
+            "/srv/demo/deploy/app"
+        );
+        assert_eq!(path_guard::target_join("/srv/demo", ""), "/srv/demo");
     }
 
     #[test]
@@ -2517,6 +2546,8 @@ mod tests {
         fs::create_dir_all(root.join("site-dir")).unwrap();
         fs::write(root.join("site-dir/one.txt"), b"first").unwrap();
         fs::create_dir_all(root.join("conflict")).unwrap();
+        fs::write(root.join("conflict/keep.txt"), b"keep").unwrap();
+        fs::create_dir_all(root.join("placeholder")).unwrap();
         fs::create_dir_all(root.join("linked")).unwrap();
         fs::write(root.join("linked/one.txt"), b"first").unwrap();
         std::os::unix::fs::symlink(root.join("linked/one.txt"), root.join("linked/link.txt")).unwrap();
@@ -2646,6 +2677,21 @@ esac
                             sha256: crate::commands::bundle::sha256_hex(b"other"),
                         },
                     ],
+                }, ArtifactProbe {
+                    key: "placeholder".to_string(),
+                    label: "空目录占位".to_string(),
+                    source: "placeholder.txt".to_string(),
+                    root: "deploy".to_string(),
+                    path: "placeholder".to_string(),
+                    kind: ArtifactKind::File,
+                    target: root.join("placeholder").to_string_lossy().to_string(),
+                    expected_bytes: 7,
+                    expected_files: 1,
+                    expected: vec![ArtifactExpectedFile {
+                        relative: String::new(),
+                        size: 7,
+                        sha256: crate::commands::bundle::sha256_hex(b"payload"),
+                    }],
                 }],
             ))
             .env("PATH", std::env::join_paths(&paths).unwrap())
@@ -2717,6 +2763,13 @@ esac
                 .get(&5)
                 .map(|artifact| artifact.status.as_str()),
             Some("incomplete")
+        );
+        assert_eq!(
+            target
+                .artifact_states
+                .get(&6)
+                .map(|artifact| artifact.status.as_str()),
+            Some("missing")
         );
         assert!(target.artifacts_checked);
         assert_eq!(target.containers[0].health, "healthy");

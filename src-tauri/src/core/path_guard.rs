@@ -138,6 +138,53 @@ pub fn is_absolute(value: &str) -> bool {
         && (bytes[2] == b'\\' || bytes[2] == b'/')
 }
 
+/// 路径是否使用 Windows 形式（盘符或 UNC），与运行平台无关。
+pub fn is_windows_style(value: &str) -> bool {
+    let text = value.trim_start();
+    if text.starts_with("\\\\") {
+        return true;
+    }
+    let bytes = text.as_bytes();
+    bytes.len() > 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+}
+
+/// 按目标路径自身的系统形式拼接相对路径，不依赖运行平台。
+///
+/// 远程主机的部署目录可能来自另一套系统；在 macOS 或 Linux 上核对 Windows
+/// 目标时，仍要生成 Windows 可识别的反斜杠路径。
+pub fn target_join(base: &str, child: &str) -> String {
+    let windows = is_windows_style(base);
+    let trimmed = base.trim_end_matches(|value| value == '/' || value == '\\');
+    let base = if trimmed.is_empty() && base.starts_with('/') {
+        "/"
+    } else {
+        trimmed
+    };
+    let child = child
+        .trim()
+        .trim_start_matches(|value| value == '/' || value == '\\');
+    if child.is_empty() {
+        return base.to_string();
+    }
+    if base.is_empty() {
+        return child.to_string();
+    }
+    if windows {
+        format!(
+            "{}\\{}",
+            base.replace('/', "\\"),
+            child.replace('/', "\\")
+        )
+    } else if base == "/" {
+        format!("/{child}")
+    } else {
+        format!("{base}/{child}")
+    }
+}
+
 /// `target` 是否位于 `base` 之内（按路径段比较，不解析符号链接）。
 pub fn is_within(base: &Path, target: &Path) -> bool {
     target.starts_with(base)
@@ -192,6 +239,28 @@ mod tests {
         assert!(!is_absolute("opt/demo"));
         assert!(!is_absolute("C:demo"));
         assert!(!is_absolute(""));
+    }
+
+    #[test]
+    fn target_join_follows_the_target_path_style() {
+        assert_eq!(
+            target_join("/srv/app/", "/deploy/app.yml"),
+            "/srv/app/deploy/app.yml"
+        );
+        assert_eq!(
+            target_join(r"D:\400mbushu", "backend-java/server/target/app.jar"),
+            r"D:\400mbushu\backend-java\server\target\app.jar"
+        );
+        assert_eq!(
+            target_join("D:/400mbushu", "backend-java/server/target/app.jar"),
+            r"D:\400mbushu\backend-java\server\target\app.jar"
+        );
+        assert_eq!(
+            target_join(r"\\server\share\app", "deploy/app.yml"),
+            r"\\server\share\app\deploy\app.yml"
+        );
+        assert_eq!(target_join("/", "deploy/app.yml"), "/deploy/app.yml");
+        assert_eq!(target_join("/srv/app", ""), "/srv/app");
     }
 
     #[test]

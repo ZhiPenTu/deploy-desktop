@@ -185,8 +185,12 @@ export function validateInstallDir(raw) {
   const value = String(raw ?? '').trim().replace(/\/+$/, '');
   if (!value) throw new DeployError('请填写部署目录', { code: 'INSTALL_DIR_REQUIRED' });
   if (/[\r\n\0]/.test(value)) throw new DeployError('部署目录包含不支持的字符', { code: 'INSTALL_DIR_INVALID' });
+  if (value.startsWith('//')) {
+    throw new DeployError('Windows UNC 部署目录请使用反斜杠形式（\\\\server\\share）', { code: 'INSTALL_DIR_UNC' });
+  }
   const windowsAbsolute = /^[A-Za-z]:[\\/]/.test(value);
-  if (!value.startsWith('/') && !windowsAbsolute) {
+  const uncAbsolute = /^\\\\[^\\/]+[\\/][^\\/]+/.test(value);
+  if (!value.startsWith('/') && !windowsAbsolute && !uncAbsolute) {
     throw new DeployError('部署目录必须填写绝对路径', { code: 'INSTALL_DIR_NOT_ABSOLUTE' });
   }
   if (value.split(/[\\/]/).some((part) => part === '..')) {

@@ -37,6 +37,14 @@ if [ "\${1:-}" = inspect ]; then
   esac
   exit 0
 fi
+if [ "\${1:-}" = volume ] && [ "\${2:-}" = inspect ]; then
+  if [ "\${3:-}" = --format ]; then
+    printf '%s\\n' "\${MOCK_VOLUME_OWNER:-mock-project}"
+  else
+    [ -d "\${MOCK_VOLUME_DIR:-}" ] || exit 1
+  fi
+  exit 0
+fi
 if [ "\${1:-}" = volume ] && [ "\${2:-}" = rm ]; then
   rm -rf -- "$MOCK_VOLUME_DIR"
   exit 0
@@ -176,6 +184,7 @@ exec "$@"
     path.join(incoming, 'deployed.json'),
     JSON.stringify({ schemaVersion: 2, version: '2.0.0' })
   );
+  await fs.writeFile(path.join(txn, 'project-name'), 'mock-project\n');
   return { root, bin, install, deploy, txn, volume };
 }
 
@@ -190,7 +199,8 @@ async function runWorker(context, {
   detached = false,
   newUpDelay = '',
   projectName = '',
-  projectWorkingDir = ''
+  projectWorkingDir = '',
+  volumeOwner = 'mock-project'
 } = {}) {
   const args = [
     mode,
@@ -221,7 +231,8 @@ async function runWorker(context, {
       MOCK_FAIL_OLD_DOWN: failOldDown ? 'yes' : 'no',
       MOCK_NEW_UP_DELAY: newUpDelay,
       MOCK_FAIL_RESTORE: failRestore ? 'yes' : 'no',
-      MOCK_PROJECT_WORKING_DIR: projectWorkingDir
+      MOCK_PROJECT_WORKING_DIR: projectWorkingDir,
+      MOCK_VOLUME_OWNER: volumeOwner
     },
     timeoutMs: 30000
   };
@@ -309,6 +320,96 @@ test('远端 worker 首次部署失败后清理新文件和新数据卷', async 
     Buffer.from(status.match(/errorBase64=(.*)/)?.[1] || '', 'base64').toString('utf8'),
     /部署阶段 starting 失败/
   );
+});
+
+test('远端 worker 不替换文件制品对应的非空目录', async (t) => {
+  const context = await fixture(t);
+  await fs.rm(path.join(context.deploy, 'app.txt'));
+  await fs.mkdir(path.join(context.deploy, 'app.txt'));
+  await fs.writeFile(path.join(context.deploy, 'app.txt', 'user.txt'), 'user');
+  const result = await runWorker(context);
+  assert.match(result.stderr, /非空目录/);
+  const status = await fs.readFile(path.join(context.txn, 'status.env'), 'utf8');
+  assert.match(status, /phase=recovered/);
+  assert.equal(
+    await fs.readFile(path.join(context.deploy, 'app.txt', 'user.txt'), 'utf8'),
+    'user'
+  );
+});
+
+test('远端 worker 回滚时不删除归属变化的数据卷', async (t) => {
+  const context = await fixture(t);
+  await fs.writeFile(
+    path.join(context.txn, 'incoming', 'volume-specs.tsv'),
+    'data\tmock-volume\tnginx:test\tno\n'
+  );
+  const result = await runWorker(context, {
+    failNewUp: true,
+    hadDeployment: false,
+    volumeOwner: 'other-project'
+  });
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /已不属于本次部署项目/);
+  assert.equal(
+    await fs.readFile(path.join(context.volume, 'value.txt'), 'utf8'),
+    'old-volume'
+  );
+});
+
+test('远端 worker 回滚时不删除缺失项目标识的数据卷', async (t) => {
+  const context = await fixture(t);
+  await fs.writeFile(path.join(context.txn, 'project-name'), '\n');
+  await fs.writeFile(
+    path.join(context.txn, 'incoming', 'volume-specs.tsv'),
+    'data\tmock-volume\tnginx:test\tno\n'
+  );
+  const result = await runWorker(context, {
+    failNewUp: true,
+    hadDeployment: false
+  });
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /缺少部署项目标识/);
+  assert.equal(
+    await fs.readFile(path.join(context.volume, 'value.txt'), 'utf8'),
+    'old-volume'
+  );
+});
+
+test('远端 worker 保留非空的旧制品目录', async (t) => {
+  const context = await fixture(t);
+  await fs.mkdir(path.join(context.deploy, 'old-dir'));
+  await fs.writeFile(path.join(context.deploy, 'old-dir', 'user.txt'), 'user');
+  await fs.writeFile(
+    path.join(context.txn, 'incoming', 'remove-paths.txt'),
+    'deploy/old-dir\n'
+  );
+  const result = await runWorker(context);
+  assertWorkerSucceeded(result);
+  assert.match(result.stderr, /保留非空旧目录/);
+  assert.equal(
+    await fs.readFile(path.join(context.deploy, 'old-dir', 'user.txt'), 'utf8'),
+    'user'
+  );
+});
+
+test('远端 worker 拒绝符号链接部署根目录', async (t) => {
+  const context = await fixture(t);
+  const real = path.join(context.root, 'real-install');
+  await fs.rename(context.install, real);
+  await fs.symlink(real, context.install);
+  const result = await runWorker(context);
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /部署路径包含符号链接/);
+});
+
+test('远端 worker 快照前拒绝符号链接父目录', async (t) => {
+  const context = await fixture(t);
+  const outside = path.join(context.root, 'outside-deploy');
+  await fs.rename(context.deploy, outside);
+  await fs.symlink(outside, context.deploy);
+  const result = await runWorker(context);
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /符号链接/);
 });
 
 test('远端 worker 恢复数据卷失败时标记 recovery_failed 并保留现场', async (t) => {

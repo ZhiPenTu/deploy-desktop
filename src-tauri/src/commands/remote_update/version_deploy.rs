@@ -1228,15 +1228,6 @@ fi
             required as f64 / 1024.0 / 1024.0 / 1024.0
         ));
     }
-    for volume in &mut volume_plans {
-        if !has_deployment && volume.exists {
-            return Err(format!(
-                "首次部署的目标已存在数据卷 {}，为避免误删数据已停止部署",
-                volume.actual
-            ));
-        }
-        // 缺少的数据卷由本次部署创建；事务按部署前不存在记录，回滚时清理。
-    }
     let image_override = crate::commands::version_deploy::image_override_document(
         &incoming,
         &resources.new_images.values().cloned().collect::<Vec<_>>(),

@@ -36,6 +36,18 @@ case "$INSTALL" in
   /|*/|*/../*|*/..|*/./*|*/.|*$'\n'*|*$'\r'*) echo '部署目录无效' >&2; exit 2 ;;
 esac
 
+ensure_no_symlink_path() {
+  local path=$1
+  while [ -n "$path" ] && [ "$path" != "/" ]; do
+    [ -L "$path" ] && { echo "部署路径包含符号链接：$path" >&2; return 2; }
+    path=$(dirname "$path")
+  done
+  return 0
+}
+
+ensure_no_symlink_path "$INSTALL" || exit 2
+ensure_no_symlink_path "$TXN" || exit 2
+
 write_status() {
   phase=$1
   state=$2
@@ -261,6 +273,7 @@ snapshot_files() {
   while IFS= read -r relative; do
     [ -n "$relative" ] || continue
     validate_managed_path "$relative" || { echo "非法快照路径：$relative" >&2; return 5; }
+    ensure_artifact_ancestors "$relative" || return 5
     mkdir -p "$SNAPSHOT/files/$(dirname -- "$relative")"
     if [ -e "$INSTALL/$relative" ] || [ -L "$INSTALL/$relative" ]; then
       rm -rf -- "$SNAPSHOT/files/$relative"
@@ -280,6 +293,7 @@ restore_files() {
   while IFS=$'\t' read -r existed bytes digest relative; do
     [ -n "$relative" ] || continue
     validate_managed_path "$relative" || { echo "非法恢复路径：$relative" >&2; return 11; }
+    ensure_artifact_ancestors "$relative" || return 11
     rm -rf -- "$INSTALL/$relative" || return 11
     if [ "$existed" = yes ] && { [ -e "$SNAPSHOT/files/$relative" ] || [ -L "$SNAPSHOT/files/$relative" ]; }; then
       mkdir -p -- "$(dirname -- "$INSTALL/$relative")" || return 12
@@ -339,11 +353,23 @@ restore_volumes() {
 }
 
 remove_created_volumes() {
+  local project owner
   [ -f "$INCOMING/volume-specs.tsv" ] || return 0
+  project=''
+  [ ! -f "$TXN/project-name" ] || project=$(cat "$TXN/project-name")
   while IFS=$'\t' read -r logical actual image existed; do
     [ -n "$actual" ] || continue
     if [ "$existed" != yes ]; then
       if timeout 60 docker volume inspect "$actual" >/dev/null 2>&1; then
+        if [ -z "$project" ]; then
+          echo "数据卷 $actual 缺少部署项目标识，未自动删除" >&2
+          return 9
+        fi
+        owner=$(timeout 60 docker volume inspect --format '{{index .Labels "com.docker.compose.project"}}' "$actual" 2>/dev/null || true)
+        if [ "$owner" != "$project" ]; then
+          echo "数据卷 $actual 已不属于本次部署项目，未自动删除" >&2
+          return 9
+        fi
         timeout 120 docker volume rm "$actual" >/dev/null || return 9
       fi
     fi
@@ -428,12 +454,67 @@ verify_recovery_resources() {
   done < "$SNAPSHOT/volume-backups.tsv"
 }
 
+ensure_replaceable_artifact() {
+  local target=$1
+  local source=$2
+  local entries
+  [ -L "$target" ] && { echo "制品目标是符号链接：$target" >&2; return 8; }
+  if [ -d "$target" ] && [ ! -d "$source" ]; then
+    entries=$(find "$target" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null) || {
+      echo "无法读取制品目标目录：$target" >&2
+      return 8
+    }
+    [ -z "$entries" ] || {
+      echo "制品目标是非空目录，请先处理：$target" >&2
+      return 8
+    }
+  elif [ -f "$target" ] && [ -d "$source" ]; then
+    echo "制品目标与交付类型不一致，请先处理：$target" >&2
+    return 8
+  fi
+  return 0
+}
+
+ensure_artifact_ancestors() {
+  local relative=$1
+  local path=$INSTALL
+  local part
+  local rest=$relative
+  while [ -n "$rest" ]; do
+    part=${rest%%/*}
+    if [ "$part" = "$rest" ]; then
+      break
+    fi
+    rest=${rest#*/}
+    path="$path/$part"
+    [ -L "$path" ] && { echo "制品目标路径包含符号链接：$path" >&2; return 8; }
+  done
+  return 0
+}
+
 apply_files() {
+  local target entries
   if [ -f "$INCOMING/remove-paths.txt" ]; then
     while IFS= read -r relative; do
       [ -n "$relative" ] || continue
       validate_artifact_path "$relative" || { echo "非法清理路径：$relative" >&2; return 5; }
-      rm -rf -- "$INSTALL/$relative"
+      ensure_artifact_ancestors "$relative" || return 5
+      target="$INSTALL/$relative"
+      if [ -L "$target" ]; then
+        echo "保留旧路径（符号链接）：$relative" >&2
+        continue
+      fi
+      if [ -d "$target" ]; then
+        entries=$(find "$target" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null) || {
+          echo "无法读取旧路径目录：$relative" >&2
+          return 5
+        }
+        if [ -n "$entries" ]; then
+          echo "保留非空旧目录：$relative" >&2
+          continue
+        fi
+      fi
+      rm -rf -- "$target"
     done < "$INCOMING/remove-paths.txt"
   fi
   [ -f "$INCOMING/upload-paths.txt" ] || return 0
@@ -442,6 +523,8 @@ apply_files() {
     validate_artifact_path "$relative" || { echo "非法写入路径：$relative" >&2; return 8; }
     source="$INCOMING/tree/$relative"
     [ -e "$source" ] || { echo "暂存内容缺少 $relative" >&2; return 8; }
+    ensure_artifact_ancestors "$relative" || return 8
+    ensure_replaceable_artifact "$INSTALL/$relative" "$source" || return 8
     rm -rf -- "$INSTALL/$relative"
     mkdir -p -- "$(dirname -- "$INSTALL/$relative")"
     cp -a -- "$source" "$INSTALL/$relative"

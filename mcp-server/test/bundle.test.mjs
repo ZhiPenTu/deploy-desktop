@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 import { Bundle, isInternalDeployPath, normalizeComponents, safeRelative } from '../src/bundle.mjs';
+import { validateInstallDir } from '../src/projects.mjs';
 import { makeDescriptor, makeTempDir, writeBundle } from './helpers.mjs';
 
 test('load 接受通用命名的合法交付包', async () => {
@@ -140,6 +141,33 @@ test('解析产物目标路径落在声明根内', async () => {
   assert.equal(byKey['server-bin'], '/opt/demo/bin');
   assert.equal(byKey['server-config'], '/opt/demo/config/app.yml');
   assert.equal(byKey['web-dist'], '/opt/demo/deploy/site');
+});
+
+test('解析产物目标路径按目标系统使用分隔符', async () => {
+  const root = await makeTempDir();
+  await writeBundle(root);
+  const bundle = await Bundle.load(root);
+  const artifacts = bundle.resolveArtifacts(
+    bundle.selectComponents(['server', 'site']),
+    'D:\\400mbushu',
+    'D:\\400mbushu\\deploy'
+  );
+  const byKey = Object.fromEntries(artifacts.map((item) => [item.key, item.target]));
+  assert.equal(byKey['server-bin'], 'D:\\400mbushu\\bin');
+  assert.equal(byKey['server-config'], 'D:\\400mbushu\\config\\app.yml');
+  assert.equal(byKey['web-dist'], 'D:\\400mbushu\\deploy\\site');
+
+  const mixed = bundle.resolveArtifacts(
+    bundle.selectComponents(['server']),
+    'D:/400mbushu',
+    'D:/400mbushu/deploy'
+  );
+  assert.equal(mixed[0].target, 'D:\\400mbushu\\bin');
+});
+
+test('部署目录拒绝正斜杠形式的 Windows UNC 路径', () => {
+  assert.throws(() => validateInstallDir('//server/share/app'), /反斜杠/);
+  assert.equal(validateInstallDir('\\\\server\\share\\app'), '\\\\server\\share\\app');
 });
 
 test('非 compose 运行时明确拒绝', async () => {

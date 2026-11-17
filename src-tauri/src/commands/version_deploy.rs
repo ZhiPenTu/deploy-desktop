@@ -5,9 +5,9 @@
 //! the previous version; partial component updates are no longer accepted here.
 
 use super::bundle::{
-    default_components, sha256_path, write_deployed_record, ArtifactRoot, Bundle,
-    DeployedComposeFile, DeployedImage, DeployedRecord, ImageSpec, DEPLOYED_RECORD_DIR,
-    DEPLOYED_RECORD_FILE,
+    default_components, sha256_path, write_deployed_record, ArtifactKind, ArtifactRoot, Bundle,
+    DeployedComposeFile, DeployedImage, DeployedRecord, ImageSpec, ResolvedArtifact,
+    DEPLOYED_RECORD_DIR, DEPLOYED_RECORD_FILE,
 };
 use super::deployment_tx::{
     self, DeploymentLock, DeploymentTransaction, ImageSnapshot, VolumeSnapshot, PHASE_APPLYING,
@@ -453,20 +453,6 @@ fn execute_new_version(
         .set_phase(&plan.install_root, PHASE_SNAPSHOTTING_DATA)
         .map_err(|error| (PHASE_SNAPSHOTTING_DATA.to_string(), error))?;
     for volume in &plan.volumes {
-        if !plan.had_deployment {
-            transaction.volumes.push(VolumeSnapshot {
-                logical_name: volume.logical_name.clone(),
-                actual_name: volume.actual_name.clone(),
-                image: volume.image.clone(),
-                existed: false,
-                file: String::new(),
-                sha256: String::new(),
-                bytes: 0,
-            });
-            deployment_tx::write_transaction(&plan.install_root, transaction)
-                .map_err(|error| (PHASE_SNAPSHOTTING_DATA.to_string(), error))?;
-            continue;
-        }
         if !volume.exists {
             transaction.volumes.push(VolumeSnapshot {
                 logical_name: volume.logical_name.clone(),
@@ -527,13 +513,8 @@ fn execute_new_version(
             format!("创建部署目录失败：{error}"),
         )
     })?;
-    if !plan.retired_paths.is_empty() {
-        let retired: Vec<PathBuf> = plan
-            .retired_paths
-            .iter()
-            .map(|relative| plan.install_root.join(relative))
-            .collect();
-        deployment_tx::remove_managed_files(&retired)
+    for relative in &plan.retired_paths {
+        remove_retired_path(&plan.install_root, relative, &mut output)
             .map_err(|error| (PHASE_APPLYING.to_string(), error))?;
     }
     for artifact in &plan
@@ -548,6 +529,8 @@ fn execute_new_version(
         )
         .map_err(|error| (PHASE_APPLYING.to_string(), error))?
     {
+        ensure_artifact_target_replaceable(&plan.install_root, artifact)
+            .map_err(|error| (PHASE_APPLYING.to_string(), error))?;
         replace_path(&artifact.source, &artifact.target)
             .map_err(|error| (PHASE_APPLYING.to_string(), error))?;
         transaction.applied_paths.push(
@@ -826,7 +809,7 @@ fn recover_from_transaction(
         .filter(|_| transaction.startup_attempted)
     {
         if !volume.existed {
-            remove_volume_if_present(&volume.actual_name)?;
+            remove_volume_if_present(&volume.actual_name, &transaction.project_name)?;
             continue;
         }
         deployment_tx::restore_volume_local(
@@ -871,15 +854,30 @@ fn recover_from_transaction(
     Ok(())
 }
 
-fn remove_volume_if_present(actual_name: &str) -> Result<(), String> {
-    let exists = docker_checked(
-        &["volume", "inspect", actual_name],
+fn remove_volume_if_present(actual_name: &str, project_name: &str) -> Result<(), String> {
+    let owner = match docker_output(
+        &[
+            "volume",
+            "inspect",
+            "--format",
+            "{{index .Labels \"com.docker.compose.project\"}}",
+            actual_name,
+        ],
         "检查待清理的数据卷",
-        Duration::from_secs(30),
-    )
-    .is_ok();
-    if !exists {
-        return Ok(());
+    ) {
+        Ok(output) => String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        Err(error) if error.to_ascii_lowercase().contains("no such volume") => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if project_name.trim().is_empty() {
+        return Err(format!(
+            "数据卷 {actual_name} 缺少部署项目标识，未自动删除，请人工确认后再处理"
+        ));
+    }
+    if !volume_owner_matches(&owner, project_name) {
+        return Err(format!(
+            "数据卷 {actual_name} 已不属于本次部署项目，未自动删除，请人工确认后再处理"
+        ));
     }
     docker_checked(
         &["volume", "rm", actual_name],
@@ -887,6 +885,11 @@ fn remove_volume_if_present(actual_name: &str) -> Result<(), String> {
         Duration::from_secs(120),
     )
     .map(|_| ())
+}
+
+fn volume_owner_matches(owner: &str, project_name: &str) -> bool {
+    let project_name = project_name.trim();
+    !project_name.is_empty() && owner.trim() == project_name
 }
 
 pub(crate) fn image_override_document(
@@ -1174,7 +1177,6 @@ fn build_plan(bundle_dir: &str, install_dir: &str) -> Result<FullDeployPlan, Str
         &bundle,
         &incoming_config,
         current_config.as_ref(),
-        had_deployment,
     )?;
     let mut managed_paths: BTreeSet<String> = artifacts
         .iter()
@@ -1382,7 +1384,6 @@ fn volume_plans(
     bundle: &Bundle,
     incoming: &Value,
     current: Option<&Value>,
-    had_deployment: bool,
 ) -> Result<Vec<VolumePlan>, String> {
     let data = bundle
         .descriptor
@@ -1420,14 +1421,8 @@ fn volume_plans(
             deployment_tx::check_backup_tools_local(&image)?;
         }
         let exists = volume_exists(&actual)?;
-        if !had_deployment && exists {
-            return Err(format!(
-                "首次部署的目标已存在数据卷 {}，为避免误删已有数据，已停止部署",
-                actual
-            ));
-        }
-        // 声明的数据卷不存在时由本次部署直接创建；事务按“部署前不存在”记录，
-        // 失败回滚会一并清理，不会误删他人数据。
+        // 首次部署允许复用归属一致的数据卷；不存在时由本次部署直接创建。
+        // 事务按部署前的真实状态记录，失败回滚只清理本次新建的卷。
         if exists {
             let owner = docker_checked(
                 &["volume", "inspect", "--format", "{{index .Labels \"com.docker.compose.project\"}}|{{index .Labels \"com.docker.compose.volume\"}}", &actual],
@@ -2631,6 +2626,108 @@ fn replace_path(source: &Path, target: &Path) -> Result<(), String> {
     }
 }
 
+/// 执行层再次核对目标类型，避免绕过核对步骤删除非空目录或用户文件。
+fn ensure_artifact_target_replaceable(
+    install_root: &Path,
+    artifact: &ResolvedArtifact,
+) -> Result<(), String> {
+    ensure_no_symlink_ancestors(install_root, &artifact.target).map_err(|_| {
+        format!(
+            "制品 {} 的目标路径包含符号链接或无法访问，请先处理目标目录后重新部署",
+            artifact.label
+        )
+    })?;
+    let metadata = match fs::symlink_metadata(&artifact.target) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "无法读取制品 {} 的目标路径：{error}",
+                artifact.label
+            ));
+        }
+    };
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "制品 {} 的目标是符号链接，请先处理目标路径后重新部署",
+            artifact.label
+        ));
+    }
+    match artifact.kind {
+        ArtifactKind::File if metadata.is_dir() => {
+            if !empty_directory(&artifact.target)? {
+                return Err(format!(
+                    "制品 {} 的目标是非空目录，请先处理该目录后重新部署",
+                    artifact.label
+                ));
+            }
+        }
+        ArtifactKind::Dir if !metadata.is_dir() => {
+            return Err(format!(
+                "制品 {} 的目标不是目录，请先处理该路径后重新部署",
+                artifact.label
+            ));
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn ensure_no_symlink_ancestors(install_root: &Path, target: &Path) -> Result<(), String> {
+    let relative = target
+        .strip_prefix(install_root)
+        .map_err(|_| "部署路径超出部署目录".to_string())?;
+    let mut current = install_root.to_path_buf();
+    for component in relative.components() {
+        current.push(component);
+        if current == target {
+            break;
+        }
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err("部署路径包含符号链接".to_string());
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => return Err(format!("无法读取部署路径：{error}")),
+        }
+    }
+    Ok(())
+}
+
+fn remove_retired_path(
+    install_root: &Path,
+    relative: &str,
+    output: &mut String,
+) -> Result<(), String> {
+    let target = install_root.join(relative);
+    ensure_no_symlink_ancestors(install_root, &target)?;
+    let metadata = match fs::symlink_metadata(&target) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("无法读取待清理路径 {}：{error}", target.display())),
+    };
+    if metadata.file_type().is_symlink() {
+        output.push_str(&format!("保留旧路径（符号链接）：{}\n", target.display()));
+        return Ok(());
+    }
+    if metadata.is_dir() && !empty_directory(&target)? {
+        output.push_str(&format!("保留非空旧目录：{}\n", target.display()));
+        return Ok(());
+    }
+    deployment_tx::remove_deployment_path(&target)
+}
+
+fn empty_directory(path: &Path) -> Result<bool, String> {
+    let mut entries = fs::read_dir(path)
+        .map_err(|error| format!("无法读取目标目录 {}：{error}", path.display()))?;
+    match entries.next() {
+        None => Ok(true),
+        Some(Ok(_)) => Ok(false),
+        Some(Err(error)) => Err(format!("无法读取目标目录 {}：{error}", path.display())),
+    }
+}
+
 fn copy_dir(source: &Path, target: &Path) -> Result<(), String> {
     fs::create_dir_all(target)
         .map_err(|error| format!("创建部署目录 {} 失败：{error}", target.display()))?;
@@ -3059,5 +3156,95 @@ mod tests {
             &pinned,
             &format!("demo/api:latest@sha256:{}", "b".repeat(64))
         ));
+    }
+
+    #[test]
+    fn artifact_write_replaces_an_empty_placeholder_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "version-deploy-placeholder-{}",
+            crate::core::backup::unique_suffix()
+        ));
+        let source = root.join("staged/server.jar");
+        let install = root.join("install");
+        let target = install.join("backend-java/server/target/server.jar");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        fs::write(&source, b"jar").unwrap();
+        let artifact = ResolvedArtifact {
+            key: "server-jar".to_string(),
+            label: "后端程序".to_string(),
+            source: source.clone(),
+            target: target.clone(),
+            kind: ArtifactKind::File,
+        };
+
+        ensure_artifact_target_replaceable(&install, &artifact).unwrap();
+        replace_path(&source, &target).unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), b"jar");
+        assert!(target.is_file());
+
+        fs::remove_file(&target).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("user.txt"), b"user").unwrap();
+        let error = ensure_artifact_target_replaceable(&install, &artifact).unwrap_err();
+        assert!(error.contains("非空目录"), "{error}");
+        assert_eq!(fs::read(target.join("user.txt")).unwrap(), b"user");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn volume_owner_check_rejects_a_recreated_volume() {
+        assert!(volume_owner_matches("demo", "demo"));
+        assert!(volume_owner_matches(" demo ", " demo "));
+        assert!(!volume_owner_matches("other", "demo"));
+        assert!(!volume_owner_matches("demo", ""));
+        assert!(!volume_owner_matches("", "demo"));
+    }
+
+    #[test]
+    fn retired_non_empty_directories_are_preserved() {
+        let root = std::env::temp_dir().join(format!(
+            "version-deploy-retired-{}",
+            crate::core::backup::unique_suffix()
+        ));
+        let install = root.join("install");
+        fs::create_dir_all(install.join("old-dir")).unwrap();
+        fs::write(install.join("old-dir/user.txt"), b"user").unwrap();
+        let mut output = String::new();
+
+        remove_retired_path(&install, "old-dir", &mut output).unwrap();
+
+        assert_eq!(
+            fs::read(install.join("old-dir/user.txt")).unwrap(),
+            b"user"
+        );
+        assert!(output.contains("保留非空旧目录"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn artifact_targets_reject_symlinked_ancestors() {
+        let root = std::env::temp_dir().join(format!(
+            "version-deploy-link-{}",
+            crate::core::backup::unique_suffix()
+        ));
+        let install = root.join("install");
+        let outside = root.join("outside");
+        fs::create_dir_all(&install).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, install.join("linked")).unwrap();
+        let artifact = ResolvedArtifact {
+            key: "server-jar".to_string(),
+            label: "后端程序".to_string(),
+            source: root.join("staged/server.jar"),
+            target: install.join("linked/server.jar"),
+            kind: ArtifactKind::File,
+        };
+
+        let error = ensure_artifact_target_replaceable(&install, &artifact).unwrap_err();
+        assert!(error.contains("符号链接"), "{error}");
+        let _ = fs::remove_dir_all(root);
     }
 }

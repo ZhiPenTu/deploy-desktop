@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { Bundle, isInternalDeployPath } from './bundle.mjs';
+import { Bundle, isInternalDeployPath, pathFlavorFor } from './bundle.mjs';
 import { appVersion } from './config.mjs';
 import { DeployError } from './errors.mjs';
 import { verifyImagesRemote } from './image-lock.mjs';
@@ -30,7 +30,7 @@ function encodeBase64(value) {
 }
 
 function trimSlashes(value) {
-  return String(value || '').replace(/\/+$/, '');
+  return String(value || '').replace(/[\\/]+$/, '');
 }
 
 function remoteJoin(base, child) {
@@ -42,12 +42,14 @@ function remoteJoin(base, child) {
 }
 
 function relativeInstallPath(install, target) {
-  const relative = path.posix.relative(trimSlashes(install), String(target).replaceAll('\\', '/'));
-  if (!relative || relative.startsWith('..') || path.posix.isAbsolute(relative)) {
+  const flavor = pathFlavorFor(install);
+  const relative = flavor.relative(trimSlashes(install), String(target));
+  if (!relative || relative.startsWith('..') || flavor.isAbsolute(relative)) {
     throw new DeployError('部署事务路径超出部署目录', { code: 'TRANSACTION_PATH_INVALID' });
   }
-  validateManagedRelative(relative, { allowRecord: false });
-  return relative;
+  const normalized = relative.replaceAll('\\', '/');
+  validateManagedRelative(normalized, { allowRecord: false });
+  return normalized;
 }
 
 function validateManagedRelative(value, { allowRecord = true } = {}) {
@@ -858,14 +860,8 @@ printf 'RECORDED_OLD|${index}|%s\\n' "$value"`
         });
       }
     }
-    for (const volume of volumePlans) {
-      if (!hadDeployment && volume.exists) {
-        throw new DeployError(`首次部署的目标已存在数据卷 ${volume.actual}，为避免误删已有数据已停止部署`, {
-          code: 'DATA_VOLUME_ALREADY_EXISTS'
-        });
-      }
-      // 缺少的数据卷由本次部署创建；事务按部署前不存在记录，回滚时清理。
-    }
+    // 首次部署允许复用归属一致的数据卷；缺少的卷由本次部署创建，
+    // 事务按部署前真实状态记录，回滚只清理本次新建的卷。
     const freeLine = spaceResult.stdout.split('\n').find((line) => line.startsWith('FREE_KB='));
     const freeKb = Number(freeLine?.slice('FREE_KB='.length)) || 0;
     let required = volumePlans.reduce((total, volume) => total + volume.bytes, 0)

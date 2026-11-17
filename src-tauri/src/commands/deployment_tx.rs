@@ -523,16 +523,6 @@ pub fn verify_recovery_snapshot(transaction: &DeploymentTransaction) -> Result<(
     Ok(())
 }
 
-pub fn remove_managed_files(targets: &[PathBuf]) -> Result<(), String> {
-    let mut unique: Vec<&PathBuf> = targets.iter().collect();
-    unique.sort();
-    unique.dedup();
-    for target in unique {
-        remove_path(target)?;
-    }
-    Ok(())
-}
-
 pub fn backup_volume_local(
     image: &str,
     actual_name: &str,

@@ -67,6 +67,12 @@ export function safeRelative(value, label) {
   return parts.join('/');
 }
 
+/** 目标路径使用 Windows 形式（盘符或 UNC）时，按 Windows 规则解析。 */
+export function pathFlavorFor(value) {
+  const text = String(value || '').trim();
+  return /^[A-Za-z]:[\\/]/.test(text) || /^\\\\/.test(text) ? path.win32 : path.posix;
+}
+
 export function isInternalDeployPath(value) {
   const normalized = String(value || '').trim().replaceAll('\\', '/');
   const first = normalized.split('/')[0] || '';
@@ -527,9 +533,11 @@ export class Bundle {
   resolveArtifacts(components, installDir, deployDir) {
     return this.artifactsFor(components).map((artifact) => {
       const base = artifact.root === 'install' ? installDir : deployDir;
-      const target = path.resolve(base, artifact.path);
-      const relative = path.relative(path.resolve(base), target);
-      if (relative.startsWith('..') || path.isAbsolute(relative)) {
+      const flavor = pathFlavorFor(base);
+      const root = flavor.resolve(base);
+      const target = flavor.resolve(root, artifact.path);
+      const relative = flavor.relative(root, target);
+      if (!relative || relative.startsWith('..') || flavor.isAbsolute(relative)) {
         throw fail(`产物 ${artifact.key} 的部署路径超出部署目录`, 'ARTIFACT_OUTSIDE_ROOT');
       }
       return {
