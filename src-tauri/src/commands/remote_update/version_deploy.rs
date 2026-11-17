@@ -861,7 +861,6 @@ struct RemoteVolumePlan {
     image: String,
     exists: bool,
     bytes: u64,
-    required: bool,
 }
 
 fn remote_preflight(
@@ -999,7 +998,7 @@ fi
         .find_map(|line| line.strip_prefix("HAS_DEPLOYMENT="))
         .map(|value| value.trim() == "yes")
         .unwrap_or(false);
-    let incoming: Value = parse_remote_json(&raw, "INCOMING_CONFIG_B64")?;
+    let mut incoming: Value = parse_remote_json(&raw, "INCOMING_CONFIG_B64")?;
     let current = if has_deployment {
         Some(parse_remote_json(&raw, "CURRENT_CONFIG_B64")?)
     } else {
@@ -1049,7 +1048,7 @@ fi
         }
     }
     let services = active_services(&incoming);
-    crate::commands::version_deploy::verify_declared_image_references(bundle, &incoming)?;
+    crate::commands::version_deploy::verify_declared_image_references(bundle, &mut incoming)?;
     let unknown: Vec<_> = services
         .iter()
         .filter(|key| {
@@ -1236,12 +1235,7 @@ fi
                 volume.actual
             ));
         }
-        if has_deployment && volume.required && !volume.exists {
-            return Err(format!(
-                "现有部署缺少必需数据卷 {}，无法建立可恢复快照",
-                volume.actual
-            ));
-        }
+        // 缺少的数据卷由本次部署创建；事务按部署前不存在记录，回滚时清理。
     }
     let image_override = crate::commands::version_deploy::image_override_document(
         &incoming,
@@ -1677,8 +1671,11 @@ fn remote_preflight_resources(
         .enumerate()
         .map(|(index, reference)| {
             let target = recorded_old_images
-                .get(reference)
-                .cloned()
+                .iter()
+                .find(|(recorded, _)| {
+                    crate::commands::version_deploy::image_reference_matches(recorded, reference)
+                })
+                .map(|(_, image_id)| image_id.clone())
                 .unwrap_or_else(|| identity(reference));
             format!(
                 "if ! docker image inspect --format 'OLD_IMAGE|{index}|{{{{.Id}}}}|{{{{.Os}}}}/{{{{.Architecture}}}}' -- {reference} 2>/dev/null; then echo '缺少上一版本镜像 {reference}' >&2; exit 5; fi",
@@ -1831,7 +1828,12 @@ fn pin_recorded_old_images(
         let Some(recorded) = record
             .images
             .iter()
-            .find(|recorded| recorded.reference == image.reference)
+            .find(|recorded| {
+                crate::commands::version_deploy::image_reference_matches(
+                    &recorded.reference,
+                    &image.reference,
+                )
+            })
         else {
             continue;
         };
@@ -1942,7 +1944,6 @@ fn remote_volume_plans(
             image,
             exists: false,
             bytes: 0,
-            required: volume.required,
         });
     }
     for service in active_service_configs(incoming) {

@@ -380,12 +380,8 @@ function validateNewDeploymentIsolation(config, hasProjectContainers) {
   if (hasProjectContainers) return;
   for (const [name, service] of Object.entries(config?.services || {})) {
     if (!activeServices(config).includes(name)) continue;
-    if (service.container_name) {
-      throw new DeployError(`首次部署的服务 ${name} 使用固定容器名，无法确认是否会影响已有部署`, { code: 'FIRST_DEPLOY_CONFLICT' });
-    }
-    if ((service.ports || []).some((port) => !port.host_ip || port.host_ip === '127.0.0.1')) {
-      throw new DeployError(`首次部署的服务 ${name} 使用可能冲突的宿主端口，请先隔离旧服务或改用专用端口`, { code: 'FIRST_DEPLOY_CONFLICT' });
-    }
+    // 固定容器名与宿主端口不再阻断首次部署：端口占用在环境检测阶段核对，
+    // 容器名冲突会让 Compose 启动失败并触发自动恢复。
     if ((service.volumes || []).some((volume) => volume.type === 'volume' && !volume.source)) {
       throw new DeployError(`首次部署的服务 ${name} 包含匿名卷，部署失败后无法可靠清理`, { code: 'FIRST_DEPLOY_CONFLICT' });
     }
@@ -868,11 +864,7 @@ printf 'RECORDED_OLD|${index}|%s\\n' "$value"`
           code: 'DATA_VOLUME_ALREADY_EXISTS'
         });
       }
-      if (hadDeployment && volume.required && !volume.exists) {
-        throw new DeployError(`现有部署缺少必需数据卷 ${volume.actual}，无法建立可恢复快照`, {
-          code: 'DATA_VOLUME_MISSING'
-        });
-      }
+      // 缺少的数据卷由本次部署创建；事务按部署前不存在记录，回滚时清理。
     }
     const freeLine = spaceResult.stdout.split('\n').find((line) => line.startsWith('FREE_KB='));
     const freeKb = Number(freeLine?.slice('FREE_KB='.length)) || 0;

@@ -6,7 +6,8 @@
 
 use super::bundle::{
     default_components, sha256_path, write_deployed_record, ArtifactRoot, Bundle,
-    DeployedComposeFile, DeployedImage, DeployedRecord, DEPLOYED_RECORD_DIR, DEPLOYED_RECORD_FILE,
+    DeployedComposeFile, DeployedImage, DeployedRecord, ImageSpec, DEPLOYED_RECORD_DIR,
+    DEPLOYED_RECORD_FILE,
 };
 use super::deployment_tx::{
     self, DeploymentLock, DeploymentTransaction, ImageSnapshot, VolumeSnapshot, PHASE_APPLYING,
@@ -921,11 +922,10 @@ pub(crate) fn image_override_document(
 
 pub(crate) fn validate_new_deployment_isolation(
     config: &Value,
-    has_project_containers: bool,
+    _has_project_containers: bool,
 ) -> Result<(), String> {
-    if has_project_containers {
-        return Ok(());
-    }
+    // 首次部署不再因为固定容器名或宿主端口而直接拒绝：端口占用已在环境检测阶段
+    // 核对，容器名冲突会让 Compose 启动失败并触发自动恢复，不阻断正常部署。
     let Some(services) = config.get("services").and_then(Value::as_object) else {
         return Ok(());
     };
@@ -935,25 +935,10 @@ pub(crate) fn validate_new_deployment_isolation(
             .and_then(Value::as_str)
             .is_some()
         {
-            return Err(format!(
-                "首次部署的服务 {name} 使用固定容器名，无法确认是否会影响已有部署"
-            ));
-        }
-        for port in service
-            .get("ports")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            if !port.get("host_ip").is_some_and(|value| {
-                value
-                    .as_str()
-                    .is_some_and(|text| !text.is_empty() && text != "127.0.0.1")
-            }) {
-                return Err(format!(
-                    "首次部署的服务 {name} 使用可能冲突的宿主端口，请先隔离旧服务或改用专用端口"
-                ));
-            }
+            log::warn!(
+                target: "deploy",
+                "首次部署的服务 {name} 使用固定容器名，若与已有容器冲突将在启动时失败"
+            );
         }
         for mount in service
             .get("volumes")
@@ -1126,7 +1111,7 @@ fn build_plan(bundle_dir: &str, install_dir: &str) -> Result<FullDeployPlan, Str
 
     let env_content = super::projects::read_active_project_env()?;
     let deployment_project_id = project_id();
-    let incoming_config =
+    let mut incoming_config =
         compose_config_bundle(&new_compose_source, &deploy_dir, env_content.as_deref())?;
     let project_name = compose_project_name(&incoming_config)
         .ok_or_else(|| "新版本 Compose 清单缺少项目名称".to_string())?;
@@ -1177,7 +1162,7 @@ fn build_plan(bundle_dir: &str, install_dir: &str) -> Result<FullDeployPlan, Str
         .map(active_services)
         .unwrap_or_default();
     verify_all_declared_services(&bundle, &services)?;
-    verify_declared_image_references(&bundle, &incoming_config)?;
+    verify_declared_image_references(&bundle, &mut incoming_config)?;
     image_snapshots(&install_root, &incoming_config)?;
     let old_images = current_config
         .as_ref()
@@ -1434,24 +1419,15 @@ fn volume_plans(
             }
             deployment_tx::check_backup_tools_local(&image)?;
         }
-        let exists = docker_checked(
-            &["volume", "inspect", "--", &actual],
-            "检查数据卷",
-            Duration::from_secs(30),
-        )
-        .is_ok();
+        let exists = volume_exists(&actual)?;
         if !had_deployment && exists {
             return Err(format!(
                 "首次部署的目标已存在数据卷 {}，为避免误删已有数据，已停止部署",
                 actual
             ));
         }
-        if had_deployment && volume.required && !exists {
-            return Err(format!(
-                "现有部署缺少必需数据卷 {}，无法建立可恢复快照",
-                actual
-            ));
-        }
+        // 声明的数据卷不存在时由本次部署直接创建；事务按“部署前不存在”记录，
+        // 失败回滚会一并清理，不会误删他人数据。
         if exists {
             let owner = docker_checked(
                 &["volume", "inspect", "--format", "{{index .Labels \"com.docker.compose.project\"}}|{{index .Labels \"com.docker.compose.volume\"}}", &actual],
@@ -1968,22 +1944,86 @@ fn verify_all_declared_services(bundle: &Bundle, actual: &[String]) -> Result<()
 
 pub(crate) fn verify_declared_image_references(
     bundle: &Bundle,
-    config: &Value,
+    config: &mut Value,
 ) -> Result<(), String> {
-    for service in active_service_configs(config) {
+    pin_declared_image_references(&bundle.descriptor.images, config)
+}
+
+/// 交付包清单里的镜像通常带 `@sha256:` 摘要，Compose 的 `image:` 行可以只用
+/// 仓库与标签；打包脚本按去摘要后的引用比较。这里同样只比较仓库与标签，
+/// 命中后把内存配置收敛到清单里的摘要引用，供后续镜像检查和启动覆盖使用。
+fn digest_parts(reference: &str) -> Option<(&str, &str)> {
+    let (base, digest) = reference.rsplit_once("@sha256:")?;
+    if digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Some((base, digest))
+    } else {
+        None
+    }
+}
+
+fn sha256_base(reference: &str) -> Option<&str> {
+    digest_parts(reference).map(|(base, _)| base)
+}
+
+/// 上一版本记录保存的是摘要引用，磁盘上的 Compose 可能只写标签或写成另一个
+/// 摘要；只要仓库与标签一致就视为同一个镜像，优先使用记录里的镜像标识。
+pub(crate) fn image_reference_matches(recorded: &str, configured: &str) -> bool {
+    image_reference_key(recorded) == image_reference_key(configured)
+}
+
+fn image_reference_key(reference: &str) -> &str {
+    let value = reference.trim();
+    sha256_base(value).unwrap_or(value)
+}
+
+fn declared_image<'a>(images: &'a [ImageSpec], reference: &str) -> Option<&'a ImageSpec> {
+    let reference = reference.trim();
+    images
+        .iter()
+        .find(|image| image.reference.trim() == reference)
+        .or_else(|| {
+            let key = image_reference_key(reference);
+            images
+                .iter()
+                .find(|image| image_reference_key(&image.reference) == key)
+        })
+}
+
+/// 校验 Compose 的镜像引用，并把只用标签的引用收敛到清单里的摘要引用。
+/// 后续镜像检查与启动覆盖都以摘要为准，避免标签在本地漂移后绕过校验。
+fn pin_declared_image_references(
+    images: &[ImageSpec],
+    config: &mut Value,
+) -> Result<(), String> {
+    let Some(services) = config.get_mut("services").and_then(Value::as_object_mut) else {
+        return Ok(());
+    };
+    for service in services.values_mut() {
+        let active = service
+            .get("profiles")
+            .and_then(Value::as_array)
+            .map(|profiles| profiles.is_empty())
+            .unwrap_or(true);
+        if !active {
+            continue;
+        }
         let reference = service
             .get("image")
             .and_then(Value::as_str)
-            .unwrap_or_default();
-        if !bundle
-            .descriptor
-            .images
-            .iter()
-            .any(|image| image.reference == reference)
-        {
-            return Err(format!(
-                "Compose 服务镜像 {reference} 未在交付包镜像清单中声明，请重新构建制品"
-            ));
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let declared = declared_image(images, &reference).ok_or_else(|| {
+            format!("Compose 服务镜像 {reference} 未在交付包镜像清单中声明，请重新构建制品")
+        })?;
+        // 清单未带摘要时不反向覆盖 Compose 已写明的摘要，避免把固定引用降级为标签。
+        let target = if digest_parts(&declared.reference).is_some() {
+            declared.reference.clone()
+        } else {
+            reference.clone()
+        };
+        if target != reference {
+            service["image"] = Value::String(target);
         }
     }
     Ok(())
@@ -2102,7 +2142,10 @@ fn previous_image_snapshots(
         if result.contains_key(reference) {
             continue;
         }
-        if let Some(image) = recorded.iter().find(|image| image.reference == reference) {
+        if let Some(image) = recorded
+            .iter()
+            .find(|image| image_reference_matches(&image.reference, reference))
+        {
             if !super::deployment_image_bindings::valid_image_id(&image.image_id) {
                 return Err(format!("上一版本部署记录中的镜像 {reference} 标识无效"));
             }
@@ -2129,6 +2172,30 @@ fn previous_image_snapshots(
         result.insert(reference.to_string(), image);
     }
     Ok(result.into_values().collect())
+}
+
+/// 只有 Docker 明确返回“卷不存在”时才视为不存在，其他检查失败按错误处理，
+/// 避免瞬时故障把已有数据卷误记为部署前不存在，回滚时误删。
+fn volume_exists(name: &str) -> Result<bool, String> {
+    let mut command = crate::commands::docker_setup::docker_command();
+    command.args(["volume", "inspect", "--", name]);
+    let output = process::run(
+        command,
+        process::Input::Bytes(vec![]),
+        process::Options {
+            timeout: Duration::from_secs(30),
+            ..process::Options::default()
+        },
+    )?;
+    if output.status.success() {
+        return Ok(true);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
+    if stderr.contains("no such volume") {
+        Ok(false)
+    } else {
+        Err(format!("无法确认数据卷 {name} 是否存在：{}", stderr.trim()))
+    }
 }
 
 fn inspect_image(reference: &str) -> Result<Option<ImageSnapshot>, String> {
@@ -2916,5 +2983,81 @@ mod tests {
         assert!(validate_project_container_scope("demo", install, deploy, "|\n")
             .unwrap_err()
             .contains("工作目录标签"));
+    }
+
+    #[test]
+    fn compose_tags_are_pinned_to_declared_digest_references() {
+        let pinned = format!(
+            "bellsoft/liberica-openjdk-rocky:21-cds@sha256:{}",
+            "a".repeat(64)
+        );
+        let images = [ImageSpec {
+            name: "jdk".to_string(),
+            reference: pinned.clone(),
+            role: super::super::bundle::ImageRole::Base,
+            required: true,
+            bundle_file: String::new(),
+        }];
+        let mut tagged = serde_json::json!({
+            "services": { "api": { "image": "bellsoft/liberica-openjdk-rocky:21-cds" } }
+        });
+        assert!(pin_declared_image_references(&images, &mut tagged).is_ok());
+        assert_eq!(
+            tagged["services"]["api"]["image"].as_str(),
+            Some(pinned.as_str())
+        );
+        let mut pinned_config = serde_json::json!({
+            "services": { "api": { "image": pinned.clone() } }
+        });
+        assert!(pin_declared_image_references(&images, &mut pinned_config).is_ok());
+        let mut undeclared = serde_json::json!({
+            "services": { "api": { "image": "nginx:1.27-alpine" } }
+        });
+        assert!(pin_declared_image_references(&images, &mut undeclared).is_err());
+        let mut mismatched_digest = serde_json::json!({
+            "services": { "api": { "image": format!("bellsoft/liberica-openjdk-rocky:21-cds@sha256:{}", "b".repeat(64)) } }
+        });
+        assert!(pin_declared_image_references(&images, &mut mismatched_digest).is_ok());
+        assert_eq!(
+            mismatched_digest["services"]["api"]["image"].as_str(),
+            Some(pinned.as_str())
+        );
+        let mut wrong_case = serde_json::json!({
+            "services": { "api": { "image": "Bellsoft/liberica-openjdk-rocky:21-cds" } }
+        });
+        assert!(pin_declared_image_references(&images, &mut wrong_case).is_err());
+        let ambiguous = [
+            images[0].clone(),
+            ImageSpec {
+                name: "jdk-other".to_string(),
+                reference: format!(
+                    "bellsoft/liberica-openjdk-rocky:21-cds@sha256:{}",
+                    "c".repeat(64)
+                ),
+                role: super::super::bundle::ImageRole::Base,
+                required: true,
+                bundle_file: String::new(),
+            },
+        ];
+        let mut ambiguous_config = serde_json::json!({
+            "services": { "api": { "image": "bellsoft/liberica-openjdk-rocky:21-cds" } }
+        });
+        assert!(pin_declared_image_references(&ambiguous, &mut ambiguous_config).is_ok());
+        assert_eq!(
+            ambiguous_config["services"]["api"]["image"].as_str(),
+            Some(pinned.as_str())
+        );
+    }
+
+    #[test]
+    fn recorded_digest_references_match_compose_tags_only() {
+        let pinned = format!("demo/api:latest@sha256:{}", "a".repeat(64));
+        assert!(image_reference_matches(&pinned, "demo/api:latest"));
+        assert!(image_reference_matches(&pinned, &pinned));
+        assert!(!image_reference_matches(&pinned, "demo/api:v2"));
+        assert!(image_reference_matches(
+            &pinned,
+            &format!("demo/api:latest@sha256:{}", "b".repeat(64))
+        ));
     }
 }
