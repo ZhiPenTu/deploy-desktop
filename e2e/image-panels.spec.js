@@ -86,6 +86,8 @@ test('有数据时展示数量与选择状态，刷新后清空选择', async ({
   await expect(imagesPanel.locator('.el-table__row')).toHaveCount(2);
   await expect(imagesPanel.locator('.card-title-bar .hint')).toHaveText('2 个镜像 · 共 201.0 MB');
   await expect(imagesPanel.locator('.el-table__row').first()).toContainText('可导出');
+  await expect(imagesPanel.locator('.el-table__row').first()).toContainText('2026-10-01 10:00');
+  await expect(imagesPanel.locator('.el-table__row').first()).not.toContainText('10:00:00');
   await expect(imagesPanel.locator('.el-table__row').nth(1)).toContainText('仅可删除');
   await expect(imagesPanel.locator('.selection-hint')).toHaveText('已选择 0 个镜像');
   await expect(imagesPanel.getByRole('button', { name: '导出离线包' })).toBeDisabled();

@@ -59,24 +59,31 @@
       @selection-change="(rows) => emit('selection-change', rows)"
     >
       <el-table-column type="selection" width="44" />
-      <el-table-column label="镜像" min-width="300">
+      <el-table-column label="镜像" min-width="280">
         <template #default="{ row }">
           <code v-if="row.exportable">{{ row.reference }}</code>
           <span v-else class="muted-text">未标记镜像</span>
         </template>
       </el-table-column>
-      <el-table-column label="镜像 ID" width="140">
+      <el-table-column label="镜像 ID" min-width="130">
         <template #default="{ row }">
           <code class="muted-code">{{ formatImageId(row.id) }}</code>
         </template>
       </el-table-column>
-      <el-table-column label="大小" width="110">
-        <template #default="{ row }">{{ row.sizeText || formatSize(row.sizeBytes) }}</template>
+      <el-table-column label="大小" min-width="100">
+        <template #default="{ row }">
+          <span class="meta-text">{{ row.sizeText || formatSize(row.sizeBytes) }}</span>
+        </template>
       </el-table-column>
-      <el-table-column label="创建时间" width="190">
-        <template #default="{ row }">{{ row.createdText || '-' }}</template>
+      <el-table-column label="创建时间" min-width="150">
+        <template #default="{ row }">
+          <span v-if="row.createdText" class="time-text">
+            {{ formatDockerCreated(row.createdText) }}
+          </span>
+          <span v-else class="muted-text">-</span>
+        </template>
       </el-table-column>
-      <el-table-column label="状态" width="110">
+      <el-table-column label="状态" min-width="100">
         <template #default="{ row }">
           <el-tag :type="row.exportable ? 'success' : 'info'" size="small" effect="plain">
             {{ row.exportable ? '可导出' : '仅可删除' }}
@@ -101,7 +108,7 @@
 <script setup>
 import { computed, ref } from 'vue';
 import { Box, Download, Refresh } from '@element-plus/icons-vue';
-import { formatImageId, formatSize } from '../../../shared/format.js';
+import { formatDockerCreated, formatImageId, formatSize } from '../../../shared/format.js';
 
 const props = defineProps({
   images: { type: Array, default: () => [] },
@@ -225,6 +232,27 @@ defineExpose({
 
 .image-table :deep(.muted-code) {
   color: var(--text-muted);
+}
+
+.image-table :deep(.el-table__cell) {
+  vertical-align: middle;
+}
+
+.image-table :deep(.el-table__row td.el-table__cell) {
+  padding: 9px 0;
+}
+
+.meta-text {
+  color: var(--text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.time-text {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .muted-text {

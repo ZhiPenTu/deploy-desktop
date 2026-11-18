@@ -13,6 +13,14 @@ export function formatImageId(id) {
   return value ? value.slice(0, 12) : '-';
 }
 
+/** Docker 返回的镜像创建时间（如 2026-10-28 20:01:18 +0800 CST）：保留年-月-日 时:分。 */
+export function formatDockerCreated(value) {
+  const text = String(value || '').trim();
+  if (!text) return '-';
+  const match = text.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})/);
+  return match ? `${match[1]} ${match[2]}` : text;
+}
+
 /** 完整时间：年-月-日 时:分:秒。 */
 export function formatTimestamp(ms) {
   if (!ms) return '-';
