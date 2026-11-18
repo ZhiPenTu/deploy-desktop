@@ -210,21 +210,9 @@ fn get_memory_info(os: &str) -> (u64, u64) {
 }
 
 fn get_disk_free_gb(path: &str) -> f64 {
-    let output = Command::new("df").args(["-k", path]).output();
-    if let Ok(out) = output {
-        let text = String::from_utf8_lossy(&out.stdout);
-        let lines: Vec<&str> = text.lines().collect();
-        if lines.len() >= 2 {
-            let parts: Vec<&str> = lines[1].split_whitespace().collect();
-            // 在 df -k 输出中，第4列通常是可用容量 (1K-blocks)
-            if parts.len() >= 4 {
-                if let Ok(avail_kb) = parts[3].parse::<f64>() {
-                    return (avail_kb / 1024.0 / 1024.0 * 10.0).round() / 10.0;
-                }
-            }
-        }
-    }
-    0.0
+    crate::core::disk::available_bytes(std::path::Path::new(path))
+        .map(|bytes| (bytes as f64 / 1024.0 / 1024.0 / 1024.0 * 10.0).round() / 10.0)
+        .unwrap_or(0.0)
 }
 
 fn check_docker_status() -> (bool, Option<String>, bool, bool) {
@@ -307,16 +295,43 @@ fn probe_port_occupant(port: u16) -> String {
             }
         }
     }
-    // 尝试 lsof 探测
-    if let Ok(out) = Command::new("lsof").args(["-i", &format!(":{}", port)]).output() {
-        let text = String::from_utf8_lossy(&out.stdout);
-        let lines: Vec<&str> = text.lines().collect();
-        if lines.len() >= 2 {
-            let parts: Vec<&str> = lines[1].split_whitespace().collect();
-            if !parts.is_empty() {
-                return format!("进程 {}", parts[0]);
-            }
-        }
+    // 探测本机占用端口的进程
+    if let Some(name) = local_port_owner(port) {
+        return format!("进程 {name}");
     }
     "占用中".to_string()
+}
+
+#[cfg(unix)]
+fn local_port_owner(port: u16) -> Option<String> {
+    let output = Command::new("lsof")
+        .args(["-i", &format!(":{}", port)])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.lines()
+        .nth(1)
+        .and_then(|line| line.split_whitespace().next())
+        .map(str::to_string)
+}
+
+#[cfg(windows)]
+fn local_port_owner(port: u16) -> Option<String> {
+    // 端口来自 u16，不拼接外部输入；PowerShell 为 Windows 自带组件。
+    let script = format!(
+        "$connection = Get-NetTCPConnection -LocalPort {port} -ErrorAction SilentlyContinue | Select-Object -First 1; if ($connection) {{ (Get-Process -Id $connection.OwningProcess -ErrorAction SilentlyContinue).ProcessName }}"
+    );
+    let mut command = Command::new("powershell");
+    crate::core::process::hide_console(&mut command);
+    let output = command
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output()
+        .ok()?;
+    let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!name.is_empty()).then_some(name)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn local_port_owner(_port: u16) -> Option<String> {
+    None
 }

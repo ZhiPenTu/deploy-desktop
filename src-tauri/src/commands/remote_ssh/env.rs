@@ -281,6 +281,19 @@ pub(crate) fn run_remote_deploy_action_blocking(
             })
         }
         "deploy-all" | "server-only" | "gateway-app-only" | "frontend-only" => {
+            #[cfg(windows)]
+            {
+                Ok(SshDeployExecutionResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(
+                        "Windows 不支持本地构建与同步部署脚本，请在 macOS 或 Linux 上执行，或改用远程部署。"
+                            .to_string(),
+                    ),
+                })
+            }
+            #[cfg(not(windows))]
+            {
             let Some(script) = find_deploy_script() else {
                 return Ok(SshDeployExecutionResult {
                     success: false,
@@ -333,6 +346,7 @@ pub(crate) fn run_remote_deploy_action_blocking(
                     Some("部署指令返回非零退出码".to_string())
                 },
             })
+            }
         }
         other => Ok(SshDeployExecutionResult {
             success: false,
@@ -342,6 +356,7 @@ pub(crate) fn run_remote_deploy_action_blocking(
     }
 }
 
+#[cfg(not(windows))]
 pub(crate) fn find_deploy_script() -> Option<String> {
     let mut candidates = Vec::new();
     if let Ok(mut dir) = std::env::current_dir() {

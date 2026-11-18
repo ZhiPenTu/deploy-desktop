@@ -1158,58 +1158,9 @@ fn check_backup_space(plan: &UpdatePlan) -> Result<(), String> {
                     .saturating_add(tree_bytes(&item.source)?),
             )
         })?;
-    #[cfg(unix)]
-    {
-        let output = Command::new("df")
-            .arg("-Pk")
-            .arg(&plan.root)
-            .output()
-            .map_err(|_| "无法检查部署分区空间".to_string())?;
-        let text = String::from_utf8_lossy(&output.stdout);
-        let available = text
-            .lines()
-            .last()
-            .and_then(|line| line.split_whitespace().nth(3))
-            .and_then(|value| value.parse::<u64>().ok())
-            .ok_or_else(|| "无法检查部署分区空间".to_string())?
-            * 1024;
-        if !output.status.success() || available < required {
-            return Err("部署分区空间不足，请清理后再更新".to_string());
-        }
-    }
-    #[cfg(windows)]
-    {
-        // 命令是固定文本，不把用户路径插入 PowerShell 表达式。
-        let mut command = Command::new("powershell");
-        crate::core::process::hide_console(&mut command);
-        let output = command
-            .args(["-NoProfile", "-NonInteractive", "-Command", "Get-PSDrive -PSProvider FileSystem | Select-Object Root,Free | ConvertTo-Json -Compress"])
-            .output().map_err(|_| "无法检查部署分区空间".to_string())?;
-        if !output.status.success() {
-            return Err("无法检查部署分区空间".to_string());
-        }
-        let drives: Value = serde_json::from_slice(&output.stdout)
-            .map_err(|_| "无法检查部署分区空间".to_string())?;
-        let entries: Vec<&Value> = match drives.as_array() {
-            Some(entries) => entries.iter().collect(),
-            None => vec![&drives],
-        };
-        let available = entries
-            .iter()
-            .find_map(|drive| {
-                let drive_root = drive.get("Root")?.as_str()?;
-                plan.root
-                    .to_string_lossy()
-                    .trim_start_matches(r"\\?\")
-                    .to_lowercase()
-                    .starts_with(&drive_root.to_lowercase())
-                    .then(|| drive.get("Free").and_then(Value::as_u64))
-                    .flatten()
-            })
-            .ok_or_else(|| "无法检查部署分区空间".to_string())?;
-        if available < required {
-            return Err("部署分区空间不足，请清理后再更新".to_string());
-        }
+    let available = crate::core::disk::available_bytes(&plan.root)?;
+    if available < required {
+        return Err("部署分区空间不足，请清理后再更新".to_string());
     }
     Ok(())
 }

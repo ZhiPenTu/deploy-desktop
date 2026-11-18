@@ -1,7 +1,7 @@
 //! Bounded process execution for SSH scripts and binary uploads.
 //! All pipes are drained concurrently; timeout covers input, output and process exit.
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -27,6 +27,8 @@ pub enum Input {
         path: PathBuf,
         progress: Option<InputProgress>,
     },
+    /// 目录在进程内打包为 tar.gz 后写入标准输入，不依赖本机 `tar` 命令。
+    Directory(PathBuf),
     Producer(Command),
 }
 
@@ -223,6 +225,9 @@ async fn feed(
                     }
                 }
             }
+            Input::Directory(root) => {
+                write_directory(root, &mut stdin).await?;
+            }
             Input::Producer(_) => unreachable!(),
         }
         false
@@ -232,6 +237,95 @@ async fn feed(
         .await
         .map_err(|e| format!("结束输入失败: {e}"))?;
     Ok(truncated)
+}
+
+/// 在后台线程把目录打包为 tar.gz，通过通道交给异步写入，避免占用内存或临时磁盘。
+async fn write_directory(
+    root: PathBuf,
+    stdin: &mut tokio::process::ChildStdin,
+) -> Result<(), String> {
+    let (sender, mut receiver) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+    let task = tokio::task::spawn_blocking(move || pack_directory(&root, sender));
+    let mut copy_error = None;
+    while let Some(chunk) = receiver.recv().await {
+        if let Err(error) = stdin.write_all(&chunk).await {
+            copy_error = Some(format!("传输目录失败: {error}"));
+            break;
+        }
+    }
+    drop(receiver);
+    let packed = task
+        .await
+        .map_err(|error| format!("打包目录失败: {error}"))?;
+    if let Some(error) = copy_error {
+        return Err(error);
+    }
+    packed
+}
+
+fn pack_directory(
+    root: &Path,
+    sender: tokio::sync::mpsc::Sender<Vec<u8>>,
+) -> Result<(), String> {
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+
+    let writer = ChannelWriter {
+        sender,
+        buffer: Vec::with_capacity(64 * 1024),
+        closed: false,
+    };
+    let mut builder = tar::Builder::new(GzEncoder::new(writer, Compression::default()));
+    builder.follow_symlinks(false);
+    builder
+        .append_dir_all(".", root)
+        .map_err(|error| format!("打包目录失败: {error}"))?;
+    let encoder = builder
+        .into_inner()
+        .map_err(|error| format!("打包目录失败: {error}"))?;
+    let mut writer = encoder
+        .finish()
+        .map_err(|error| format!("打包目录失败: {error}"))?;
+    std::io::Write::flush(&mut writer).map_err(|error| format!("打包目录失败: {error}"))?;
+    Ok(())
+}
+
+/// 把阻塞写入转换为异步通道发送；接收端中止时返回 `BrokenPipe` 结束打包。
+struct ChannelWriter {
+    sender: tokio::sync::mpsc::Sender<Vec<u8>>,
+    buffer: Vec<u8>,
+    closed: bool,
+}
+
+impl ChannelWriter {
+    fn flush_buffer(&mut self) -> io::Result<()> {
+        if self.buffer.is_empty() {
+            return Ok(());
+        }
+        let chunk = std::mem::take(&mut self.buffer);
+        if self.sender.blocking_send(chunk).is_err() {
+            self.closed = true;
+            return Err(io::Error::new(io::ErrorKind::BrokenPipe, "传输已中止"));
+        }
+        Ok(())
+    }
+}
+
+impl io::Write for ChannelWriter {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        if self.closed {
+            return Err(io::Error::new(io::ErrorKind::BrokenPipe, "传输已中止"));
+        }
+        self.buffer.extend_from_slice(data);
+        if self.buffer.len() >= 64 * 1024 {
+            self.flush_buffer()?;
+        }
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.flush_buffer()
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -254,6 +348,31 @@ mod tests {
         assert_eq!(output.stdout.len(), 200000);
         assert_eq!(output.stderr.len(), 200000);
     }
+    #[test]
+    fn packs_directory_into_tar_gz_stream() {
+        let root = std::env::temp_dir().join(format!(
+            "deploy-process-dir-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("a.txt"), b"hello").unwrap();
+        std::fs::write(root.join("sub/b.txt"), b"world").unwrap();
+
+        let output = run(
+            bash("tar -tzf -"),
+            Input::Directory(root.clone()),
+            Options::default(),
+        )
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(output.status.success());
+        let listing = String::from_utf8_lossy(&output.stdout);
+        assert!(listing.contains("a.txt"), "{listing}");
+        assert!(listing.contains("sub/b.txt"), "{listing}");
+    }
+
     #[test]
     fn early_exit_does_not_hide_remote_error() {
         let output = run(

@@ -6,6 +6,7 @@ pub mod atomic_file;
 pub mod backup;
 pub mod compose;
 pub mod config;
+pub mod disk;
 pub mod file_lock;
 pub mod json_store;
 pub mod path_guard;

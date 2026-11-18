@@ -427,9 +427,13 @@ pub(crate) fn open_external_url_blocking(url: String) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let status = Command::new("open").arg(parsed.as_str()).status();
     #[cfg(target_os = "windows")]
-    let status = Command::new("cmd")
-        .args(["/C", "start", "", parsed.as_str()])
-        .status();
+    let status = {
+        let mut command = Command::new("rundll32.exe");
+        crate::core::process::hide_console(&mut command);
+        command
+            .args(["url.dll,FileProtocolHandler", parsed.as_str()])
+            .status()
+    };
     #[cfg(all(unix, not(target_os = "macos")))]
     let status = Command::new("xdg-open").arg(parsed.as_str()).status();
 

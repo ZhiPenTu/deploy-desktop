@@ -1,8 +1,8 @@
 use super::scripts;
-use crate::commands::remote_ssh::{find_binary, run_ssh_script_with_timeout, ssh_base_command};
+use crate::commands::remote_ssh::{run_ssh_script_with_timeout, ssh_base_command};
 use crate::core::{process, shell};
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 use std::time::Duration;
 
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(30 * 60);
@@ -163,8 +163,6 @@ pub(super) fn upload_dir_replace(
     if !local.is_dir() {
         return Err("上传来源不是目录，请检查制品内容".to_string());
     }
-    let mut tar = Command::new(find_binary("tar"));
-    tar.args(["-czf", "-", "-C"]).arg(local).arg(".");
     upload_staged(
         host,
         port,
@@ -172,6 +170,6 @@ pub(super) fn upload_dir_replace(
         key,
         remote,
         "receive-dir",
-        process::Input::Producer(tar),
+        process::Input::Directory(local.to_path_buf()),
     )
 }

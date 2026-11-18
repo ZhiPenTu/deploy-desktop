@@ -213,6 +213,12 @@ pub(crate) fn deploy_public_key_with_password(
 
     let expect = find_binary("expect");
     if !Path::new(&expect).is_file() {
+        #[cfg(windows)]
+        return Err(
+            "Windows 不支持使用密码自动下发公钥，请改用密钥登录，或手动将公钥添加到目标机"
+                .to_string(),
+        );
+        #[cfg(not(windows))]
         return Err("系统未安装 sshpass 或 expect，无法自动使用密码登录".to_string());
     }
 

@@ -39,11 +39,8 @@ async function diskFreeGb(targetDir) {
     const stat = await fs.statfs(checkPath);
     return Math.round((stat.bavail * stat.bsize) / 1024 / 1024 / 1024 * 10) / 10;
   } catch {
-    const result = await run('df', ['-Pk', checkPath], { timeoutMs: 10000 });
-    if (result.code !== 0) return 0;
-    const line = result.stdout.split('\n')[1];
-    const parts = line?.split(/\s+/);
-    return parts ? Math.round((Number(parts[3]) / 1024 / 1024) * 10) / 10 : 0;
+    // fs.statfs 在支持的平台上直接返回结果；失败时不再调用仅 Unix 可用的 df。
+    return 0;
   }
 }
 

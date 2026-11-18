@@ -43,6 +43,8 @@ cargo check --manifest-path src-tauri/Cargo.toml
 
 部署执行与 Bash 模板的边界、扩展方式和故障测试见 [部署执行与扩展](docs/deployment-execution.md)。
 
+涉及外部命令（`Command::new`、`spawn`、Bash 模板）时，先阅读 [外部命令与跨平台清单](docs/cross-platform-commands.md)，确认所用命令在 Windows、macOS、Linux 上的可用性；新增或修改命令后同步更新该清单。
+
 涉及 MCP 时执行：
 
 ```bash

@@ -2827,64 +2827,7 @@ fn ensure_preserved_paths_untouched(
 }
 
 fn available_disk_bytes(path: &Path) -> Result<u64, String> {
-    let anchor = if path.exists() {
-        path.to_path_buf()
-    } else {
-        path.parent().unwrap_or(path).to_path_buf()
-    };
-    #[cfg(unix)]
-    {
-        let output = Command::new("df")
-            .arg("-Pk")
-            .arg(&anchor)
-            .output()
-            .map_err(|_| "无法检查部署分区空间".to_string())?;
-        let text = String::from_utf8_lossy(&output.stdout);
-        text.lines()
-            .last()
-            .and_then(|line| line.split_whitespace().nth(3))
-            .and_then(|value| value.parse::<u64>().ok())
-            .map(|kb| kb * 1024)
-            .ok_or_else(|| "无法检查部署分区空间".to_string())
-    }
-    #[cfg(windows)]
-    {
-        let mut command = Command::new("powershell");
-        crate::core::process::hide_console(&mut command);
-        let output = command
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "Get-PSDrive -PSProvider FileSystem | Select-Object Root,Free | ConvertTo-Json -Compress",
-            ])
-            .output()
-            .map_err(|_| "无法检查部署分区空间".to_string())?;
-        let drives: Value = serde_json::from_slice(&output.stdout)
-            .map_err(|_| "无法检查部署分区空间".to_string())?;
-        let entries: Vec<&Value> = match drives.as_array() {
-            Some(entries) => entries.iter().collect(),
-            None => vec![&drives],
-        };
-        let root = anchor
-            .to_string_lossy()
-            .trim_start_matches(r"\\?\")
-            .to_lowercase();
-        entries
-            .iter()
-            .find_map(|drive| {
-                let drive_root = drive.get("Root")?.as_str()?.to_lowercase();
-                root.starts_with(&drive_root)
-                    .then(|| drive.get("Free").and_then(Value::as_u64))
-                    .flatten()
-            })
-            .ok_or_else(|| "无法检查部署分区空间".to_string())
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = anchor;
-        Ok(u64::MAX)
-    }
+    crate::core::disk::available_bytes(path)
 }
 
 #[cfg(test)]
