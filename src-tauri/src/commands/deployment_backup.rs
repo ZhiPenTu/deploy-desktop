@@ -12,16 +12,19 @@
 
 use crate::commands::{deployment_tx, remote_ssh, version_deploy};
 use crate::core::{backup, path_guard, shell};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
-use std::time::UNIX_EPOCH;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const BACKUP_DIR: &str = "backup";
 const UPDATE_PREFIX: &str = "update-";
 const TRANSACTION_PREFIX: &str = "deploy-";
 const SNAPSHOT_DIR: &str = "snapshot";
 const JOURNAL_FILE: &str = "journal.json";
+const BACKUP_META_DIR: &str = ".meta";
+const UPDATING_MARKER: &str = ".updating";
+const UPDATING_STALE_SECS: u64 = 6 * 60 * 60;
 const REMOTE_CLEANUP_TIMEOUT_SECS: u64 = 600;
 
 #[derive(Debug, Clone, Serialize)]
@@ -29,13 +32,23 @@ const REMOTE_CLEANUP_TIMEOUT_SECS: u64 = 600;
 pub struct DeploymentBackupEntry {
     pub name: String,
     pub kind: String,
+    /// 备份生成时部署目录中的版本；旧备份没有版本标记时为空。
+    pub version: String,
     pub bytes: u64,
     pub modified_at: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeploymentBackupSelection {
+    pub kind: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeploymentBackupOverview {
+    pub current_version: String,
     pub update_backups: Vec<DeploymentBackupEntry>,
     pub transaction_snapshots: Vec<DeploymentBackupEntry>,
     pub update_bytes: u64,
@@ -48,7 +61,7 @@ pub struct DeploymentBackupOverview {
 pub struct DeploymentBackupCleanup {
     pub removed: usize,
     pub freed_bytes: u64,
-    pub kept: usize,
+    pub skipped: usize,
 }
 
 #[tauri::command]
@@ -61,8 +74,9 @@ pub async fn inspect_deployment_backups(
 #[tauri::command]
 pub async fn clean_deployment_backups(
     install_dir: String,
+    selections: Vec<DeploymentBackupSelection>,
 ) -> Result<DeploymentBackupCleanup, String> {
-    crate::commands::blocking::run(move || clean_local(&install_dir)).await
+    crate::commands::blocking::run(move || clean_local(&install_dir, selections)).await
 }
 
 #[tauri::command]
@@ -86,66 +100,134 @@ pub async fn clean_remote_deployment_backups(
     user: String,
     key_path: Option<String>,
     install_dir: String,
+    selections: Vec<DeploymentBackupSelection>,
 ) -> Result<DeploymentBackupCleanup, String> {
-    crate::commands::blocking::run(move || clean_remote(&host, port, &user, key_path, &install_dir))
-        .await
+    crate::commands::blocking::run(move || {
+        clean_remote(&host, port, &user, key_path, &install_dir, selections)
+    })
+    .await
 }
 
 fn inspect_local(install_dir: &str) -> Result<DeploymentBackupOverview, String> {
     let install = version_deploy::resolve_install_root(install_dir, true)?;
     let update_backups = local_update_backups(&install)?;
     let transaction_snapshots = local_transaction_snapshots(&install)?;
-    Ok(overview(update_backups, transaction_snapshots))
+    Ok(overview(
+        update_backups,
+        transaction_snapshots,
+        deployed_version(&install),
+    ))
 }
 
-fn clean_local(install_dir: &str) -> Result<DeploymentBackupCleanup, String> {
+fn clean_local(
+    install_dir: &str,
+    selections: Vec<DeploymentBackupSelection>,
+) -> Result<DeploymentBackupCleanup, String> {
+    if selections.is_empty() {
+        return Err("请选择要删除的备份".to_string());
+    }
     let install = version_deploy::resolve_install_root(install_dir, true)?;
     let _lock = deployment_tx::DeploymentLock::acquire(&install)?;
     let update_backups = local_update_backups(&install)?;
     let transaction_snapshots = local_transaction_snapshots(&install)?;
 
-    // 增量更新在备份目录中复制文件时不会全程持有部署锁；始终保留最新一份
-    // 更新备份，避免把正在写入或刚生成的回滚副本当作历史数据删除。
-    let keep = update_backups.first().map(|entry| entry.name.clone());
     let mut result = DeploymentBackupCleanup {
         removed: 0,
         freed_bytes: 0,
-        kept: 0,
+        skipped: 0,
     };
-    for entry in &update_backups {
-        if keep.as_deref() == Some(entry.name.as_str()) {
-            result.kept += 1;
+    let mut seen = std::collections::HashSet::new();
+    for selection in selections {
+        let kind = selection.kind.trim();
+        let name = selection.name.trim();
+        if !seen.insert((kind.to_string(), name.to_string())) {
             continue;
         }
-        let target = install.join(BACKUP_DIR).join(&entry.name);
-        remove_checked(&install.join(BACKUP_DIR), &target, &entry.name, &mut result).map_err(
-            |error| {
-                format!(
-                    "{error}；已清理 {} 项，释放 {} 字节",
-                    result.removed, result.freed_bytes
-                )
-            },
-        )?;
-    }
-    for entry in &transaction_snapshots {
-        let target = install
-            .join(deployment_tx::TRANSACTIONS_DIR)
-            .join(&entry.name)
-            .join(SNAPSHOT_DIR);
-        remove_checked(
-            &install.join(deployment_tx::TRANSACTIONS_DIR),
-            &target,
-            &entry.name,
-            &mut result,
-        )
-        .map_err(|error| {
+        let target = match kind {
+            "update" => update_backups
+                .iter()
+                .find(|entry| entry.name == name)
+                .map(|_| {
+                    (
+                        install.join(BACKUP_DIR),
+                        install.join(BACKUP_DIR).join(name),
+                    )
+                }),
+            "transaction" => transaction_snapshots
+                .iter()
+                .find(|entry| entry.name == name)
+                .map(|_| {
+                    (
+                        install.join(deployment_tx::TRANSACTIONS_DIR),
+                        install
+                            .join(deployment_tx::TRANSACTIONS_DIR)
+                            .join(name)
+                            .join(SNAPSHOT_DIR),
+                    )
+                }),
+            _ => None,
+        };
+        let Some((base, path)) = target else {
+            result.skipped += 1;
+            continue;
+        };
+        if kind == "update" {
+            ensure_backup_meta_dir(&install)?;
+            ensure_backup_meta_entry(&install, name)?;
+        }
+        remove_checked(&base, &path, name, &mut result).map_err(|error| {
             format!(
                 "{error}；已清理 {} 项，释放 {} 字节",
                 result.removed, result.freed_bytes
             )
         })?;
+        if kind == "update" {
+            remove_backup_meta(&install, name)?;
+        }
     }
     Ok(result)
+}
+
+fn ensure_backup_meta_dir(install: &Path) -> Result<bool, String> {
+    ensure_real_dir(
+        &install.join(BACKUP_DIR).join(BACKUP_META_DIR),
+        "备份版本目录",
+    )
+}
+
+fn ensure_backup_meta_entry(install: &Path, name: &str) -> Result<(), String> {
+    if !ensure_backup_meta_dir(install)? {
+        return Ok(());
+    }
+    let path = install
+        .join(BACKUP_DIR)
+        .join(BACKUP_META_DIR)
+        .join(format!("{name}.json"));
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || metadata.is_file() => Ok(()),
+        Ok(_) => Err(format!("备份 {name} 的版本信息不是普通文件，已保留备份")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("读取备份 {name} 的版本信息失败：{error}")),
+    }
+}
+
+fn remove_backup_meta(install: &Path, name: &str) -> Result<(), String> {
+    if !ensure_backup_meta_dir(install)? {
+        return Ok(());
+    }
+    let path = install
+        .join(BACKUP_DIR)
+        .join(BACKUP_META_DIR)
+        .join(format!("{name}.json"));
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || metadata.is_file() => {
+            fs::remove_file(&path)
+                .map_err(|error| format!("删除备份 {name} 的版本信息失败：{error}"))
+        }
+        Ok(_) => Err(format!("备份 {name} 的版本信息不是普通文件，已保留")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("读取备份 {name} 的版本信息失败：{error}")),
+    }
 }
 
 fn remove_checked(
@@ -160,7 +242,10 @@ fn remove_checked(
     ensure_no_symlink_chain(base, target, name)?;
     let metadata = match fs::symlink_metadata(target) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            result.skipped += 1;
+            return Ok(());
+        }
         Err(error) => return Err(format!("读取备份 {name} 失败：{error}")),
     };
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -188,9 +273,13 @@ fn inspect_remote(
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(remote_error("读取目标机部署备份失败", &stderr));
     }
-    let (update_backups, transaction_snapshots) =
+    let (update_backups, transaction_snapshots, current_version) =
         parse_remote_entries(&String::from_utf8_lossy(&output.stdout))?;
-    Ok(overview(update_backups, transaction_snapshots))
+    Ok(overview(
+        update_backups,
+        transaction_snapshots,
+        current_version,
+    ))
 }
 
 fn clean_remote(
@@ -199,7 +288,11 @@ fn clean_remote(
     user: &str,
     key_path: Option<String>,
     install_dir: &str,
+    selections: Vec<DeploymentBackupSelection>,
 ) -> Result<DeploymentBackupCleanup, String> {
+    if selections.is_empty() {
+        return Err("请选择要删除的备份".to_string());
+    }
     let install = validate_remote_install(install_dir)?;
     let key = remote_ssh::resolve_existing_key(key_path, host)?;
     let scan = remote_scan_script(&install);
@@ -208,41 +301,51 @@ fn clean_remote(
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(remote_error("读取目标机部署备份失败", &stderr));
     }
-    let (update_backups, transaction_snapshots) =
+    let (update_backups, transaction_snapshots, _) =
         parse_remote_entries(&String::from_utf8_lossy(&output.stdout))?;
-    let keep = update_backups.first().map(|entry| entry.name.clone());
 
-    let mut targets = Vec::new();
-    let mut removed = 0usize;
-    let mut freed_bytes = 0u64;
-    let mut kept = 0usize;
-    for entry in &update_backups {
-        if keep.as_deref() == Some(entry.name.as_str()) {
-            kept += 1;
+    let mut update_targets = Vec::new();
+    let mut transaction_targets = Vec::new();
+    let mut selected_entries: Vec<(&DeploymentBackupEntry, String)> = Vec::new();
+    let mut skipped = 0usize;
+    let mut seen = std::collections::HashSet::new();
+    for selection in selections {
+        let kind = selection.kind.trim();
+        let name = selection.name.trim();
+        if !seen.insert((kind.to_string(), name.to_string())) {
             continue;
         }
-        targets.push(format!("{install}/{BACKUP_DIR}/{}", entry.name));
-        removed += 1;
-        freed_bytes = freed_bytes.saturating_add(entry.bytes);
+        let entry = match kind {
+            "update" => update_backups.iter().find(|entry| entry.name == name),
+            "transaction" => transaction_snapshots
+                .iter()
+                .find(|entry| entry.name == name),
+            _ => None,
+        };
+        let Some(entry) = entry else {
+            skipped += 1;
+            continue;
+        };
+        if kind == "update" {
+            update_targets.push(format!("{install}/{BACKUP_DIR}/{}", entry.name));
+        } else {
+            transaction_targets.push(format!(
+                "{install}/{}/{}",
+                deployment_tx::TRANSACTIONS_DIR,
+                entry.name
+            ));
+        }
+        selected_entries.push((entry, kind.to_string()));
     }
-    for entry in &transaction_snapshots {
-        targets.push(format!(
-            "{install}/{}/{}/{SNAPSHOT_DIR}",
-            deployment_tx::TRANSACTIONS_DIR,
-            entry.name
-        ));
-        removed += 1;
-        freed_bytes = freed_bytes.saturating_add(entry.bytes);
-    }
-    if targets.is_empty() {
+    if update_targets.is_empty() && transaction_targets.is_empty() {
         return Ok(DeploymentBackupCleanup {
-            removed,
-            freed_bytes,
-            kept,
+            removed: 0,
+            freed_bytes: 0,
+            skipped,
         });
     }
 
-    let script = remote_cleanup_script(&install, &targets);
+    let script = remote_cleanup_script(&install, &update_targets, &transaction_targets);
     let output = remote_ssh::run_ssh_script_with_timeout(
         host,
         port,
@@ -255,20 +358,54 @@ fn clean_remote(
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(remote_error("清理目标机部署备份未完成", &stderr));
     }
+
+    // 脚本逐项报告结果，避免用过滤后的列表把“跳过”误算成已删除。
+    let mut results = std::collections::HashMap::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let mut parts = line.split('\t');
+        if parts.next() != Some("RESULT") {
+            continue;
+        }
+        let Some(state) = parts.next() else {
+            continue;
+        };
+        let Some(kind) = parts.next() else {
+            continue;
+        };
+        let Some(name) = parts.next() else {
+            continue;
+        };
+        results.insert(
+            (kind.to_string(), name.to_string()),
+            state.eq_ignore_ascii_case("removed"),
+        );
+    }
+    let mut removed = 0usize;
+    let mut freed_bytes = 0u64;
+    for (entry, kind) in selected_entries {
+        if results.get(&(kind.clone(), entry.name.clone())) == Some(&true) {
+            removed += 1;
+            freed_bytes = freed_bytes.saturating_add(entry.bytes);
+        } else {
+            skipped += 1;
+        }
+    }
     Ok(DeploymentBackupCleanup {
         removed,
         freed_bytes,
-        kept,
+        skipped,
     })
 }
 
 fn overview(
     update_backups: Vec<DeploymentBackupEntry>,
     transaction_snapshots: Vec<DeploymentBackupEntry>,
+    current_version: String,
 ) -> DeploymentBackupOverview {
     let update_bytes = update_backups.iter().map(|entry| entry.bytes).sum();
     let transaction_bytes = transaction_snapshots.iter().map(|entry| entry.bytes).sum();
     DeploymentBackupOverview {
+        current_version,
         update_backups,
         transaction_snapshots,
         update_bytes,
@@ -328,6 +465,7 @@ fn local_update_backups(install: &Path) -> Result<Vec<DeploymentBackupEntry>, St
     if !ensure_real_dir(&root, "备份目录")? {
         return Ok(Vec::new());
     }
+    ensure_real_dir(&root.join(BACKUP_META_DIR), "备份版本目录")?;
     let directory = fs::read_dir(&root).map_err(|error| format!("读取备份目录失败：{error}"))?;
     let mut entries = Vec::new();
     for entry in directory {
@@ -343,7 +481,11 @@ fn local_update_backups(install: &Path) -> Result<Vec<DeploymentBackupEntry>, St
             continue;
         }
         let path = entry.path();
+        if backup_is_updating(&path) {
+            continue;
+        }
         entries.push(DeploymentBackupEntry {
+            version: read_update_backup_version(install, &name),
             name,
             kind: "update".to_string(),
             bytes: tree_bytes(&path)?,
@@ -378,7 +520,10 @@ fn local_transaction_snapshots(install: &Path) -> Result<Vec<DeploymentBackupEnt
         if !file_type.is_dir() || file_type.is_symlink() {
             continue;
         }
-        if !transaction_is_finished(&entry.path()) {
+        let Some((state, version)) = transaction_state_and_version(&entry.path()) else {
+            continue;
+        };
+        if !matches!(state.as_str(), "committed" | "recovered") {
             continue;
         }
         let snapshot = entry.path().join(SNAPSHOT_DIR);
@@ -393,6 +538,7 @@ fn local_transaction_snapshots(install: &Path) -> Result<Vec<DeploymentBackupEnt
         entries.push(DeploymentBackupEntry {
             name,
             kind: "transaction".to_string(),
+            version,
             bytes: tree_bytes(&snapshot)?,
             modified_at: modified_ms(&snapshot),
         });
@@ -401,17 +547,94 @@ fn local_transaction_snapshots(install: &Path) -> Result<Vec<DeploymentBackupEnt
     Ok(entries)
 }
 
-fn transaction_is_finished(transaction: &Path) -> bool {
-    let Ok(text) = fs::read_to_string(transaction.join(JOURNAL_FILE)) else {
-        return false;
+fn transaction_state_and_version(transaction: &Path) -> Option<(String, String)> {
+    let path = transaction.join(JOURNAL_FILE);
+    let metadata = fs::symlink_metadata(&path).ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 64 * 1024 {
+        return None;
+    }
+    let text = fs::read_to_string(path).ok()?;
+    let value = serde_json::from_str::<serde_json::Value>(&text).ok()?;
+    let state = value
+        .get("state")
+        .and_then(|state| state.as_str())?
+        .to_string();
+    let previous = value
+        .get("previousVersion")
+        .and_then(|version| version.as_str())
+        .unwrap_or("");
+    Some((state, sanitize_version(previous)))
+}
+
+fn read_update_backup_version(install: &Path, name: &str) -> String {
+    let path = install
+        .join(BACKUP_DIR)
+        .join(BACKUP_META_DIR)
+        .join(format!("{name}.json"));
+    let Ok(metadata) = fs::symlink_metadata(&path) else {
+        return String::new();
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 4096 {
+        return String::new();
+    }
+    let Ok(text) = fs::read_to_string(path) else {
+        return String::new();
     };
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return String::new();
+    };
+    sanitize_version(
+        value
+            .get("version")
+            .and_then(|version| version.as_str())
+            .unwrap_or(""),
+    )
+}
+
+fn deployed_version(install: &Path) -> String {
+    let path = install.join(".deploy-desktop").join("deployed.json");
+    let Ok(text) = fs::read_to_string(path) else {
+        return String::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return String::new();
+    };
+    sanitize_version(
+        value
+            .get("version")
+            .and_then(|version| version.as_str())
+            .unwrap_or(""),
+    )
+}
+
+/// 版本号来自用户环境，展示前限制为常见的版本字符并限制长度。
+pub(crate) fn sanitize_version(raw: &str) -> String {
+    let text = raw.trim();
+    if text.is_empty() || text.len() > 128 {
+        return String::new();
+    }
+    if !text
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b'+'))
+    {
+        return String::new();
+    }
+    text.to_string()
+}
+
+/// 更新过程中的备份会写入 `.updating`；超过保留窗口仍存在的标记视为更新进程已中断。
+fn backup_is_updating(backup: &Path) -> bool {
+    let marker = backup.join(UPDATING_MARKER);
+    let Ok(metadata) = fs::metadata(marker) else {
         return false;
     };
-    matches!(
-        value.get("state").and_then(|state| state.as_str()),
-        Some("committed") | Some("recovered")
-    )
+    let Ok(modified) = metadata.modified() else {
+        return false;
+    };
+    let Ok(age) = SystemTime::now().duration_since(modified) else {
+        return false;
+    };
+    age.as_secs() < UPDATING_STALE_SECS
 }
 
 fn sort_entries(entries: &mut [DeploymentBackupEntry]) {
@@ -542,33 +765,42 @@ ensure_no_symlink_path() {{
 }}
 ensure_no_symlink_path "$INSTALL"
 [ ! -L "$INSTALL/backup" ] || {{ echo '备份目录不能是符号链接' >&2; exit 3; }}
+[ ! -L "$INSTALL/backup/.meta" ] && {{ [ ! -e "$INSTALL/backup/.meta" ] || [ -d "$INSTALL/backup/.meta" ]; }} || {{ echo '备份版本目录无效' >&2; exit 3; }}
 [ ! -L "$INSTALL/.deploy-desktop" ] || {{ echo '部署状态目录不能是符号链接' >&2; exit 3; }}
 [ ! -L "$INSTALL/.deploy-desktop/transactions" ] || {{ echo '部署事务目录不能是符号链接' >&2; exit 3; }}
 emit_update() {{
   local d=$1
-  local name bytes mtime
+  local name bytes mtime version now updated
   [ -d "$d" ] || return 0
   [ ! -L "$d" ] || return 0
+  if [ -f "$d/.updating" ]; then
+    now=$(date +%s)
+    updated=$(stat -c %Y -- "$d/.updating" 2>/dev/null || stat -f %m -- "$d/.updating" 2>/dev/null || echo 0)
+    if [ "$updated" -gt 0 ] && [ $((now - updated)) -lt 21600 ]; then
+      return 0
+    fi
+  fi
   name=${{d##*/}}
   bytes=$(du -sk -- "$d" 2>/dev/null | awk '{{print $1 * 1024}}') || bytes=0
   mtime=$(stat -c %Y -- "$d" 2>/dev/null || stat -f %m -- "$d" 2>/dev/null || echo 0)
-  printf 'UPDATE\t%s\t%s\t%s\n' "$name" "$bytes" "$mtime"
+  version=
+  META="$INSTALL/backup/.meta/$name.json"
+  if [ -f "$META" ] && [ ! -L "$META" ]; then
+    version=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$META" | head -n1)
+  fi
+  printf 'UPDATE\t%s\t%s\t%s\t%s\n' "$name" "$bytes" "$mtime" "$version"
 }}
 emit_transaction() {{
   local t=$1
-  local state s name bytes mtime
+  local state s name bytes mtime version
   [ -d "$t" ] || return 0
   [ ! -L "$t" ] || return 0
   state=
-  if [ -f "$t/status.env" ]; then
+  if [ -f "$t/status.env" ] && [ ! -L "$t/status.env" ]; then
     state=$(grep -m1 '^state=' "$t/status.env" 2>/dev/null | cut -d= -f2- | tr -d '\r' || true)
   fi
-  if [ -z "$state" ] && [ -f "$t/journal.json" ]; then
-    if grep -Eq '"state"[[:space:]]*:[[:space:]]*"committed"' "$t/journal.json"; then
-      state=committed
-    elif grep -Eq '"state"[[:space:]]*:[[:space:]]*"recovered"' "$t/journal.json"; then
-      state=recovered
-    fi
+  if [ -z "$state" ] && [ -f "$t/journal.json" ] && [ ! -L "$t/journal.json" ]; then
+    state=$(sed -n 's/^  "state"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$t/journal.json" | head -n1)
   fi
   case "$state" in
     committed|recovered) ;;
@@ -580,16 +812,29 @@ emit_transaction() {{
   name=${{t##*/}}
   bytes=$(du -sk -- "$s" 2>/dev/null | awk '{{print $1 * 1024}}') || bytes=0
   mtime=$(stat -c %Y -- "$s" 2>/dev/null || stat -f %m -- "$s" 2>/dev/null || echo 0)
-  printf 'TXN\t%s\t%s\t%s\n' "$name" "$bytes" "$mtime"
+  version=
+  if [ -f "$t/journal.json" ] && [ ! -L "$t/journal.json" ]; then
+    version=$(sed -n 's/^  "previousVersion"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$t/journal.json" | head -n1)
+  fi
+  printf 'TXN\t%s\t%s\t%s\t%s\n' "$name" "$bytes" "$mtime" "$version"
 }}
 for d in "$INSTALL"/backup/update-*; do emit_update "$d"; done
 for t in "$INSTALL"/.deploy-desktop/transactions/deploy-*; do emit_transaction "$t"; done
+current=
+if [ -f "$INSTALL/.deploy-desktop/deployed.json" ]; then
+  current=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$INSTALL/.deploy-desktop/deployed.json" | head -n1)
+fi
+printf 'CURRENT\t%s\n' "$current"
 "#,
         install = shell::quote(install)
     )
 }
 
-fn remote_cleanup_script(install: &str, targets: &[String]) -> String {
+fn remote_cleanup_script(
+    install: &str,
+    update_targets: &[String],
+    transaction_targets: &[String],
+) -> String {
     let mut script = format!(
         r#"set -e
 INSTALL={install}
@@ -603,6 +848,7 @@ ensure_no_symlink_path() {{
 }}
 ensure_no_symlink_path "$INSTALL"
 [ ! -L "$INSTALL/backup" ] || {{ echo '备份目录不能是符号链接' >&2; exit 3; }}
+[ ! -L "$INSTALL/backup/.meta" ] && {{ [ ! -e "$INSTALL/backup/.meta" ] || [ -d "$INSTALL/backup/.meta" ]; }} || {{ echo '备份版本目录无效' >&2; exit 3; }}
 [ ! -L "$INSTALL/.deploy-desktop" ] || {{ echo '部署状态目录不能是符号链接' >&2; exit 3; }}
 [ ! -L "$INSTALL/.deploy-desktop/transactions" ] || {{ echo '部署事务目录不能是符号链接' >&2; exit 3; }}
 LOCK="$INSTALL/.deploy-desktop/deploy.lock"
@@ -612,18 +858,58 @@ command -v flock >/dev/null 2>&1 || {{ echo '目标机缺少 flock，无法确�
 exec 9>>"$LOCK"
 flock -n 9 || {{ echo '部署目录正在执行其他任务，请稍后再试' >&2; exit 4; }}
 FAILED=0
+emit_result() {{
+  printf 'RESULT\t%s\t%s\t%s\n' "$1" "$2" "$3"
+}}
 remove_backup() {{
   local target=$1
-  [ -d "$target" ] || return 0
+  local name=${{target##*/}}
+  [ -d "$target" ] || {{ emit_result skipped update "$name"; return 0; }}
   [ ! -L "$target" ] || {{ echo "备份不能是符号链接：$target" >&2; FAILED=1; return 0; }}
   ensure_no_symlink_path "$target"
-  rm -rf -- "$target" || {{ echo "无法清理：$target" >&2; FAILED=1; }}
+  [ ! -L "$INSTALL/backup/.meta" ] && {{ [ ! -e "$INSTALL/backup/.meta" ] || [ -d "$INSTALL/backup/.meta" ]; }} || {{ echo '备份版本目录无效' >&2; FAILED=1; return 0; }}
+  local meta="$INSTALL/backup/.meta/${{target##*/}}.json"
+  if [ -e "$meta" ] || [ -L "$meta" ]; then
+    [ ! -L "$meta" ] && [ -f "$meta" ] || {{ echo "备份版本信息不是普通文件：$meta" >&2; FAILED=1; return 0; }}
+  fi
+  rm -rf -- "$target" || {{ echo "无法清理：$target" >&2; FAILED=1; return 0; }}
+  [ ! -e "$target" ] && [ ! -L "$target" ] || {{ echo "清理后仍存在：$target" >&2; FAILED=1; return 0; }}
+  rm -f -- "$meta"
+  emit_result removed update "$name"
+}}
+remove_transaction() {{
+  local txn=$1
+  local name=${{txn##*/}}
+  [ -d "$txn" ] || {{ emit_result skipped transaction "$name"; return 0; }}
+  [ ! -L "$txn" ] || {{ echo "部署事务不能是符号链接：$txn" >&2; FAILED=1; return 0; }}
+  ensure_no_symlink_path "$txn"
+  local state=
+  if [ -f "$txn/status.env" ] && [ ! -L "$txn/status.env" ]; then
+    state=$(grep -m1 '^state=' "$txn/status.env" 2>/dev/null | cut -d= -f2- | tr -d '\r' || true)
+  fi
+  if [ -z "$state" ] && [ -f "$txn/journal.json" ] && [ ! -L "$txn/journal.json" ]; then
+    state=$(sed -n 's/^  "state"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$txn/journal.json" | head -n1)
+  fi
+  case "$state" in
+    committed|recovered) ;;
+    *) echo "部署事务尚未完成，已跳过：$txn" >&2; emit_result skipped transaction "$name"; return 0 ;;
+  esac
+  local snapshot="$txn/snapshot"
+  [ -d "$snapshot" ] || {{ emit_result skipped transaction "$name"; return 0; }}
+  [ ! -L "$snapshot" ] || {{ echo "事务快照不能是符号链接：$snapshot" >&2; FAILED=1; return 0; }}
+  ensure_no_symlink_path "$snapshot"
+  rm -rf -- "$snapshot" || {{ echo "无法清理：$snapshot" >&2; FAILED=1; return 0; }}
+  [ ! -e "$snapshot" ] && [ ! -L "$snapshot" ] || {{ echo "清理后仍存在：$snapshot" >&2; FAILED=1; return 0; }}
+  emit_result removed transaction "$name"
 }}
 "#,
         install = shell::quote(install)
     );
-    for target in targets {
+    for target in update_targets {
         script.push_str(&format!("remove_backup {}\n", shell::quote(target)));
+    }
+    for target in transaction_targets {
+        script.push_str(&format!("remove_transaction {}\n", shell::quote(target)));
     }
     script.push_str("[ \"$FAILED\" = 0 ] || exit 5\necho 'CLEANED=ok'\n");
     script
@@ -631,9 +917,17 @@ remove_backup() {{
 
 fn parse_remote_entries(
     stdout: &str,
-) -> Result<(Vec<DeploymentBackupEntry>, Vec<DeploymentBackupEntry>), String> {
+) -> Result<
+    (
+        Vec<DeploymentBackupEntry>,
+        Vec<DeploymentBackupEntry>,
+        String,
+    ),
+    String,
+> {
     let mut updates = Vec::new();
     let mut transactions = Vec::new();
+    let mut current_version = String::new();
     for line in stdout.lines() {
         let mut parts = line.split('\t');
         let Some(kind) = parts.next() else {
@@ -642,6 +936,10 @@ fn parse_remote_entries(
         let Some(name) = parts.next() else {
             continue;
         };
+        if kind == "CURRENT" {
+            current_version = sanitize_version(name);
+            continue;
+        }
         let Some(bytes) = parts.next().and_then(|value| value.parse::<u64>().ok()) else {
             continue;
         };
@@ -650,16 +948,19 @@ fn parse_remote_entries(
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(0)
             .saturating_mul(1000);
+        let version = sanitize_version(parts.next().unwrap_or(""));
         match kind {
             "UPDATE" if valid_update_backup_name(name) => updates.push(DeploymentBackupEntry {
                 name: name.to_string(),
                 kind: "update".to_string(),
+                version,
                 bytes,
                 modified_at,
             }),
             "TXN" if valid_transaction_name(name) => transactions.push(DeploymentBackupEntry {
                 name: name.to_string(),
                 kind: "transaction".to_string(),
+                version,
                 bytes,
                 modified_at,
             }),
@@ -668,7 +969,7 @@ fn parse_remote_entries(
     }
     sort_entries(&mut updates);
     sort_entries(&mut transactions);
-    Ok((updates, transactions))
+    Ok((updates, transactions, current_version))
 }
 
 #[cfg(test)]
@@ -700,9 +1001,37 @@ mod tests {
         .unwrap();
         fs::write(
             directory.join(JOURNAL_FILE),
-            format!(r#"{{"state":"{state}"}}"#),
+            serde_json::to_string_pretty(&serde_json::json!({ "state": state })).unwrap(),
         )
         .unwrap();
+    }
+
+    fn write_journal_with_version(
+        install: &Path,
+        id: &str,
+        state: &str,
+        version: &str,
+        previous_version: &str,
+    ) {
+        let directory = install.join(deployment_tx::TRANSACTIONS_DIR).join(id);
+        fs::create_dir_all(directory.join(SNAPSHOT_DIR)).unwrap();
+        fs::write(
+            directory.join(JOURNAL_FILE),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "state": state,
+                "version": version,
+                "previousVersion": previous_version,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn selection(kind: &str, name: &str) -> DeploymentBackupSelection {
+        DeploymentBackupSelection {
+            kind: kind.to_string(),
+            name: name.to_string(),
+        }
     }
 
     #[test]
@@ -729,6 +1058,12 @@ mod tests {
         )
         .unwrap();
         fs::write(install.join(BACKUP_DIR).join("notes.txt"), b"keep").unwrap();
+        fs::create_dir_all(install.join(".deploy-desktop")).unwrap();
+        fs::write(
+            install.join(".deploy-desktop").join("deployed.json"),
+            r#"{"version":"2.1.0"}"#,
+        )
+        .unwrap();
         write_journal(&install, "deploy-100-1-0", "committed");
         write_journal(&install, "deploy-200-2-0", "recovered");
         write_journal(&install, "deploy-300-3-0", "failed");
@@ -739,12 +1074,13 @@ mod tests {
         assert_eq!(overview.update_backups[0].bytes, 64);
         assert_eq!(overview.transaction_snapshots.len(), 2);
         assert_eq!(overview.total_bytes, 64 + 128 * 2);
+        assert_eq!(overview.current_version, "2.1.0");
 
         fs::remove_dir_all(&install).unwrap();
     }
 
     #[test]
-    fn cleanup_removes_update_backups_and_finished_snapshots_only() {
+    fn cleanup_deletes_only_selected_backups() {
         let install = temp_install("cleanup");
         for name in ["update-100-200-0", "update-200-300-0", "update-300-400-0"] {
             let directory = install.join(BACKUP_DIR).join(name);
@@ -754,17 +1090,24 @@ mod tests {
         write_journal(&install, "deploy-100-1-0", "committed");
         write_journal(&install, "deploy-200-2-0", "failed");
 
-        let result = clean_local(install.to_str().unwrap()).unwrap();
-        assert_eq!(result.removed, 3);
-        assert_eq!(result.kept, 1);
-        assert_eq!(result.freed_bytes, 2 * 16 + 128);
+        let result = clean_local(
+            install.to_str().unwrap(),
+            vec![
+                selection("update", "update-200-300-0"),
+                selection("transaction", "deploy-100-1-0"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(result.removed, 2);
+        assert_eq!(result.skipped, 0);
+        assert_eq!(result.freed_bytes, 16 + 128);
 
         let remaining = fs::read_dir(install.join(BACKUP_DIR))
             .unwrap()
             .filter_map(|entry| entry.ok())
             .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
             .count();
-        assert_eq!(remaining, 1);
+        assert_eq!(remaining, 2);
         assert!(install
             .join(deployment_tx::TRANSACTIONS_DIR)
             .join("deploy-200-2-0")
@@ -780,18 +1123,103 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_always_keeps_the_newest_update_backup() {
-        let install = temp_install("cleanup-all");
+    fn cleanup_skips_unknown_or_unfinished_selections() {
+        let install = temp_install("cleanup-skip");
         for name in ["update-100-200-0", "update-200-300-0"] {
             let directory = install.join(BACKUP_DIR).join(name);
             fs::create_dir_all(&directory).unwrap();
             fs::write(directory.join("payload"), vec![0u8; 8]).unwrap();
         }
+        write_journal(&install, "deploy-100-1-0", "failed");
 
-        let result = clean_local(install.to_str().unwrap()).unwrap();
-        assert_eq!(result.removed, 1);
-        assert_eq!(result.kept, 1);
-        assert_eq!(install.join(BACKUP_DIR).read_dir().unwrap().count(), 1);
+        let result = clean_local(
+            install.to_str().unwrap(),
+            vec![
+                selection("update", "update-999-999-0"),
+                selection("transaction", "deploy-100-1-0"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(result.removed, 0);
+        assert_eq!(result.skipped, 2);
+        assert_eq!(install.join(BACKUP_DIR).read_dir().unwrap().count(), 2);
+
+        fs::remove_dir_all(&install).unwrap();
+    }
+
+    #[test]
+    fn inventory_reads_version_from_backup_marker() {
+        let install = temp_install("versions");
+        let backup = install.join(BACKUP_DIR).join("update-100-200-0");
+        fs::create_dir_all(&backup).unwrap();
+        fs::create_dir_all(install.join(BACKUP_DIR).join(BACKUP_META_DIR)).unwrap();
+        fs::write(
+            install
+                .join(BACKUP_DIR)
+                .join(BACKUP_META_DIR)
+                .join("update-100-200-0.json"),
+            r#"{"version":"1.2.3"}"#,
+        )
+        .unwrap();
+        fs::write(backup.join("payload"), vec![0u8; 8]).unwrap();
+        write_journal_with_version(&install, "deploy-100-1-0", "committed", "2.0.0", "1.9.0");
+
+        let overview = inspect_local(install.to_str().unwrap()).unwrap();
+        assert_eq!(overview.update_backups[0].version, "1.2.3");
+        assert_eq!(overview.transaction_snapshots[0].version, "1.9.0");
+
+        fs::remove_dir_all(&install).unwrap();
+    }
+
+    #[test]
+    fn in_progress_backup_is_hidden_until_marker_is_stale() {
+        let install = temp_install("in-progress");
+        let backup = install.join(BACKUP_DIR).join("update-100-200-0");
+        fs::create_dir_all(&backup).unwrap();
+        fs::write(backup.join("payload"), vec![0u8; 8]).unwrap();
+        fs::write(backup.join(UPDATING_MARKER), b"").unwrap();
+
+        assert!(inspect_local(install.to_str().unwrap())
+            .unwrap()
+            .update_backups
+            .is_empty());
+
+        let marker = fs::OpenOptions::new()
+            .write(true)
+            .open(backup.join(UPDATING_MARKER))
+            .unwrap();
+        marker
+            .set_times(fs::FileTimes::new().set_modified(
+                SystemTime::now() - std::time::Duration::from_secs(UPDATING_STALE_SECS + 60),
+            ))
+            .unwrap();
+        assert_eq!(
+            inspect_local(install.to_str().unwrap())
+                .unwrap()
+                .update_backups
+                .len(),
+            1
+        );
+
+        fs::remove_dir_all(&install).unwrap();
+    }
+
+    #[test]
+    fn version_marker_requires_safe_short_text() {
+        assert_eq!(sanitize_version("1.2.3"), "1.2.3");
+        assert_eq!(sanitize_version("1.2.3-beta+1"), "1.2.3-beta+1");
+        assert_eq!(sanitize_version("1.2.3 \"x\""), "");
+        assert_eq!(sanitize_version(&"1".repeat(129)), "");
+    }
+
+    #[test]
+    fn transaction_snapshot_without_previous_version_stays_unrecorded() {
+        let install = temp_install("no-previous");
+        write_journal_with_version(&install, "deploy-100-1-0", "committed", "2.0.0", "");
+
+        let overview = inspect_local(install.to_str().unwrap()).unwrap();
+        assert_eq!(overview.transaction_snapshots.len(), 1);
+        assert!(overview.transaction_snapshots[0].version.is_empty());
 
         fs::remove_dir_all(&install).unwrap();
     }
@@ -808,8 +1236,13 @@ mod tests {
 
         let overview = inspect_local(install.to_str().unwrap()).unwrap();
         assert!(overview.update_backups.is_empty());
-        let result = clean_local(install.to_str().unwrap()).unwrap();
+        let result = clean_local(
+            install.to_str().unwrap(),
+            vec![selection("update", "update-100-200-0")],
+        )
+        .unwrap();
         assert_eq!(result.removed, 0);
+        assert_eq!(result.skipped, 1);
         assert!(outside.exists());
 
         fs::remove_dir_all(&install).unwrap();
@@ -829,7 +1262,11 @@ mod tests {
         symlink(&outside, install.join(BACKUP_DIR)).unwrap();
 
         assert!(inspect_local(install.to_str().unwrap()).is_err());
-        assert!(clean_local(install.to_str().unwrap()).is_err());
+        assert!(clean_local(
+            install.to_str().unwrap(),
+            vec![selection("update", "update-100-200-0")]
+        )
+        .is_err());
         assert!(external_backup.join("payload").exists());
 
         fs::remove_dir_all(&install).unwrap();
@@ -838,12 +1275,121 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn symlinked_backup_meta_is_rejected_and_never_touched() {
+        use std::os::unix::fs::symlink;
+
+        let install = temp_install("symlink-meta");
+        let outside = temp_install("symlink-meta-outside");
+        let backup = install.join(BACKUP_DIR).join("update-100-200-0");
+        fs::create_dir_all(&backup).unwrap();
+        fs::write(backup.join("payload"), vec![0u8; 8]).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let external_meta = outside.join("update-100-200-0.json");
+        fs::write(&external_meta, r#"{"version":"9.9.9"}"#).unwrap();
+        symlink(&outside, install.join(BACKUP_DIR).join(BACKUP_META_DIR)).unwrap();
+
+        assert!(inspect_local(install.to_str().unwrap()).is_err());
+        assert!(clean_local(
+            install.to_str().unwrap(),
+            vec![selection("update", "update-100-200-0")]
+        )
+        .is_err());
+        assert!(backup.join("payload").exists());
+        assert!(external_meta.exists());
+
+        fs::remove_dir_all(&install).unwrap();
+        fs::remove_dir_all(&outside).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_version_file_is_ignored_and_removed_with_the_backup() {
+        use std::os::unix::fs::symlink;
+
+        let install = temp_install("symlink-meta-file");
+        let outside = temp_install("symlink-meta-file-outside");
+        let backup = install.join(BACKUP_DIR).join("update-100-200-0");
+        fs::create_dir_all(&backup).unwrap();
+        fs::write(backup.join("payload"), vec![0u8; 8]).unwrap();
+        let meta_dir = install.join(BACKUP_DIR).join(BACKUP_META_DIR);
+        fs::create_dir_all(&meta_dir).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let external = outside.join("version.json");
+        fs::write(&external, r#"{"version":"9.9.9"}"#).unwrap();
+        symlink(&external, meta_dir.join("update-100-200-0.json")).unwrap();
+
+        let overview = inspect_local(install.to_str().unwrap()).unwrap();
+        assert_eq!(overview.update_backups.len(), 1);
+        assert!(overview.update_backups[0].version.is_empty());
+
+        let result = clean_local(
+            install.to_str().unwrap(),
+            vec![selection("update", "update-100-200-0")],
+        )
+        .unwrap();
+        assert_eq!(result.removed, 1);
+        assert!(!backup.exists());
+        assert!(!meta_dir.join("update-100-200-0.json").exists());
+        assert!(external.exists());
+
+        fs::remove_dir_all(&install).unwrap();
+        fs::remove_dir_all(&outside).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_transaction_journal_is_never_treated_as_finished() {
+        use std::os::unix::fs::symlink;
+
+        let install = temp_install("symlink-journal");
+        let outside = temp_install("symlink-journal-outside");
+        fs::create_dir_all(&outside).unwrap();
+        let external = outside.join("journal.json");
+        fs::write(
+            &external,
+            serde_json::to_string_pretty(&serde_json::json!({ "state": "committed" })).unwrap(),
+        )
+        .unwrap();
+        let transaction = install
+            .join(deployment_tx::TRANSACTIONS_DIR)
+            .join("deploy-100-1-0");
+        fs::create_dir_all(transaction.join(SNAPSHOT_DIR)).unwrap();
+        fs::write(transaction.join(SNAPSHOT_DIR).join("payload"), vec![0u8; 8]).unwrap();
+        symlink(&external, transaction.join(JOURNAL_FILE)).unwrap();
+
+        let overview = inspect_local(install.to_str().unwrap()).unwrap();
+        assert!(overview.transaction_snapshots.is_empty());
+
+        let result = clean_local(
+            install.to_str().unwrap(),
+            vec![selection("transaction", "deploy-100-1-0")],
+        )
+        .unwrap();
+        assert_eq!(result.removed, 0);
+        assert_eq!(result.skipped, 1);
+        assert!(transaction.join(SNAPSHOT_DIR).join("payload").exists());
+        assert!(external.exists());
+
+        fs::remove_dir_all(&install).unwrap();
+        fs::remove_dir_all(&outside).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn remote_scan_reads_final_state_from_status_env() {
+        use std::os::unix::fs::symlink;
+
         let install = temp_install("remote-scan");
         fs::create_dir_all(
             install
                 .join(BACKUP_DIR)
                 .join("update-20261118-101500-Ab3dE9xZ"),
+        )
+        .unwrap();
+        fs::create_dir_all(install.join(".deploy-desktop")).unwrap();
+        fs::write(
+            install.join(".deploy-desktop").join("deployed.json"),
+            r#"{"version":"2.0.0"}"#,
         )
         .unwrap();
         fs::write(
@@ -854,7 +1400,22 @@ mod tests {
             vec![0u8; 16],
         )
         .unwrap();
-        write_journal(&install, "deploy-100-1-0", "pending");
+        fs::create_dir_all(install.join(BACKUP_DIR).join(BACKUP_META_DIR)).unwrap();
+        fs::write(
+            install
+                .join(BACKUP_DIR)
+                .join(BACKUP_META_DIR)
+                .join("update-20261118-101500-Ab3dE9xZ.json"),
+            r#"{"version":"1.2.3"}"#,
+        )
+        .unwrap();
+        let in_progress = install
+            .join(BACKUP_DIR)
+            .join("update-20261118-111111-ZZZZZZZZ");
+        fs::create_dir_all(&in_progress).unwrap();
+        fs::write(in_progress.join("payload"), vec![0u8; 8]).unwrap();
+        fs::write(in_progress.join(UPDATING_MARKER), b"").unwrap();
+        write_journal_with_version(&install, "deploy-100-1-0", "pending", "2.0.0", "1.8.0");
         fs::write(
             install
                 .join(deployment_tx::TRANSACTIONS_DIR)
@@ -872,6 +1433,17 @@ mod tests {
             "phase=recovering\nstate=recovering\n",
         )
         .unwrap();
+        write_journal(&install, "deploy-300-3-0", "pending");
+        let fake_status = install.join("fake-status.env");
+        fs::write(&fake_status, "state=committed\n").unwrap();
+        symlink(
+            &fake_status,
+            install
+                .join(deployment_tx::TRANSACTIONS_DIR)
+                .join("deploy-300-3-0")
+                .join("status.env"),
+        )
+        .unwrap();
 
         let script = remote_scan_script(install.to_str().unwrap());
         let output = std::process::Command::new("bash")
@@ -884,12 +1456,15 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let (updates, transactions) =
+        let (updates, transactions, current_version) =
             parse_remote_entries(&String::from_utf8_lossy(&output.stdout)).unwrap();
         assert_eq!(updates.len(), 1);
         assert!(updates[0].bytes > 0);
+        assert_eq!(updates[0].version, "1.2.3");
         assert_eq!(transactions.len(), 1);
         assert_eq!(transactions[0].name, "deploy-100-1-0");
+        assert_eq!(transactions[0].version, "1.8.0");
+        assert_eq!(current_version, "2.0.0");
 
         fs::remove_dir_all(&install).unwrap();
     }
@@ -919,19 +1494,101 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn remote_scan_rejects_symlinked_meta_and_ignores_symlinked_version_file() {
+        use std::os::unix::fs::symlink;
+
+        let install = temp_install("remote-meta-link");
+        let outside = temp_install("remote-meta-link-outside");
+        fs::create_dir_all(&outside).unwrap();
+        let backup = install.join(BACKUP_DIR).join("update-20261118-101500-Ab3dE9xZ");
+        fs::create_dir_all(&backup).unwrap();
+        fs::write(backup.join("payload"), vec![0u8; 8]).unwrap();
+        symlink(&outside, install.join(BACKUP_DIR).join(BACKUP_META_DIR)).unwrap();
+
+        let script = remote_scan_script(install.to_str().unwrap());
+        let output = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("备份版本目录"));
+
+        fs::remove_file(install.join(BACKUP_DIR).join(BACKUP_META_DIR)).unwrap();
+        symlink(
+            outside.join("missing"),
+            install.join(BACKUP_DIR).join(BACKUP_META_DIR),
+        )
+        .unwrap();
+        let output = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("备份版本目录"));
+
+        fs::remove_file(install.join(BACKUP_DIR).join(BACKUP_META_DIR)).unwrap();
+        let meta_dir = install.join(BACKUP_DIR).join(BACKUP_META_DIR);
+        fs::create_dir_all(&meta_dir).unwrap();
+        let external = outside.join("version.json");
+        fs::write(&external, r#"{"version":"9.9.9"}"#).unwrap();
+        symlink(
+            &external,
+            meta_dir.join("update-20261118-101500-Ab3dE9xZ.json"),
+        )
+        .unwrap();
+
+        let output = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let (updates, _, _) =
+            parse_remote_entries(&String::from_utf8_lossy(&output.stdout)).unwrap();
+        assert_eq!(updates.len(), 1);
+        assert!(updates[0].version.is_empty());
+
+        fs::remove_dir_all(&install).unwrap();
+        fs::remove_dir_all(&outside).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn remote_cleanup_passes_each_target_instead_of_the_root() {
         use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::symlink;
 
         let install = temp_install("remote-cleanup");
         let target = install.join(BACKUP_DIR).join("update-100-200-0");
         fs::create_dir_all(&target).unwrap();
         fs::write(target.join("payload"), vec![0u8; 8]).unwrap();
+        write_journal(&install, "deploy-100-1-0", "committed");
+        write_journal(&install, "deploy-200-2-0", "failed");
+        write_journal(&install, "deploy-300-3-0", "pending");
+        let fake_status = install.join("fake-status.env");
+        fs::write(&fake_status, "state=committed\n").unwrap();
+        let committed = install
+            .join(deployment_tx::TRANSACTIONS_DIR)
+            .join("deploy-100-1-0");
+        let failed = install
+            .join(deployment_tx::TRANSACTIONS_DIR)
+            .join("deploy-200-2-0");
+        let linked = install
+            .join(deployment_tx::TRANSACTIONS_DIR)
+            .join("deploy-300-3-0");
+        symlink(&fake_status, linked.join("status.env")).unwrap();
 
         let bin = install.join("fake-bin");
         fs::create_dir_all(&bin).unwrap();
         let log = install.join("rm.log");
         let fake_rm = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> {}\nexit 0\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> {}\nfor last in \"$@\"; do :; done\n/bin/rm -rf -- \"$last\"\n",
             shell::quote(log.to_str().unwrap())
         );
         for (name, body) in [
@@ -946,6 +1603,11 @@ mod tests {
         let script = remote_cleanup_script(
             install.to_str().unwrap(),
             &[target.to_string_lossy().to_string()],
+            &[
+                committed.to_string_lossy().to_string(),
+                failed.to_string_lossy().to_string(),
+                linked.to_string_lossy().to_string(),
+            ],
         );
         let path = format!(
             "{}:{}",
@@ -963,12 +1625,29 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("RESULT\tremoved\tupdate\tupdate-100-200-0"));
+        assert!(stdout.contains("RESULT\tremoved\ttransaction\tdeploy-100-1-0"));
+        assert!(stdout.contains("RESULT\tskipped\ttransaction\tdeploy-200-2-0"));
+        assert!(stdout.contains("RESULT\tskipped\ttransaction\tdeploy-300-3-0"));
         let recorded = fs::read_to_string(&log).unwrap();
         assert!(recorded
             .lines()
             .any(|line| line == target.to_string_lossy()));
+        assert!(recorded
+            .lines()
+            .any(|line| line == committed.join(SNAPSHOT_DIR).to_string_lossy()));
+        assert!(!recorded
+            .lines()
+            .any(|line| line == failed.join(SNAPSHOT_DIR).to_string_lossy()));
+        assert!(!recorded
+            .lines()
+            .any(|line| line == linked.join(SNAPSHOT_DIR).to_string_lossy()));
         assert!(!recorded.lines().any(|line| line == "/"));
-        assert!(target.join("payload").exists());
+        assert!(!target.exists());
+        assert!(!committed.join(SNAPSHOT_DIR).exists());
+        assert!(failed.join(SNAPSHOT_DIR).exists());
+        assert!(linked.join(SNAPSHOT_DIR).exists());
 
         fs::remove_dir_all(&install).unwrap();
     }

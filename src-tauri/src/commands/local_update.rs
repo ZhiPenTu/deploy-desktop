@@ -1,7 +1,7 @@
 //! 本机增量更新。预检只读取文件与 Docker，执行阶段不删除数据卷。
 use std::collections::BTreeSet;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
@@ -293,6 +293,10 @@ fn run_update(
     } else {
         None
     };
+    // 标记持续到整个更新结束：更新期间该备份不会出现在清理列表里。
+    let _backup_marker = backup_dir
+        .as_ref()
+        .map(|dir| BackupMarkerGuard::new(dir.clone(), plan.root.clone()));
     env_guard.disarm();
     let mut stopped_services = BTreeSet::new();
     let mut deferred_cleanup = Vec::new();
@@ -1208,8 +1212,12 @@ fn create_backup(plan: &UpdatePlan, previous_env: Option<&[u8]>) -> Result<PathB
     let parent = plan.root.join("backup");
     validate_destination(&plan.root, &parent)?;
     fs::create_dir_all(&parent).map_err(|_| "创建备份目录失败，请检查权限".to_string())?;
+    ensure_real_directory(&parent, "备份目录")?;
     let backup_dir = parent.join(format!("update-{}", backup::unique_suffix()));
     fs::create_dir(&backup_dir).map_err(|_| "创建备份目录失败".to_string())?;
+    fs::write(backup_dir.join(UPDATING_MARKER), b"")
+        .map_err(|_| "创建备份时无法写入状态标记，请检查权限".to_string())?;
+    let version = current_deployed_version(&plan.root);
     for item in &plan.replacements {
         let existing = plan.root.join(&item.relative);
         if existing.exists() {
@@ -1228,7 +1236,128 @@ fn create_backup(plan: &UpdatePlan, previous_env: Option<&[u8]>) -> Result<PathB
             content,
         )?;
     }
+    // 版本标记最后写入：既不会被同名产物覆盖，也只在备份完成后出现。
+    let meta_dir = parent.join(BACKUP_META_DIR);
+    fs::create_dir_all(&meta_dir)
+        .map_err(|_| "创建备份版本目录失败，请检查权限".to_string())?;
+    ensure_real_directory(&meta_dir, "备份版本目录")?;
+    let backup_name = backup_dir
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let meta_path = meta_dir.join(format!("{backup_name}.json"));
+    write_backup_meta(&meta_path, &version)?;
     Ok(backup_dir)
+}
+
+const UPDATING_MARKER: &str = ".updating";
+const BACKUP_META_DIR: &str = ".meta";
+
+struct BackupMarkerGuard {
+    backup_dir: PathBuf,
+    install_root: PathBuf,
+}
+
+impl BackupMarkerGuard {
+    fn new(backup_dir: PathBuf, install_root: PathBuf) -> Self {
+        Self {
+            backup_dir,
+            install_root,
+        }
+    }
+
+    fn safe_marker(&self) -> Option<PathBuf> {
+        if fs::symlink_metadata(&self.install_root)
+            .ok()?
+            .file_type()
+            .is_symlink()
+        {
+            return None;
+        }
+        let relative = self.backup_dir.strip_prefix(&self.install_root).ok()?;
+        let mut parts = relative.components();
+        let Some(std::path::Component::Normal(first)) = parts.next() else {
+            return None;
+        };
+        let Some(std::path::Component::Normal(name)) = parts.next() else {
+            return None;
+        };
+        if first != std::ffi::OsStr::new("backup")
+            || parts.next().is_some()
+            || !name.to_string_lossy().starts_with("update-")
+        {
+            return None;
+        }
+        let mut cursor = self.install_root.clone();
+        for part in relative.components() {
+            cursor.push(part);
+            let metadata = fs::symlink_metadata(&cursor).ok()?;
+            if metadata.file_type().is_symlink() {
+                return None;
+            }
+        }
+        if !fs::symlink_metadata(&self.backup_dir).ok()?.is_dir() {
+            return None;
+        }
+        let marker = self.backup_dir.join(UPDATING_MARKER);
+        let metadata = fs::symlink_metadata(&marker).ok()?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return None;
+        }
+        Some(marker)
+    }
+}
+
+impl Drop for BackupMarkerGuard {
+    fn drop(&mut self) {
+        if let Some(marker) = self.safe_marker() {
+            let _ = fs::remove_file(marker);
+        }
+    }
+}
+
+fn ensure_real_directory(path: &Path, label: &str) -> Result<(), String> {
+    let metadata =
+        fs::symlink_metadata(path).map_err(|error| format!("读取{label}失败：{error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(format!("{label}不是普通目录，已停止更新"));
+    }
+    Ok(())
+}
+
+fn write_backup_meta(path: &Path, version: &str) -> Result<(), String> {
+    let payload = serde_json::to_vec(&serde_json::json!({ "version": version }))
+        .map_err(|_| "写入备份版本信息失败".to_string())?;
+    let temporary = path.with_extension(format!("tmp-{}", backup::unique_suffix()));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|_| "写入备份版本信息失败，请检查权限".to_string())?;
+    file.write_all(&payload)
+        .map_err(|_| "写入备份版本信息失败，请检查权限".to_string())?;
+    drop(file);
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!("保存备份版本信息失败：{error}"));
+    }
+    Ok(())
+}
+
+fn current_deployed_version(install_root: &Path) -> String {
+    let path = install_root.join(".deploy-desktop").join("deployed.json");
+    let Ok(text) = fs::read_to_string(path) else {
+        return String::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return String::new();
+    };
+    super::deployment_backup::sanitize_version(
+        value
+            .get("version")
+            .and_then(|version| version.as_str())
+            .unwrap_or(""),
+    )
 }
 
 fn replace_path(source: &Path, target: &Path) -> Result<Option<PathBuf>, ReplaceError> {
@@ -1909,6 +2038,10 @@ mod tests {
         for folder in ["target", "bundle"] {
             fixture.write(&format!("{folder}/deploy/docker-compose.yml"), &compose_text("current"));
         }
+        fixture.write(
+            "target/.deploy-desktop/deployed.json",
+            r#"{"version":"1.2.3"}"#,
+        );
         fixture.write("target/deploy/nginx/stale.conf", "old");
         fixture.write("bundle/deploy/nginx/new.conf", "new");
         let bundle_dir = fixture
@@ -1925,6 +2058,18 @@ mod tests {
         )
         .unwrap();
         let backup = create_backup(&plan, None).unwrap();
+        let meta = backup
+            .parent()
+            .unwrap()
+            .join(".meta")
+            .join(format!(
+                "{}.json",
+                backup.file_name().unwrap().to_string_lossy()
+            ));
+        assert_eq!(
+            fs::read_to_string(meta).unwrap(),
+            r#"{"version":"1.2.3"}"#
+        );
         assert!(backup.join("deploy/docker-compose.yml").is_file());
         assert_eq!(
             fs::read_to_string(backup.join("deploy/nginx/stale.conf")).unwrap(),
@@ -1938,6 +2083,43 @@ mod tests {
             fs::read_to_string(fixture.0.join("target/deploy/nginx/new.conf")).unwrap(),
             "new"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backup_marker_guard_skips_symlinked_backup_directory() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "deploy-marker-guard-{}",
+            backup::unique_suffix()
+        ));
+        let outside = std::env::temp_dir().join(format!(
+            "deploy-marker-guard-outside-{}",
+            backup::unique_suffix()
+        ));
+        fs::create_dir_all(root.join("backup")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let root = fs::canonicalize(root).unwrap();
+        let outside = fs::canonicalize(outside).unwrap();
+        let external_marker = outside.join(UPDATING_MARKER);
+        fs::write(&external_marker, b"").unwrap();
+        symlink(&outside, root.join("backup/update-100-200-0")).unwrap();
+
+        drop(BackupMarkerGuard::new(
+            root.join("backup/update-100-200-0"),
+            root.clone(),
+        ));
+        assert!(external_marker.exists());
+
+        let backup = root.join("backup/update-100-200-1");
+        fs::create_dir_all(&backup).unwrap();
+        fs::write(backup.join(UPDATING_MARKER), b"").unwrap();
+        drop(BackupMarkerGuard::new(backup.clone(), root.clone()));
+        assert!(!backup.join(UPDATING_MARKER).exists());
+
+        fs::remove_dir_all(&root).unwrap();
+        fs::remove_dir_all(&outside).unwrap();
     }
 
     #[test]

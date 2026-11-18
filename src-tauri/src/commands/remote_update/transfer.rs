@@ -52,6 +52,61 @@ pub(super) fn create_remote_backup(
         .ok_or_else(|| "备份完成但未返回备份目录".to_string())
 }
 
+/// 更新结束后移除备份目录里的进行中标记，使其可以出现在清理列表。
+const FINISH_BACKUP: &str = r#"INSTALL=$1
+while [ "$INSTALL" != "/" ] && [ "${INSTALL%/}" != "$INSTALL" ]; do INSTALL=${INSTALL%/}; done
+BACKUP=$2
+case "$INSTALL" in
+  /*) ;;
+  *) echo '部署目录无效' >&2; exit 2 ;;
+esac
+case "$INSTALL" in
+  *'/../'*|*/..|*'/./'*|*/.|*'//'*) echo '部署目录无效' >&2; exit 2 ;;
+esac
+NAME=${BACKUP##*/}
+[ "$BACKUP" = "$INSTALL/backup/$NAME" ] || { echo '备份目录无效' >&2; exit 2; }
+case "$NAME" in
+  update-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]-[[:alnum:]][[:alnum:]][[:alnum:]][[:alnum:]][[:alnum:]][[:alnum:]][[:alnum:]][[:alnum:]]) ;;
+  *) echo '备份目录无效' >&2; exit 2 ;;
+esac
+ensure_no_symlink_path() {
+  local path=$1
+  while [ -n "$path" ] && [ "$path" != "/" ]; do
+    [ -L "$path" ] && { echo "路径包含符号链接：$path" >&2; exit 3; }
+    path=$(dirname -- "$path")
+  done
+}
+ensure_no_symlink_path "$INSTALL"
+[ -d "$BACKUP" ] || exit 0
+ensure_no_symlink_path "$BACKUP"
+rm -f -- "$BACKUP/.updating"
+"#;
+
+pub(super) fn finish_remote_backup(
+    host: &str,
+    port: u16,
+    user: &str,
+    key: Option<&str>,
+    install_dir: &str,
+    backup_dir: &str,
+) -> Result<(), String> {
+    let install = install_dir.trim();
+    let path = backup_dir.trim();
+    if install.is_empty()
+        || path.is_empty()
+        || install.contains(['\0', '\n', '\r'])
+        || path.contains(['\0', '\n', '\r'])
+    {
+        return Err("备份目录无效，未结束备份状态".to_string());
+    }
+    let script = shell::script(FINISH_BACKUP, &[install, path])?;
+    checked(
+        run_ssh_script_with_timeout(host, port, user, key, &script, Duration::from_secs(30))?,
+        "结束远程备份状态",
+    )?;
+    Ok(())
+}
+
 fn upload_staged(
     host: &str,
     port: u16,
@@ -172,4 +227,55 @@ pub(super) fn upload_dir_replace(
         "receive-dir",
         process::Input::Directory(local.to_path_buf()),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn temp_dir(label: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "deploy-finish-backup-{label}-{}",
+            crate::core::backup::unique_suffix()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::canonicalize(root).unwrap()
+    }
+
+    fn run_finish(root: &Path, backup: &str) -> Output {
+        std::process::Command::new("bash")
+            .arg("-c")
+            .arg(FINISH_BACKUP)
+            .arg("--")
+            .arg(root.to_str().unwrap())
+            .arg(backup)
+            .output()
+            .unwrap()
+    }
+
+    #[test]
+    fn finish_backup_script_removes_marker_only_for_direct_updates() {
+        let root = temp_dir("valid");
+        let name = "update-20261118-101500-Ab3dE9xZ";
+        let backup = root.join("backup").join(name);
+        fs::create_dir_all(&backup).unwrap();
+        fs::write(backup.join(".updating"), b"").unwrap();
+
+        let valid = run_finish(&root, backup.to_str().unwrap());
+        assert!(
+            valid.status.success(),
+            "{}",
+            String::from_utf8_lossy(&valid.stderr)
+        );
+        assert!(!backup.join(".updating").exists());
+
+        fs::write(backup.join(".updating"), b"").unwrap();
+        let traversal = format!("{}/../{name}", backup.display());
+        let invalid = run_finish(&root, &traversal);
+        assert!(!invalid.status.success());
+        assert!(backup.join(".updating").exists());
+
+        fs::remove_dir_all(&root).unwrap();
+    }
 }
