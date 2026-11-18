@@ -1406,10 +1406,10 @@ fn volume_plans(
             .ok_or_else(|| format!("数据卷 {} 的备份镜像未声明", volume.name))?;
         let identity = bindings
             .iter()
-            .find(|binding| binding.reference == reference)
+            .find(|binding| image_reference_matches(&binding.reference, &reference))
             .map(|binding| binding.image_id.as_str())
             .unwrap_or(&reference);
-        let image = inspect_image(identity)?
+        let image = inspect_local_image(identity)?
             .ok_or_else(|| format!("目标 Docker 缺少数据卷备份镜像 {reference}"))?
             .image_id;
         if verified_backup_images.insert(image.clone()) {
@@ -2086,34 +2086,12 @@ fn image_snapshots(
             .ok_or_else(|| "Compose 服务未声明镜像".to_string())?;
         let identity = bindings
             .iter()
-            .find(|binding| binding.reference == reference)
+            .find(|binding| image_reference_matches(&binding.reference, reference))
             .map(|binding| binding.image_id.as_str())
             .unwrap_or(reference);
-        let output = docker_output(
-            &[
-                "image",
-                "inspect",
-                "--format",
-                "{{.Id}}|{{.Os}}/{{.Architecture}}",
-                "--",
-                identity,
-            ],
-            &format!("检查镜像 {reference}"),
-        )
-        .map_err(|_| format!("目标 Docker 缺少镜像 {reference}，请先准备完整版本镜像"))?;
-        let text = String::from_utf8_lossy(&output.stdout);
-        let (id, platform) = text
-            .trim()
-            .split_once('|')
-            .ok_or_else(|| format!("镜像 {reference} 状态无法解析"))?;
-        result.insert(
-            reference.to_string(),
-            ImageSnapshot {
-                reference: reference.to_string(),
-                image_id: id.to_string(),
-                platform: platform.to_string(),
-            },
-        );
+        let snapshot = inspect_local_image(identity)?
+            .ok_or_else(|| format!("目标 Docker 缺少镜像 {reference}，请先准备完整版本镜像"))?;
+        result.insert(reference.to_string(), snapshot);
     }
     Ok(result)
 }
@@ -2191,6 +2169,38 @@ fn volume_exists(name: &str) -> Result<bool, String> {
     } else {
         Err(format!("无法确认数据卷 {name} 是否存在：{}", stderr.trim()))
     }
+}
+
+fn image_lookup_candidates(reference: &str) -> Vec<&str> {
+    match sha256_base(reference) {
+        Some(base) if !base.trim().is_empty() => vec![reference, base],
+        _ => vec![reference],
+    }
+}
+
+/// 查找本机镜像：先按清单里的摘要引用，再回退到仓库与标签。
+///
+/// 从离线包导入或本地构建的镜像可能没有记录 RepoDigest，按 `仓库:标签@sha256:` 检查
+/// 会失败，但镜像本身仍然可用；此时按仓库与标签命中，并使用其真实镜像 ID。
+fn inspect_local_image(reference: &str) -> Result<Option<ImageSnapshot>, String> {
+    for candidate in image_lookup_candidates(reference) {
+        if let Some(mut snapshot) = inspect_image(candidate)? {
+            if candidate != reference {
+                log::warn!(
+                    target: "deploy",
+                    "镜像 {reference} 未以摘要引用存在，按仓库与标签使用本机镜像 {candidate}"
+                );
+            }
+            snapshot.reference = reference.to_string();
+            return Ok(Some(snapshot));
+        }
+    }
+    Ok(None)
+}
+
+/// 供其他部署入口复用：只判断本机能否使用该镜像，摘要不可用时按标签回退。
+pub(crate) fn local_image_exists(reference: &str) -> Result<bool, String> {
+    Ok(inspect_local_image(reference)?.is_some())
 }
 
 fn inspect_image(reference: &str) -> Result<Option<ImageSnapshot>, String> {
@@ -3158,6 +3168,23 @@ mod tests {
             &pinned,
             &format!("demo/api:latest@sha256:{}", "b".repeat(64))
         ));
+    }
+
+    #[test]
+    fn image_lookup_tries_digest_before_repository_and_tag() {
+        let pinned = format!("demo/api:latest@sha256:{}", "a".repeat(64));
+        assert_eq!(
+            image_lookup_candidates(&pinned),
+            vec![pinned.as_str(), "demo/api:latest"]
+        );
+        assert_eq!(
+            image_lookup_candidates("demo/api:latest"),
+            vec!["demo/api:latest"]
+        );
+        assert_eq!(
+            image_lookup_candidates("demo/api:latest@sha256:short"),
+            vec!["demo/api:latest@sha256:short"]
+        );
     }
 
     #[test]

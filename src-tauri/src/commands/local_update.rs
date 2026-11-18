@@ -1101,10 +1101,11 @@ fn check_images_available(config: &Value) -> Result<(), String> {
                 return Err(format!("服务 {name} 的镜像摘要无效，请重新获取制品"));
             }
         }
-        docker_output(
-            &["image", "inspect", "--format", "{{.Id}}", "--", image],
-            &format!("检查服务 {name} 的离线镜像"),
-        )?;
+        if !super::version_deploy::local_image_exists(image)? {
+            return Err(format!(
+                "本机缺少镜像 {image}，请先在镜像管理中准备该镜像"
+            ));
+        }
     }
     Ok(())
 }
