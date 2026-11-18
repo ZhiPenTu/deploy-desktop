@@ -2588,7 +2588,7 @@ impl Drop for TemporaryEnvFile {
     }
 }
 
-fn resolve_install_root(raw: &str, must_exist: bool) -> Result<PathBuf, String> {
+pub(crate) fn resolve_install_root(raw: &str, must_exist: bool) -> Result<PathBuf, String> {
     let path = Path::new(raw.trim());
     if !path.is_absolute() || path_guard::has_parent_dir(path) {
         return Err("部署目录必须使用不含上级跳转的绝对路径".to_string());

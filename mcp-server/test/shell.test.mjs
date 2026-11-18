@@ -196,7 +196,7 @@ test('损坏的压缩包不会覆盖已有目录', async (t) => {
 });
 
 test('备份保留完整安装目录层级，名称唯一，拒绝越界路径', async (t) => {
-  const root = await fixture(t);
+  const root = await fs.realpath(await fixture(t));
   const targets = ['config/app.yml', "deploy/config/app'$(x).yml"].map((name) => path.join(root, name));
   for (const [i, file] of targets.entries()) { await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file, String(i)); }
   const backups = [];
@@ -209,6 +209,18 @@ test('备份保留完整安装目录层级，名称唯一，拒绝越界路径',
   }
   assert.notEqual(backups[0], backups[1]);
   assert.equal((await local(backupScript(root, [`${root}/../outside`]))).code, 2);
+});
+
+test('备份拒绝符号链接安装目录', async (t) => {
+  const root = await fs.realpath(await fixture(t));
+  const real = path.join(root, 'real');
+  const link = path.join(root, 'link');
+  await fs.mkdir(real);
+  await fs.symlink(real, link, 'dir');
+
+  const result = await local(backupScript(link, []));
+  assert.equal(result.code, 3);
+  assert.match(result.stderr, /符号链接/);
 });
 
 test('Compose 使用实际容器 ID 并保持离线更新参数；缺失服务失败', async (t) => {

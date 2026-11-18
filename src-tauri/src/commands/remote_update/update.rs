@@ -2,7 +2,9 @@ use super::bundle::{load_bundle, normalize_install_dir, validate_install_dir};
 use super::inspect::{inspect_remote_deployment_inner, remote_free_kb};
 use super::models::RemoteUpdateResult;
 use super::progress::{emit_progress, ProgressHeartbeat};
-use super::transfer::{create_remote_backup, upload_dir_replace, upload_file_replace};
+use super::transfer::{
+    create_remote_backup, finish_remote_backup, upload_dir_replace, upload_file_replace,
+};
 use crate::commands::bundle::{default_components, ArtifactKind, ArtifactRoot, Bundle};
 use crate::commands::projects;
 use crate::commands::remote_ssh::{
@@ -321,6 +323,14 @@ fn update_remote_deployment_blocking(
 
         Ok(())
     })();
+    if let Some(dir) = backup_dir.as_deref() {
+        if let Err(error) =
+            finish_remote_backup(&host, port, &user, key.as_deref(), &install_dir, dir)
+        {
+            log::warn!(target: "deploy", "结束远程备份状态失败：{error}");
+            output_log.push_str("备份状态标记未清除，该备份会在稍后出现在清理列表。\n");
+        }
+    }
     if let Err(error) = execution {
         output_log.push_str(&format!("更新未完成：{error}\n"));
         emit_progress(

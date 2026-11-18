@@ -7,6 +7,7 @@ use tauri::Manager;
 use commands::{
     artifact::*,
     connections::*,
+    deployment_backup::*,
     deployment_review::*,
     deployment_images::*,
     deployment_image_bindings::*,
@@ -77,6 +78,10 @@ pub fn run() {
             deploy_remote_version,
             inspect_deployment_transaction,
             recover_deployment_transaction,
+            inspect_deployment_backups,
+            clean_deployment_backups,
+            inspect_remote_deployment_backups,
+            clean_remote_deployment_backups,
             inspect_bundle_plan,
             inspect_bundle_config,
             install_bundle,

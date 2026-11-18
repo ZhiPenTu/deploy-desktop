@@ -90,6 +90,39 @@ async function createRemoteBackup(hostConfig, installDir, artifacts) {
   return line.slice('BACKUP_DIR='.length).trim();
 }
 
+async function finishRemoteBackup(hostConfig, installDir, backupDir) {
+  if (!backupDir) return;
+  const script = `set -e
+INSTALL=${shellQuote(String(installDir || '').replace(/\/+$/, ''))}
+BACKUP=${shellQuote(backupDir)}
+case "$INSTALL" in
+  /*) ;;
+  *) echo '部署目录无效' >&2; exit 2 ;;
+esac
+case "$INSTALL" in
+  *'/../'*|*/..|*'/./'*|*/.|*'//'*) echo '部署目录无效' >&2; exit 2 ;;
+esac
+NAME=\${BACKUP##*/}
+[ "$BACKUP" = "$INSTALL/backup/$NAME" ] || { echo '备份目录无效' >&2; exit 2; }
+case "$NAME" in
+  update-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]-[[:alnum:]][[:alnum:]][[:alnum:]][[:alnum:]][[:alnum:]][[:alnum:]][[:alnum:]][[:alnum:]]) ;;
+  *) echo '备份目录无效' >&2; exit 2 ;;
+esac
+ensure_no_symlink_path() {
+  local path=$1
+  while [ -n "$path" ] && [ "$path" != "/" ]; do
+    [ -L "$path" ] && { echo "路径包含符号链接：$path" >&2; exit 3; }
+    path=$(dirname -- "$path")
+  done
+}
+ensure_no_symlink_path "$INSTALL"
+[ -d "$BACKUP" ] || exit 0
+ensure_no_symlink_path "$BACKUP"
+rm -f -- "$BACKUP/.updating"
+`;
+  await runRemote(hostConfig, script, { timeoutMs: 30 * 1000 });
+}
+
 async function applyRemoteUpdate(hostConfig, deployDir, components, bundle) {
   const selected = bundle.descriptor.components.filter((component) => components.includes(component.key));
   const composeSources = [bundle.descriptor.runtime.compose, bundle.descriptor.runtime.variant].filter(Boolean);
@@ -184,6 +217,14 @@ export async function updateRemote(profile, hostConfig, options = {}) {
       hint: '请检查已更新组件与备份，确认目标状态后再重试。',
       details: { ...error.details, backupDir, output }
     });
+  } finally {
+    if (backupDir) {
+      try {
+        await finishRemoteBackup(hostConfig, installDir, backupDir);
+      } catch {
+        output += '备份状态标记未清除，该备份会在稍后出现在清理列表。\n';
+      }
+    }
   }
   progress(94, '服务已重启');
   const finalStatus = await inspectRemoteDeployment(profile, hostConfig, installDir).catch(() => null);

@@ -159,7 +159,7 @@
         </div>
       </el-tab-pane>
 
-      <el-tab-pane label="系统设置" name="system">
+      <el-tab-pane label="系统设置" name="system" lazy>
         <div class="card-surface settings-card">
           <div class="card-title-bar">
             <h3>软件更新</h3>
@@ -202,6 +202,8 @@
             项目在左侧「项目管理」中维护，交付包在制品中心选择；在部署向导中选择项目后，监控、日志与数据库都会使用该项目的主机与目录。
           </p>
         </div>
+
+        <DeploymentBackups :connection="connection" />
       </el-tab-pane>
 
       <el-tab-pane label="运行日志" name="logs" lazy>
@@ -230,6 +232,7 @@ import { Box, FolderOpened, Key, Plus, Refresh } from '@element-plus/icons-vue';
 import { selectLocalPath as open } from '../../../api/tauri.js';
 import ArtifactSourceEditor from '../../artifacts/components/ArtifactSourceEditor.vue';
 import ArtifactTokenEditor from '../../artifacts/components/ArtifactTokenEditor.vue';
+import DeploymentBackups from '../components/DeploymentBackups.vue';
 import ManifestPullPanel from '../../registry/components/ManifestPullPanel.vue';
 import UpdateChecker from '../components/UpdateChecker.vue';
 import RuntimeLogs from '../components/RuntimeLogs.vue';

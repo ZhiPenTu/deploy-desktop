@@ -20,6 +20,25 @@ test('运行日志面板展示本机说明、分类筛选与空状态', async ({
   expect(problems).toEqual([]);
 });
 
+test('系统设置展示部署备份清理范围与未设置部署目录的空状态', async ({ page }) => {
+  const problems = [];
+  page.on('pageerror', (error) => problems.push(`未捕获异常：${error.message}`));
+
+  await page.goto('/');
+  await page.locator('.nav-menu .nav-item', { hasText: '设置' }).click();
+  await page.getByRole('tab', { name: '系统设置' }).click();
+
+  const card = page.locator('.settings-card', { hasText: '部署备份' });
+  await expect(card).toBeVisible();
+  await expect(card).toContainText('更新和部署前保存的回滚副本');
+  await expect(card).toContainText('尚未设置部署目录');
+  await expect(card).not.toContainText('backup/');
+  await expect(card).not.toContainText('.deploy-desktop');
+  await expect(card.getByRole('button', { name: '清理部署备份' })).toHaveCount(0);
+
+  expect(problems).toEqual([]);
+});
+
 test('页头的检查更新弹窗覆盖整页，不被页头裁切', async ({ page }) => {
   const problems = [];
   page.on('pageerror', (error) => problems.push(`未捕获异常：${error.message}`));
