@@ -13,6 +13,7 @@
     "prebuild": "npm run check:ui-text && npm run check:boundaries && npm run check:commands",
     "build": "vite build",
     "preview": "vite preview",
+    "clean:cache": "node scripts/clean-build-cache.mjs",
     "tauri": "tauri",
     "dev:app": "bash scripts/dev-app.sh --launch",
     "dev:app:build": "bash scripts/dev-app.sh",
