@@ -254,6 +254,7 @@ mod tests {
             .unwrap()
     }
 
+    #[cfg(unix)]
     #[test]
     fn finish_backup_script_removes_marker_only_for_direct_updates() {
         let root = temp_dir("valid");
