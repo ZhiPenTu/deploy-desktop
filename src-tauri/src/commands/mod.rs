@@ -5,6 +5,7 @@ pub mod projects;
 pub mod connections;
 pub mod db_ops;
 pub mod deployment_review;
+pub mod deployment_backup;
 pub mod deployment_tx;
 pub mod deployment_images;
 pub mod deployment_image_bindings;

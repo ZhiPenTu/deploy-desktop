@@ -102,6 +102,13 @@ export {
 } from './commands/monitoring.js';
 
 export {
+  inspectDeploymentBackups,
+  cleanDeploymentBackups,
+  inspectRemoteDeploymentBackups,
+  cleanRemoteDeploymentBackups
+} from './commands/maintenance.js';
+
+export {
   checkDockerInstallation,
   openDockerInstallation,
   checkAppUpdate,
