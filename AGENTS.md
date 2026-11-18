@@ -46,3 +46,11 @@
 - 界面变更还需检查实际渲染和关键交互，人工确认没有混入开发说明。文案检查脚本通过不代表此规则已自动验证。
 - 区分本地检查、浏览器模拟、桌面运行、真实 SSH 与目标环境验证；未验证的结果应明确说明，不宣称已完成真实部署。
 - 不提交依赖目录、构建目录、安装包或其他临时产物。
+
+## 构建缓存清理
+
+- 先用 `npm run clean:cache -- --dry-run` 确认范围，再执行 `npm run clean:cache`；需要同时处理 worktree 时加 `--worktrees`。
+- 默认只删除 `src-tauri/target/debug/incremental`，保留 `target/debug/deps`、`target/release`、Cargo 注册表和 `node_modules`，保证下次构建复用依赖。
+- `--deep` 会删除整个 `target/debug`，只在磁盘紧张且可接受重新编译依赖时手动使用；不得接入 `predev`、`prebuild`、CI 或部署流程。
+- 不清理 `~/.cargo`、`src-tauri/target/release/bundle`、用户数据、部署产物和凭据。
+- 清理前确认没有运行中的 Cargo/Tauri 构建；清理后如需交付验证，重新执行相关 Rust 检查或构建。
