@@ -2839,7 +2839,9 @@ fn available_disk_bytes(path: &Path) -> Result<u64, String> {
     }
     #[cfg(windows)]
     {
-        let output = Command::new("powershell")
+        let mut command = Command::new("powershell");
+        crate::core::process::hide_console(&mut command);
+        let output = command
             .args([
                 "-NoProfile",
                 "-NonInteractive",

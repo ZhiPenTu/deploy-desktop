@@ -222,6 +222,7 @@ pub(crate) fn docker_command() -> Command {
         })
     });
     let mut command = Command::new(binary);
+    process::hide_console(&mut command);
     if let Some(path) = docker_path_env() {
         command.env("PATH", path);
     }
@@ -263,6 +264,7 @@ pub(crate) fn docker_compose_command() -> Command {
             })
         });
     let mut command = Command::new(binary);
+    process::hide_console(&mut command);
     if let Some(path) = docker_path_env() {
         command.env("PATH", path);
     }

@@ -3,7 +3,7 @@
 //! 其他命令模块通过 `commands::remote_ssh` 使用这里的命令拼装、超时与错误解释，
 //! 不各自实现一份 SSH 调用。
 
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, Output};
 
 use super::*;
 
@@ -125,7 +125,9 @@ pub(crate) fn known_host_token(host: &str, port: u16) -> String {
 
 pub(crate) fn ensure_known_host(host: &str, port: u16) -> Result<(), String> {
     let token = known_host_token(host, port);
-    let output = Command::new(find_binary("ssh-keygen"))
+    let mut command = Command::new(find_binary("ssh-keygen"));
+    crate::core::process::hide_console(&mut command);
+    let output = command
         .args(["-F", &token])
         .output()
         .map_err(|_| String::from("无法确认目标主机身份，请检查本机 OpenSSH 配置后重试"))?;
@@ -272,27 +274,31 @@ pub(crate) fn explain_ssh_failure(stderr: &str, key: Option<&str>) -> String {
 
 pub(crate) use crate::core::shell::quote as shell_quote;
 
+/// Base64 编码在进程内完成：Windows 默认没有 `base64` 命令，
+/// 依赖外部程序会让密码下发、文件上传在 Windows 上直接失败。
 pub(crate) fn base64_encode(input: &str) -> Result<String, String> {
-    let mut child = Command::new(find_binary("base64"))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("调用 base64 失败: {e}"))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(input.as_bytes())
-            .map_err(|e| format!("写入 base64 输入失败: {e}"))?;
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let bytes = input.as_bytes();
+    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let first = u32::from(chunk[0]) << 16;
+        let second = chunk.get(1).copied().map_or(0, |byte| u32::from(byte) << 8);
+        let third = chunk.get(2).copied().map_or(0, u32::from);
+        let combined = first | second | third;
+        output.push(char::from(TABLE[((combined >> 18) & 0x3f) as usize]));
+        output.push(char::from(TABLE[((combined >> 12) & 0x3f) as usize]));
+        output.push(if chunk.len() > 1 {
+            char::from(TABLE[((combined >> 6) & 0x3f) as usize])
+        } else {
+            '='
+        });
+        output.push(if chunk.len() > 2 {
+            char::from(TABLE[(combined & 0x3f) as usize])
+        } else {
+            '='
+        });
     }
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("等待 base64 结束失败: {e}"))?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .split_whitespace()
-        .collect::<String>())
+    Ok(output)
 }
 
 #[cfg(test)]
@@ -306,6 +312,15 @@ mod tests {
             known_host_token("host.example.com", 2222),
             "[host.example.com]:2222"
         );
+    }
+
+    #[test]
+    fn base64_encode_matches_standard_padding() {
+        assert_eq!(base64_encode("").unwrap(), "");
+        assert_eq!(base64_encode("f").unwrap(), "Zg==");
+        assert_eq!(base64_encode("fo").unwrap(), "Zm8=");
+        assert_eq!(base64_encode("foo").unwrap(), "Zm9v");
+        assert_eq!(base64_encode("密码").unwrap(), "5a+G56CB");
     }
 
     #[test]

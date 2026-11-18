@@ -1179,7 +1179,9 @@ fn check_backup_space(plan: &UpdatePlan) -> Result<(), String> {
     #[cfg(windows)]
     {
         // 命令是固定文本，不把用户路径插入 PowerShell 表达式。
-        let output = Command::new("powershell")
+        let mut command = Command::new("powershell");
+        crate::core::process::hide_console(&mut command);
+        let output = command
             .args(["-NoProfile", "-NonInteractive", "-Command", "Get-PSDrive -PSProvider FileSystem | Select-Object Root,Free | ConvertTo-Json -Compress"])
             .output().map_err(|_| "无法检查部署分区空间".to_string())?;
         if !output.status.success() {

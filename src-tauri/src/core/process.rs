@@ -9,6 +9,18 @@ use tokio::process::Child;
 
 pub type InputProgress = Box<dyn FnMut(u64) + Send>;
 
+/// Windows 下隐藏控制台窗口。GUI 进程启动 ssh、tar、powershell 等控制台程序时，
+/// 系统默认会为每个子进程创建命令行窗口，部署过程中会连续弹出。
+#[cfg(windows)]
+pub fn hide_console(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+pub fn hide_console(_command: &mut Command) {}
+
 pub enum Input {
     Bytes(Vec<u8>),
     File {
@@ -53,6 +65,7 @@ async fn capture(mut reader: impl AsyncRead + Unpin, limit: usize) -> io::Result
 }
 
 fn spawn(mut command: Command) -> Result<Child, String> {
+    hide_console(&mut command);
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

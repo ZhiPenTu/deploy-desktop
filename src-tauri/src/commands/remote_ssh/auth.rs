@@ -20,7 +20,9 @@ pub(crate) fn setup_remote_ssh_key_blocking(
         if let Some(parent) = Path::new(&target_key).parent() {
             let _ = fs::create_dir_all(parent);
         }
-        let gen_res = Command::new(find_binary("ssh-keygen"))
+        let mut gen_command = Command::new(find_binary("ssh-keygen"));
+        crate::core::process::hide_console(&mut gen_command);
+        let gen_res = gen_command
             .args([
                 "-t",
                 "ed25519",
@@ -176,7 +178,9 @@ pub(crate) fn deploy_public_key_with_password(
     let sshpass = find_binary("sshpass");
 
     if Path::new(&sshpass).is_file() {
-        let output = Command::new(sshpass)
+        let mut sshpass_command = Command::new(sshpass);
+        crate::core::process::hide_console(&mut sshpass_command);
+        let output = sshpass_command
             .env("SSHPASS", password)
             .args([
                 "-e",
@@ -233,7 +237,9 @@ exit [lindex $result 3]
     let script_path =
         std::env::temp_dir().join(format!("deploy-ssh-key-{}.exp", std::process::id()));
     fs::write(&script_path, expect_script).map_err(|e| format!("写入 expect 脚本失败: {e}"))?;
-    let output = Command::new(expect)
+    let mut expect_command = Command::new(expect);
+    crate::core::process::hide_console(&mut expect_command);
+    let output = expect_command
         .arg(&script_path)
         .env("DEPLOY_SSH_PASSWORD", password)
         .env("DEPLOY_SSH_HOST", host)
