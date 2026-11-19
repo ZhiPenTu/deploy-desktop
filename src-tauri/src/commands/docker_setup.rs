@@ -336,14 +336,11 @@ fn inspect_installation(
     Ok(installation)
 }
 
-fn run_docker_check(command: Command, timeout: Duration) -> Result<std::process::Output, String> {
-    #[cfg(windows)]
-    let command = {
-        use std::os::windows::process::CommandExt;
-        let mut command = command;
-        command.creation_flags(0x08000000);
-        command
-    };
+fn run_docker_check(
+    mut command: Command,
+    timeout: Duration,
+) -> Result<std::process::Output, String> {
+    process::hide_console(&mut command);
     process::run(
         command,
         Input::Bytes(Vec::new()),
