@@ -1,0 +1,36 @@
+name: 交付 Linux 兼容包
+
+on:
+  push:
+    branches:
+      - codex/linux-legacy-build
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  deliver:
+    name: 导出构建产物
+    runs-on: ubuntu-22.04
+    steps:
+      - name: 下载构建产物
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh run download 44491163847 --repo "$GITHUB_REPOSITORY" \
+            -n deploy-desktop-linux-legacy -D out
+          find out -type f -exec ls -lh {} \;
+
+      - name: 创建临时草稿发布
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          appimage="$(find out -name '*.AppImage' | head -n1)"
+          gh release create "legacy-build-44491163847" "$appimage" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft \
+            --title "Legacy build 44491163847" \
+            --notes "glibc 2.28 兼容包，仅用于临时传输。"
