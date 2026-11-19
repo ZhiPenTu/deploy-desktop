@@ -1,0 +1,73 @@
+name: 构建 Linux 兼容包
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-legacy:
+    name: glibc 2.28 AppImage
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: 安装 Linux 构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            libxdo-dev \
+            libssl-dev \
+            librsvg2-dev \
+            patchelf \
+            squashfs-tools \
+            libharfbuzz0b \
+            libfribidi0 \
+            libfreetype6 \
+            libwayland-client0 \
+            libwayland-cursor0 \
+            libwayland-server0 \
+            libgbm1 \
+            libdrm2
+
+      - name: 安装前端依赖
+        run: npm ci
+        env:
+          npm_config_registry: https://registry.npmjs.org/
+          npm_config_replace_registry_host: always
+
+      - name: 构建 AppImage
+        run: npx tauri build --bundles appimage --config '{"bundle":{"createUpdaterArtifacts":false}}'
+
+      - name: 重新打包为 glibc 2.28 兼容版本
+        run: |
+          set -euo pipefail
+          appimage="$(find src-tauri/target/release/bundle/appimage -name '*.AppImage' ! -name '*-legacy.AppImage' | head -n1)"
+          test -n "$appimage"
+          output="${appimage%.AppImage}-legacy.AppImage"
+          bash scripts/package-linux-legacy.sh "$appimage" "$output"
+          sha256sum "$output"
+          ls -lh "$output"
+
+      - name: 上传安装包
+        uses: actions/upload-artifact@v7
+        with:
+          name: deploy-desktop-linux-legacy
+          path: src-tauri/target/release/bundle/appimage/*-legacy.AppImage
+          if-no-files-found: error
