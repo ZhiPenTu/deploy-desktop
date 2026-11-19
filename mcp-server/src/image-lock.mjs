@@ -205,8 +205,8 @@ export function evaluateImagePrecheck({ lock, images, hostPlatform, probes }) {
   return { hostPlatform: hostPlatform || null, checks, problems, warnings };
 }
 
-export async function verifyImagesRemote(hostConfig, bundle) {
-  const images = bundle.descriptor.images;
+export async function verifyImagesRemote(hostConfig, bundle, selectedImages = bundle.descriptor.images) {
+  const images = selectedImages;
   if (images.length === 0) {
     return { skipped: true, hostPlatform: null, checks: [], problems: [], warnings: [], lockPath: '', lockPresent: false };
   }

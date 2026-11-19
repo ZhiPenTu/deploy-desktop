@@ -23,6 +23,7 @@ export function registerUpdatesTools(register) {
       host: hostSchema,
       bundleDir: z.string().min(1).describe('交付包目录，需包含 bundle.json'),
       installDir: z.string().optional(),
+      backupVolumes: z.array(z.string()).optional().describe('需要冷备的数据卷名称；省略时备份全部，传空数组表示不备份'),
       dryRun: z.boolean().optional().default(false),
       confirm: z.boolean().optional()
     },
@@ -37,6 +38,7 @@ export function registerUpdatesTools(register) {
     return deployVersionRemote(profile, host, {
       bundleDir: args.bundleDir,
       installDir: args.installDir,
+      backupVolumes: args.backupVolumes,
       dryRun: args.dryRun,
       onProgress: (percent, message) => progress(percent, 100, message)
     });
@@ -102,7 +104,8 @@ export function registerUpdatesTools(register) {
       bundleDir: z.string().min(1).describe('交付包目录，需包含 bundle.json'),
       installDir: z.string().optional(),
       components: z.array(z.string()).optional().describe('兼容参数；传入时必须是交付包全部组件'),
-      backup: z.boolean().optional().describe('兼容参数；完整版本部署始终备份，backup=false 会被拒绝'),
+      backup: z.boolean().optional().describe('兼容参数；完整版本部署默认备份全部数据卷，可通过 backupVolumes 缩小范围，backup=false 会被拒绝'),
+      backupVolumes: z.array(z.string()).optional().describe('需要冷备的数据卷名称；省略时备份全部，传空数组表示不备份'),
       dryRun: z.boolean().optional().default(false),
       confirm: z.boolean().optional()
     },
@@ -124,6 +127,7 @@ export function registerUpdatesTools(register) {
     return deployVersionRemote(profile, host, {
       bundleDir: args.bundleDir,
       installDir: args.installDir,
+      backupVolumes: args.backupVolumes,
       dryRun: args.dryRun,
       onProgress: (percent, message) => progress(percent, 100, message)
     });

@@ -303,8 +303,9 @@ restore_files() {
 }
 
 check_volume_tools() {
-  while IFS=$'\t' read -r logical actual image existed; do
+  while IFS=$'\t' read -r logical actual image existed backup; do
     [ -n "$logical" ] || continue
+    [ "${backup:-yes}" = yes ] || continue
     [ -n "$image" ] || { echo "数据卷 $logical 缺少备份镜像" >&2; return 6; }
     if ! timeout 300 docker run --rm --network none --entrypoint /bin/sh "$image" -c 'command -v tar >/dev/null && command -v gzip >/dev/null' >/dev/null 2>&1; then
       echo "备份镜像 $image 缺少 tar 或 gzip" >&2
@@ -317,8 +318,9 @@ snapshot_volumes() {
   mkdir -p "$SNAPSHOT/volumes"
   : > "$SNAPSHOT/volume-backups.tsv"
   [ -f "$INCOMING/volume-specs.tsv" ] || return 0
-  while IFS=$'\t' read -r logical actual image existed; do
+  while IFS=$'\t' read -r logical actual image existed backup; do
     [ -n "$logical" ] || continue
+    [ "${backup:-yes}" = yes ] || continue
     if [ "$existed" != yes ]; then
       continue
     fi
@@ -357,7 +359,7 @@ remove_created_volumes() {
   [ -f "$INCOMING/volume-specs.tsv" ] || return 0
   project=''
   [ ! -f "$TXN/project-name" ] || project=$(cat "$TXN/project-name")
-  while IFS=$'\t' read -r logical actual image existed; do
+  while IFS=$'\t' read -r logical actual image existed backup; do
     [ -n "$actual" ] || continue
     if [ "$existed" != yes ]; then
       if timeout 60 docker volume inspect "$actual" >/dev/null 2>&1; then

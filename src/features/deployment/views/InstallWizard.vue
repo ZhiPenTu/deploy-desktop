@@ -126,6 +126,7 @@
       :plan="bundlePlan"
       :review="review"
       :transaction="transaction"
+      :backup-volumes="backupVolumes"
       :busy="busy"
       :can-execute="canExecute"
       :artifact-selection-issue="artifactSelectionIssue"
@@ -145,6 +146,7 @@
       @previous="previousStep"
       @preflight="runPreflight"
       @execute="executeDeployment"
+      @update:backup-volumes="setBackupVolumes"
       @recover="restorePreviousVersion"
       @go-dashboard="emit('go-dashboard')"
     />
@@ -209,6 +211,8 @@ const {
   preparedBundle,
   artifactBusy,
   bundlePlan,
+  backupVolumes,
+  setBackupVolumes,
   review,
   reviewError,
   checkingReview,
