@@ -9,7 +9,8 @@ import { invokeVersionDeployment } from '../src/features/deployment/services/ope
 const input = () => ({
   connection: { remoteHost: 'host.example.com', remotePort: 2222, remoteUser: 'deploy', remoteKey: '/key', installDir: '/srv/app' },
   remote: true, bundle: { dir: '/bundle', version: '1.0.0' },
-  label: 'demo'
+  label: 'demo',
+  backupVolumes: ['db-data']
 });
 
 afterEach(() => {
@@ -32,8 +33,10 @@ test('confirmation snapshots detach mutable host and bundle inputs', () => {
   const context = createDeploymentContext(options);
   options.connection.remoteHost = 'changed.example.com';
   options.bundle.dir = '/other';
+  options.backupVolumes.push('cache-data');
   assert.equal(context.host, 'host.example.com');
   assert.equal(context.bundleDir, '/bundle');
+  assert.deepEqual(context.backupVolumes, ['db-data']);
   assert.ok(Object.isFrozen(context));
   assert.equal(contextTarget(context).host, 'host.example.com');
   assert.equal(contextTarget({ remote: false }), null);
@@ -68,8 +71,13 @@ test('version deployment preserves target and dry-run, rejects failed preflight 
   assert.equal(calls[0].command,'deploy_remote_version');
   assert.equal(calls[0].args.host,remote.host);
   assert.equal(calls[0].args.dryRun,true);
+  assert.deepEqual(calls[0].args.backupVolumes,['db-data']);
   assert.equal(calls[1].command,'deploy_local_version');
   assert.equal(calls[1].args.dryRun,false);
+  assert.deepEqual(calls[1].args.backupVolumes,['db-data']);
+  const noBackup=createDeploymentContext({...input(),remote:false,backupVolumes:[]});
+  await invokeVersionDeployment(noBackup,false);
+  assert.deepEqual(calls[2].args.backupVolumes,[]);
   mockIPC(()=>({success:true,output:'ok'}));
   assert.equal((await invokeVersionDeployment(remote,true)).success,true);
 });

@@ -658,26 +658,79 @@ function volumeCheckScript(
 printf 'OLD_IMAGE|${index}|%s\\n' "$OLD_PROBE"`);
   });
   plans.forEach((volume, index) => {
+    const backup = volume.backup ? 'yes' : 'no';
     lines.push(`if docker volume inspect -- ${shellQuote(volume.actual)} >/dev/null 2>&1; then
   exists=yes
   owner=$(docker volume inspect --format '{{index .Labels "com.docker.compose.project"}}|{{index .Labels "com.docker.compose.volume"}}' -- ${shellQuote(volume.actual)})
   [ "$owner" = ${shellQuote(`${projectName}|${volume.logical}`)} ] || { echo '数据卷 Compose 归属标签不一致，已阻止部署' >&2; exit 6; }
-  bytes=$(docker run --rm --network none -v ${shellQuote(`${volume.actual}:/data:ro`)} --entrypoint /bin/sh ${shellQuote(volume.image)} -c "du -sk /data 2>/dev/null | awk '{print \\$1}'" 2>/dev/null | tr -d '\\r')
-  bytes=$(( \${bytes:-0} * 1024 ))
+  if [ "${backup}" = yes ]; then
+    bytes=$(docker run --rm --network none -v ${shellQuote(`${volume.actual}:/data:ro`)} --entrypoint /bin/sh ${shellQuote(volume.image)} -c "du -sk /data 2>/dev/null | awk '{print \\$1}'" 2>/dev/null | tr -d '\\r')
+    bytes=$(( \${bytes:-0} * 1024 ))
+  else
+    bytes=0
+  fi
 else
   exists=no
   bytes=0
 fi
-if ! docker run --rm --network none --entrypoint /bin/sh ${shellQuote(volume.image)} -c 'command -v tar >/dev/null && command -v gzip >/dev/null' >/dev/null 2>&1; then
-  echo ${shellQuote(`备份镜像 ${volume.image} 缺少 tar 或 gzip`)} >&2
-  exit 6
+if [ "${backup}" = yes ]; then
+  if ! docker run --rm --network none --entrypoint /bin/sh ${shellQuote(volume.image)} -c 'command -v tar >/dev/null && command -v gzip >/dev/null' >/dev/null 2>&1; then
+    echo ${shellQuote(`备份镜像 ${volume.image} 缺少 tar 或 gzip`)} >&2
+    exit 6
+  fi
 fi
 printf 'VOLUME|${index}|%s|%s\\n' "$exists" "$bytes"`);
   });
   return lines.join('\n');
 }
 
-async function preflightRemote({ hostConfig, bundle, profile, installDir }) {
+export function resolveBackupVolumes(data, requested) {
+  const declared = new Set(data.volumes.map((volume) => volume.name));
+  if (requested === undefined || requested === null) return declared;
+  if (!Array.isArray(requested)) {
+    throw new DeployError('数据卷备份选择格式无效', { code: 'BACKUP_VOLUME_SELECTION_INVALID' });
+  }
+  const selected = new Set();
+  for (const raw of requested) {
+    const name = String(raw || '').trim();
+    if (!name) {
+      throw new DeployError('数据卷名称不能为空', { code: 'BACKUP_VOLUME_SELECTION_INVALID' });
+    }
+    if (!declared.has(name)) {
+      throw new DeployError(`数据卷 ${name} 未在交付包声明，无法选择备份`, {
+        code: 'BACKUP_VOLUME_UNKNOWN'
+      });
+    }
+    selected.add(name);
+  }
+  return selected;
+}
+
+export function selectDeploymentImages(images, volumes, backupSelection, incoming) {
+  const selectedBackupImages = new Set(
+    volumes
+      .filter((volume) => backupSelection.has(volume.name))
+      .map((volume) => volume.image)
+  );
+  const skippedBackupImages = new Set(
+    volumes
+      .filter((volume) => !backupSelection.has(volume.name))
+      .map((volume) => volume.image)
+  );
+  const serviceImageRefs = new Set(
+    Object.values(incoming?.services || {})
+      .map((service) => String(service?.image || '').trim())
+      .filter(Boolean)
+  );
+  return images.filter(
+    (image) =>
+      !skippedBackupImages.has(image.name) ||
+      selectedBackupImages.has(image.name) ||
+      serviceImageRefs.has(image.imageRef)
+  );
+}
+
+async function preflightRemote({ hostConfig, bundle, profile, installDir, backupVolumes }) {
   const deployDir = remoteJoin(installDir, bundle.deploySourceRel());
   const record = await remoteReadRecord(hostConfig, installDir);
   if (record && record.product !== bundle.product()) {
@@ -736,7 +789,15 @@ async function preflightRemote({ hostConfig, bundle, profile, installDir }) {
     }
     const volumePlans = [];
     const data = bundle.ensureFullDeployMetadata();
+    const backupSelection = resolveBackupVolumes(data, backupVolumes);
+    const imagesToVerify = selectDeploymentImages(
+      bundle.descriptor.images,
+      data.volumes,
+      backupSelection,
+      incoming
+    );
     for (const volume of data.volumes) {
+      const backup = backupSelection.has(volume.name);
       if (!volumeMountedBy(incoming, volume.service, volume.name)) {
         throw new DeployError(`数据卷 ${volume.name} 未挂载到声明的服务 ${volume.service}`, { code: 'DATA_VOLUME_NOT_MOUNTED' });
       }
@@ -744,17 +805,20 @@ async function preflightRemote({ hostConfig, bundle, profile, installDir }) {
       if (current && volumeName(current, volume.name) !== actual) {
         throw new DeployError(`新旧版本数据卷 ${volume.name} 的实际名称不一致`, { code: 'DATA_VOLUME_CHANGED' });
       }
-      const backupImage = bundle.descriptor.images.find((image) => image.name === volume.image);
-      if (!backupImage) {
+      const backupImage = backup
+        ? bundle.descriptor.images.find((image) => image.name === volume.image)
+        : null;
+      if (backup && !backupImage) {
         throw new DeployError(`数据卷 ${volume.name} 的备份镜像未声明`, { code: 'BACKUP_IMAGE_MISSING' });
       }
       volumePlans.push({
         logical: volume.name,
         service: volume.service,
         actual,
-        image: backupImage.imageRef,
+        image: backupImage?.imageRef || '',
         exists: false,
         bytes: 0,
+        backup,
         required: Boolean(volume.required)
       });
     }
@@ -765,7 +829,7 @@ async function preflightRemote({ hostConfig, bundle, profile, installDir }) {
         code: 'DATA_VOLUME_UNDECLARED'
       });
     }
-    const imageCheck = await verifyImagesRemote(hostConfig, bundle);
+    const imageCheck = await verifyImagesRemote(hostConfig, bundle, imagesToVerify);
     if (imageCheck.problems.length > 0) {
       throw new DeployError(`目标机镜像预检未通过：${imageCheck.problems.join('；')}`, {
         code: 'IMAGE_PRECHECK_FAILED',
@@ -776,6 +840,7 @@ async function preflightRemote({ hostConfig, bundle, profile, installDir }) {
     const oldImages = current ? uniqueImageRefs(current) : [];
     const bindings = await remoteImageBindings(hostConfig, installDir);
     for (const volume of volumePlans) {
+      if (!volume.backup) continue;
       const image = imageCheck.checks.find((image) => image.ref === volume.image && image.present);
       if (!image?.imageId) {
         throw new DeployError(`数据卷 ${volume.logical} 的备份镜像尚未准备完成`, {
@@ -1145,7 +1210,13 @@ export async function deployVersionRemote(profile, hostConfig, options = {}) {
   const existing = await inspectRemoteTransaction(hostConfig, installDir);
   assertNoBlockingTransaction(existing);
   progress(8, '预检目标机');
-  const plan = await preflightRemote({ hostConfig, bundle, profile, installDir });
+  const plan = await preflightRemote({
+    hostConfig,
+    bundle,
+    profile,
+    installDir,
+    backupVolumes: options.backupVolumes
+  });
   const frontend = bundle.descriptor.runtime.services
     .find((service) => service.key.toLowerCase() === 'frontend');
   plan.frontendService = frontend?.serviceKey || '';
@@ -1157,6 +1228,8 @@ export async function deployVersionRemote(profile, hostConfig, options = {}) {
   const dryRun = Boolean(options.dryRun);
   if (dryRun) {
     progress(100, '预检通过');
+    const selected = plan.volumes.filter((volume) => volume.backup);
+    const skipped = plan.volumes.filter((volume) => !volume.backup);
     return {
       success: true,
       recovered: false,
@@ -1167,7 +1240,7 @@ export async function deployVersionRemote(profile, hostConfig, options = {}) {
       transactionId: '',
       snapshotDir: '',
       error: null,
-      output: `预检通过：目标 ${installDir}；版本 ${bundle.version()}；${plan.services.length} 个服务；数据卷：${plan.volumes.map((volume) => volume.logical).join('、') || '无'}；预计备份空间约 ${(plan.requiredBackupBytes / 1024 / 1024 / 1024).toFixed(1)} GB。未上传部署文件，也未停止服务。`,
+      output: `预检通过：目标 ${installDir}；版本 ${bundle.version()}；${plan.services.length} 个服务；备份数据卷：${selected.map((volume) => volume.logical).join('、') || '不备份数据卷'}${skipped.length ? `；不备份：${skipped.map((volume) => volume.logical).join('、')}` : ''}；预计备份空间约 ${(plan.requiredBackupBytes / 1024 / 1024 / 1024).toFixed(1)} GB。未上传部署文件，也未停止服务。`,
       durationSecs: Math.round((Date.now() - started) / 1000),
       status: null
     };
@@ -1205,7 +1278,7 @@ export async function deployVersionRemote(profile, hostConfig, options = {}) {
     await writeRemoteText(
       hostConfig,
       `${incoming}/volume-specs.tsv`,
-      `${plan.volumes.map((volume) => `${volume.logical}\t${volume.actual}\t${volume.image}\t${volume.exists ? 'yes' : 'no'}`).join('\n')}\n`
+      `${plan.volumes.map((volume) => `${volume.logical}\t${volume.actual}\t${volume.image}\t${volume.exists ? 'yes' : 'no'}\t${volume.backup ? 'yes' : 'no'}`).join('\n')}\n`
     );
     await writeRemoteText(hostConfig, `${incoming}/deployed.json`, `${JSON.stringify(deployRecord({
       bundle,

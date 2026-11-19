@@ -107,6 +107,9 @@ if [ "\${1:-}" = compose ]; then
       if [ "\${compose_file##*/}" = compose.new.yml ] && [ -n "\${MOCK_NEW_UP_DELAY:-}" ]; then
         sleep "$MOCK_NEW_UP_DELAY"
       fi
+      if [ "\${compose_file##*/}" = compose.new.yml ] && [ "\${MOCK_MUTATE_VOLUME_ON_UP:-no}" = yes ]; then
+        printf 'new-volume' > "$MOCK_VOLUME_DIR/value.txt"
+      fi
       if [ "\${MOCK_FAIL_NEW_UP:-no}" = yes ] && [ -n "$compose_file" ] && [ "\${compose_file##*/}" = compose.new.yml ]; then
         printf 'new version failed\\n' >&2
         exit 1
@@ -200,7 +203,8 @@ async function runWorker(context, {
   newUpDelay = '',
   projectName = '',
   projectWorkingDir = '',
-  volumeOwner = 'mock-project'
+  volumeOwner = 'mock-project',
+  mutateVolumeOnUp = false
 } = {}) {
   const args = [
     mode,
@@ -232,7 +236,8 @@ async function runWorker(context, {
       MOCK_NEW_UP_DELAY: newUpDelay,
       MOCK_FAIL_RESTORE: failRestore ? 'yes' : 'no',
       MOCK_PROJECT_WORKING_DIR: projectWorkingDir,
-      MOCK_VOLUME_OWNER: volumeOwner
+      MOCK_VOLUME_OWNER: volumeOwner,
+      MOCK_MUTATE_VOLUME_ON_UP: mutateVolumeOnUp ? 'yes' : 'no'
     },
     timeoutMs: 30000
   };
@@ -289,6 +294,28 @@ test('远端 worker 在新版本启动失败后恢复旧文件和旧数据卷', 
   assert.ok(!oldUp?.includes(`${context.txn}/image-override.compose.json`));
   const status = await fs.readFile(path.join(context.txn, 'status.env'), 'utf8');
   assert.match(status, /phase=recovered/);
+  assert.match(status, /state=recovered/);
+});
+
+test('远端 worker 跳过未选择的数据卷备份，回滚不覆盖该卷', async (t) => {
+  const context = await fixture(t);
+  await fs.writeFile(
+    path.join(context.txn, 'incoming', 'volume-specs.tsv'),
+    'data\tmock-volume\tnginx:test\tyes\tno\n'
+  );
+  const result = await runWorker(context, {
+    failNewUp: true,
+    mutateVolumeOnUp: true
+  });
+  assertWorkerSucceeded(result);
+  assert.equal(
+    await fs.readFile(path.join(context.volume, 'value.txt'), 'utf8'),
+    'new-volume'
+  );
+  assert.equal(await fs.readFile(path.join(context.deploy, 'app.txt'), 'utf8'), 'old-file');
+  const dockerLog = await fs.readFile(path.join(context.root, 'docker.log'), 'utf8');
+  assert.ok(!dockerLog.includes('tar -czf'));
+  const status = await fs.readFile(path.join(context.txn, 'status.env'), 'utf8');
   assert.match(status, /state=recovered/);
 });
 

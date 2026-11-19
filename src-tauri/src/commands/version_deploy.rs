@@ -81,6 +81,7 @@ struct VolumePlan {
     actual_name: String,
     exists: bool,
     bytes: u64,
+    backup: bool,
 }
 
 #[tauri::command]
@@ -89,9 +90,10 @@ pub async fn deploy_local_version(
     bundle_dir: String,
     install_dir: String,
     dry_run: bool,
+    backup_volumes: Option<Vec<String>>,
 ) -> Result<VersionDeployResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        run_full_deploy(&window, &bundle_dir, &install_dir, dry_run)
+        run_full_deploy(&window, &bundle_dir, &install_dir, dry_run, backup_volumes.as_deref())
     })
     .await
     .map_err(|error| format!("完整版本部署任务执行失败：{error}"))?
@@ -107,6 +109,7 @@ pub async fn deploy_remote_version(
     bundle_dir: String,
     install_dir: String,
     dry_run: bool,
+    backup_volumes: Option<Vec<String>>,
 ) -> Result<VersionDeployResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
         super::remote_update::deploy_remote_full(
@@ -118,6 +121,7 @@ pub async fn deploy_remote_version(
             bundle_dir,
             install_dir,
             dry_run,
+            backup_volumes.as_deref(),
         )
     })
     .await
@@ -217,6 +221,7 @@ fn run_full_deploy(
     bundle_dir: &str,
     install_dir: &str,
     dry_run: bool,
+    backup_volumes: Option<&[String]>,
 ) -> Result<VersionDeployResult, String> {
     let started = Instant::now();
     progress(
@@ -241,7 +246,7 @@ fn run_full_deploy(
         deployment_tx::ensure_no_incomplete_transaction(&install_root)?;
         Some(lock)
     };
-    let plan = build_plan(bundle_dir, install_dir)?;
+    let plan = build_plan(bundle_dir, install_dir, backup_volumes)?;
     let _project_lock = if dry_run || plan.project_name.trim().is_empty() {
         None
     } else {
@@ -442,17 +447,25 @@ fn execute_new_version(
         transaction.snapshot_dir
     ));
 
-    progress(
-        window,
-        "备份数据卷",
-        24,
-        "running",
-        "冷备数据库、消息队列与缓存数据",
-    );
+    let backup_count = plan
+        .volumes
+        .iter()
+        .filter(|volume| volume.backup && volume.exists)
+        .count();
+    let backup_message = if backup_count == 0 {
+        "未选择需要备份的数据卷".to_string()
+    } else {
+        format!("冷备 {backup_count} 个数据卷")
+    };
+    progress(window, "备份数据卷", 24, "running", &backup_message);
     transaction
         .set_phase(&plan.install_root, PHASE_SNAPSHOTTING_DATA)
         .map_err(|error| (PHASE_SNAPSHOTTING_DATA.to_string(), error))?;
     for volume in &plan.volumes {
+        if !volume.backup && volume.exists {
+            output.push_str(&format!("数据卷 {}：按要求不备份\n", volume.logical_name));
+            continue;
+        }
         if !volume.exists {
             transaction.volumes.push(VolumeSnapshot {
                 logical_name: volume.logical_name.clone(),
@@ -1053,7 +1066,11 @@ fn transaction_compose_path(install: &Path, stored: &str) -> PathBuf {
     install.join(stored)
 }
 
-fn build_plan(bundle_dir: &str, install_dir: &str) -> Result<FullDeployPlan, String> {
+fn build_plan(
+    bundle_dir: &str,
+    install_dir: &str,
+    backup_volumes: Option<&[String]>,
+) -> Result<FullDeployPlan, String> {
     let bundle_root =
         fs::canonicalize(bundle_dir.trim()).map_err(|_| "无法访问交付包目录".to_string())?;
     let install_root = resolve_install_root(install_dir, false)?;
@@ -1172,11 +1189,13 @@ fn build_plan(bundle_dir: &str, install_dir: &str) -> Result<FullDeployPlan, Str
         .map(|config| previous_image_snapshots(&install_root, config, record.as_ref()))
         .transpose()?
         .unwrap_or_default();
+    let backup_selection = resolve_backup_volumes(&bundle, backup_volumes)?;
     let volumes = volume_plans(
         &install_root,
         &bundle,
         &incoming_config,
         current_config.as_ref(),
+        &backup_selection,
     )?;
     let mut managed_paths: BTreeSet<String> = artifacts
         .iter()
@@ -1257,7 +1276,11 @@ fn build_plan(bundle_dir: &str, install_dir: &str) -> Result<FullDeployPlan, Str
         }
         file_bytes = file_bytes.saturating_add(tree_bytes(&target)?);
     }
-    let volume_bytes = volumes.iter().map(|volume| volume.bytes).sum::<u64>();
+    let volume_bytes = volumes
+        .iter()
+        .filter(|volume| volume.backup)
+        .map(|volume| volume.bytes)
+        .sum::<u64>();
     let incoming_bytes = artifacts
         .iter()
         .try_fold(0u64, |total, artifact| {
@@ -1335,21 +1358,34 @@ fn frontend_declaration(bundle: &Bundle) -> (String, Option<u16>) {
 }
 
 fn dry_run_output(plan: &FullDeployPlan) -> String {
-    let data: Vec<String> = plan
+    let selected: Vec<String> = plan
         .volumes
         .iter()
+        .filter(|volume| volume.backup)
         .map(|volume| format!("{}（{}）", volume.logical_name, volume.actual_name))
         .collect();
+    let skipped: Vec<String> = plan
+        .volumes
+        .iter()
+        .filter(|volume| !volume.backup)
+        .map(|volume| format!("{}（{}）", volume.logical_name, volume.actual_name))
+        .collect();
+    let skipped_text = if skipped.is_empty() {
+        String::new()
+    } else {
+        format!("不备份：{}；", skipped.join("、"))
+    };
     format!(
-        "预检通过：版本 {}；部署目录 {}；{} 个服务；数据卷：{}；预计备份空间约 {:.1} GB。未停止服务，也未修改目标。",
+        "预检通过：版本 {}；部署目录 {}；{} 个服务；备份数据卷：{}；{}预计备份空间约 {:.1} GB。未停止服务，也未修改目标。",
         plan.bundle.version(),
         plan.install_root.display(),
         plan.services.len(),
-        if data.is_empty() {
-            "无".to_string()
+        if selected.is_empty() {
+            "不备份数据卷".to_string()
         } else {
-            data.join("、")
+            selected.join("、")
         },
+        skipped_text,
         plan.required_backup_bytes as f64 / 1024.0 / 1024.0 / 1024.0
     )
 }
@@ -1379,11 +1415,53 @@ fn result_without_transaction(
     }
 }
 
+pub(crate) fn resolve_backup_volumes(
+    bundle: &Bundle,
+    requested: Option<&[String]>,
+) -> Result<BTreeSet<String>, String> {
+    let data = bundle
+        .descriptor
+        .runtime
+        .data
+        .as_ref()
+        .ok_or_else(|| "交付包缺少数据卷声明".to_string())?;
+    let declared: BTreeSet<String> = data
+        .volumes
+        .iter()
+        .map(|volume| volume.name.clone())
+        .collect();
+    select_backup_names(&declared, requested)
+}
+
+fn select_backup_names(
+    declared: &BTreeSet<String>,
+    requested: Option<&[String]>,
+) -> Result<BTreeSet<String>, String> {
+    let Some(requested) = requested else {
+        return Ok(declared.clone());
+    };
+    let mut selected = BTreeSet::new();
+    for raw in requested {
+        let name = raw.trim();
+        if name.is_empty() {
+            return Err("数据卷名称不能为空".to_string());
+        }
+        if !declared.contains(name) {
+            return Err(format!(
+                "数据卷 {name} 未在交付包声明，无法选择备份"
+            ));
+        }
+        selected.insert(name.to_string());
+    }
+    Ok(selected)
+}
+
 fn volume_plans(
     install: &Path,
     bundle: &Bundle,
     incoming: &Value,
     current: Option<&Value>,
+    selected: &BTreeSet<String>,
 ) -> Result<Vec<VolumePlan>, String> {
     let data = bundle
         .descriptor
@@ -1395,31 +1473,37 @@ fn volume_plans(
     let bindings = super::deployment_image_bindings::local_bindings(install)?;
     let mut verified_backup_images = BTreeSet::new();
     for volume in &data.volumes {
+        let backup = selected.contains(&volume.name);
         let actual = resolved_volume_name(incoming, &volume.name)?;
         ensure_volume_mounted_by(incoming, &volume.service, &volume.name)?;
-        let reference = bundle
-            .descriptor
-            .images
-            .iter()
-            .find(|image| image.name.trim() == volume.image.trim())
-            .map(|image| image.reference.clone())
-            .ok_or_else(|| format!("数据卷 {} 的备份镜像未声明", volume.name))?;
-        let identity = bindings
-            .iter()
-            .find(|binding| image_reference_matches(&binding.reference, &reference))
-            .map(|binding| binding.image_id.as_str())
-            .unwrap_or(&reference);
-        let image = inspect_local_image(identity)?
-            .ok_or_else(|| format!("目标 Docker 缺少数据卷备份镜像 {reference}"))?
-            .image_id;
-        if verified_backup_images.insert(image.clone()) {
-            if inspect_image(&image)?.is_none() {
-                return Err(format!(
-                    "目标 Docker 缺少数据卷备份镜像 {image}，请先准备镜像后再部署"
-                ));
+        let image = if backup {
+            let reference = bundle
+                .descriptor
+                .images
+                .iter()
+                .find(|image| image.name.trim() == volume.image.trim())
+                .map(|image| image.reference.clone())
+                .ok_or_else(|| format!("数据卷 {} 的备份镜像未声明", volume.name))?;
+            let identity = bindings
+                .iter()
+                .find(|binding| image_reference_matches(&binding.reference, &reference))
+                .map(|binding| binding.image_id.as_str())
+                .unwrap_or(&reference);
+            let image = inspect_local_image(identity)?
+                .ok_or_else(|| format!("目标 Docker 缺少数据卷备份镜像 {reference}"))?
+                .image_id;
+            if verified_backup_images.insert(image.clone()) {
+                if inspect_image(&image)?.is_none() {
+                    return Err(format!(
+                        "目标 Docker 缺少数据卷备份镜像 {image}，请先准备镜像后再部署"
+                    ));
+                }
+                deployment_tx::check_backup_tools_local(&image)?;
             }
-            deployment_tx::check_backup_tools_local(&image)?;
-        }
+            image
+        } else {
+            String::new()
+        };
         let exists = volume_exists(&actual)?;
         // 首次部署允许复用归属一致的数据卷；不存在时由本次部署直接创建。
         // 事务按部署前的真实状态记录，失败回滚只清理本次新建的卷。
@@ -1447,7 +1531,7 @@ fn volume_plans(
                 ));
             }
         }
-        let bytes = if exists {
+        let bytes = if backup && exists {
             volume_usage_bytes(&image, &actual).unwrap_or(0)
         } else {
             0
@@ -1458,6 +1542,7 @@ fn volume_plans(
             actual_name: actual,
             exists,
             bytes,
+            backup,
         });
     }
     for service in active_service_configs(incoming) {
@@ -2977,6 +3062,26 @@ mod tests {
         assert!(resolved_volume_name(&config, "shared")
             .unwrap_err()
             .contains("external"));
+    }
+
+    #[test]
+    fn backup_selection_defaults_to_all_and_allows_none() {
+        let declared = ["database", "cache"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            select_backup_names(&declared, None).unwrap(),
+            declared
+        );
+        assert!(select_backup_names(&declared, Some(&[])).unwrap().is_empty());
+        assert_eq!(
+            select_backup_names(&declared, Some(&["cache".to_string()])).unwrap(),
+            ["cache".to_string()].into_iter().collect()
+        );
+        assert!(select_backup_names(&declared, Some(&["missing".to_string()]))
+            .unwrap_err()
+            .contains("未在交付包声明"));
     }
 
     #[test]

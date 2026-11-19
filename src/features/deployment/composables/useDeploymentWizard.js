@@ -185,6 +185,34 @@ export function useDeploymentWizard(config, emit) {
     diagnostics = ref(''),
     result = ref(null);
 
+  const volumeBackupSelection = ref({});
+  const volumeNames = computed(() =>
+    (bundlePlan.value?.dataVolumes || []).map((volume) => volume.name)
+  );
+  watch(
+    volumeNames,
+    (names) => {
+      const next = {};
+      for (const name of names) {
+        next[name] = volumeBackupSelection.value[name] ?? true;
+      }
+      volumeBackupSelection.value = next;
+    },
+    { immediate: true }
+  );
+  const backupVolumes = computed(() =>
+    volumeNames.value.filter((name) => volumeBackupSelection.value[name])
+  );
+
+  function setBackupVolumes(names) {
+    const selected = new Set((Array.isArray(names) ? names : []).map(String));
+    const next = {};
+    for (const name of volumeNames.value) next[name] = selected.has(name);
+    volumeBackupSelection.value = next;
+    preflightPassed.value = false;
+    preflightMessage.value = '';
+  }
+
   const hostAccess = useHostAccess({ config, targetLabel, desktopGuard });
   const { testingSsh, settingKey, sshMessage, sshOk, testConnection, setupAccess } = hostAccess;
 
@@ -358,6 +386,7 @@ export function useDeploymentWizard(config, emit) {
     envData.value = null;
     envError.value = '';
     hostAccess.reset();
+    volumeBackupSelection.value = {};
     if (activeStep.value > 0) activeStep.value = 0;
   });
 
@@ -677,8 +706,16 @@ export function useDeploymentWizard(config, emit) {
     }
     const action = '完整版本部署';
     const serviceCount = bundlePlan.value?.services?.length || review.value?.services?.length || 0;
-    const volumeNames = (bundlePlan.value?.dataVolumes || []).map((volume) => volume.name);
-    const scope = `部署全部 ${serviceCount} 个服务，停止全部服务后备份数据卷并启动新版本；保留的数据卷：${volumeNames.join('、') || '无'}；失败时自动恢复上一版本`;
+    const selectedNames = new Set(backupVolumes.value);
+    const backupNames = volumeNames.value.filter((name) => selectedNames.has(name));
+    const skippedNames = volumeNames.value.filter((name) => !selectedNames.has(name));
+    const backupScope = backupNames.length
+      ? `备份数据卷：${backupNames.join('、')}`
+      : '不备份数据卷';
+    const skippedScope = skippedNames.length
+      ? `；不备份：${skippedNames.join('、')}，失败时不会恢复这些卷中的数据`
+      : '';
+    const scope = `部署全部 ${serviceCount} 个服务；${backupScope}${skippedScope}；失败时恢复受管文件与已备份数据，并重新启动上一版本`;
     executing.value = true;
     try {
       try {
@@ -778,7 +815,7 @@ export function useDeploymentWizard(config, emit) {
     if (busy.value || !config.installDir?.trim()) return;
     try {
       await ElMessageBox.confirm(
-        `目标：${targetLabel.value}；目录：${config.installDir}。将从部署事务快照恢复上一版本和业务数据，恢复期间服务会停机。是否继续？`,
+        `目标：${targetLabel.value}；目录：${config.installDir}。将从部署事务快照恢复上一版本、受管文件和已备份数据卷，恢复期间服务会停机。是否继续？`,
         '恢复上一版本',
         {
           type: 'warning',
@@ -831,11 +868,12 @@ export function useDeploymentWizard(config, emit) {
       remote: isRemote.value,
       bundle: preparedBundle.value,
       label: targetLabel.value,
-      imageDir: imageMediaDir.value
+      imageDir: imageMediaDir.value,
+      backupVolumes: backupVolumes.value
     });
   }
 
   const { progressStep, progressPercent, progressMessage, elapsedText } = executionFeedback;
 
-  return { steps, activeStep, selectedHost, isRemote, targetLabel, hostReady, testingSsh, settingKey, sshMessage, sshOk, envData, envError, checkingEnv, installingDocker, artifactPicker, candidate, preparedBundle, artifactBusy, review, reviewError, checkingReview, reviewTab, imageMediaDir, imageSource, imagePullGroups, imagePending, imagePullable, pendingDigestImages, imageCounts, imageBlockedCount, imageNextBlockedReason, imageRegistryLoadError, imagePhase, imageProgress, imageDiagnostics, imageResult, importingImages, bundlePlan, transaction, recoveringTransaction, executing, preflighting, preflightPassed, preflightMessage, phase, operationError, diagnostics, result, busy, environmentReady, canExecute, artifactSelectionIssue, artifactChosen, artifactPrepared, testConnection, setupAccess, checkEnvironment, installDocker, nextStep, previousStep, loadReview, pickImageDirectory, prepareImages, setImagePullSelection, runPreflight, executeDeployment, restorePreviousVersion, progressStep, progressPercent, progressMessage, elapsedText };
+  return { steps, activeStep, selectedHost, isRemote, targetLabel, hostReady, testingSsh, settingKey, sshMessage, sshOk, envData, envError, checkingEnv, installingDocker, artifactPicker, candidate, preparedBundle, artifactBusy, review, reviewError, checkingReview, reviewTab, imageMediaDir, imageSource, imagePullGroups, imagePending, imagePullable, pendingDigestImages, imageCounts, imageBlockedCount, imageNextBlockedReason, imageRegistryLoadError, imagePhase, imageProgress, imageDiagnostics, imageResult, importingImages, bundlePlan, backupVolumes, setBackupVolumes, transaction, recoveringTransaction, executing, preflighting, preflightPassed, preflightMessage, phase, operationError, diagnostics, result, busy, environmentReady, canExecute, artifactSelectionIssue, artifactChosen, artifactPrepared, testConnection, setupAccess, checkEnvironment, installDocker, nextStep, previousStep, loadReview, pickImageDirectory, prepareImages, setImagePullSelection, runPreflight, executeDeployment, restorePreviousVersion, progressStep, progressPercent, progressMessage, elapsedText };
 }

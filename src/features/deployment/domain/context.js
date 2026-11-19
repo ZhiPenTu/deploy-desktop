@@ -13,7 +13,8 @@ export function createDeploymentContext({
   remote,
   bundle,
   label,
-  imageDir = ''
+  imageDir = '',
+  backupVolumes = null
 }) {
   if (!validInstallDir(connection.installDir, remote)) throw new Error('请填写有效的部署目录，不能使用根目录或上级路径。');
   if (remote && (!connection.remoteHost?.trim() || !connection.remoteUser?.trim())) {
@@ -32,6 +33,7 @@ export function createDeploymentContext({
     bundleDir: bundle.dir.trim(),
     installDir: connection.installDir.trim(),
     imageDir,
+    backupVolumes: Array.isArray(backupVolumes) ? [...backupVolumes] : null,
     version: bundle.version,
     label
   });

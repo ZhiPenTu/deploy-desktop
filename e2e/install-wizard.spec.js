@@ -1059,7 +1059,7 @@ test('制品文件缺失时提供写入入口，路径异常时阻止继续', as
   await expect(page.locator('.stepper [aria-current="step"]')).toHaveText('6部署版本');
   await expect(page.getByRole('button', { name: '开始完整版本部署' })).toBeEnabled();
   await expect(page.locator('.deployment-actions')).toHaveCount(0);
-  await expect(page.getByRole('checkbox')).toHaveCount(0);
+  await expect(page.getByRole('checkbox')).toHaveCount(2);
   await expect(page.getByText('部署失败时会停止新版本', { exact: false })).toBeVisible();
 
   const invalidReview = {
@@ -1140,7 +1140,7 @@ test('部署版本步骤展示完整部署范围与恢复说明', async ({ page 
   await expect(step.getByText('接口服务', { exact: true })).toBeVisible();
   await expect(step.getByText('demo-data', { exact: true })).toBeVisible();
   await expect(step.getByText('deploy/backups', { exact: true })).toBeVisible();
-  await expect(step.getByRole('checkbox')).toHaveCount(0);
+  await expect(step.getByRole('checkbox')).toHaveCount(2);
   await expect(step.getByText('更新前备份')).toHaveCount(0);
 
   await expect(step.getByRole('button', { name: '执行预检' })).toBeEnabled();
@@ -1150,6 +1150,69 @@ test('部署版本步骤展示完整部署范围与恢复说明', async ({ page 
   await step.getByRole('button', { name: '返回清单比对' }).click();
   await expect(page.locator('.stepper [aria-current="step"]')).toHaveText('5清单比对');
 
+  expect(problems).toEqual([]);
+});
+
+test('可按需取消数据卷备份，预检和执行都使用同一选择', async ({ page }) => {
+  const problems = [];
+  page.on('pageerror', (error) => problems.push(`未捕获异常：${error.message}`));
+
+  await useDesktopBackend(page, {
+    hosts: [localHost],
+    projects: [localProject],
+    activeProjectId: localProject.id,
+    localEnv,
+    dialogPath: demoPreparedBundle.dir,
+    preparedBundle: demoPreparedBundle,
+    bundlePlan: demoBundlePlan,
+    deploymentReview: {
+      ...demoDeploymentReview,
+      ready: true,
+      missingImages: [],
+      unreadyImages: [],
+      images: demoDeploymentReview.images.map((item) => ({
+        ...item,
+        status: 'ready',
+        platform: 'linux/amd64',
+        detail: '目标 Docker 已具备该镜像',
+        pullable: false
+      }))
+    }
+  });
+  await openReviewStep(page);
+  await page.getByRole('button', { name: '下一步：部署版本' }).click();
+
+  const step = page
+    .locator('.step-card')
+    .filter({ has: page.getByRole('heading', { name: '部署完整版本' }) });
+  const volumeOption = step.locator('.volume-option').filter({ hasText: 'demo-data' });
+  await expect(volumeOption.getByRole('checkbox')).toBeChecked();
+  await volumeOption.click();
+  await expect(volumeOption.getByRole('checkbox')).not.toBeChecked();
+  await expect(step.getByText('未选择数据卷备份', { exact: false })).toBeVisible();
+
+  await step.getByRole('button', { name: '执行预检' }).click();
+  await expect(step.getByText('预检通过，可以开始完整版本部署。')).toBeVisible();
+  const preflight = await page.evaluate(() =>
+    window.__deployTestCalls.find(
+      (item) => item.command === 'deploy_local_version' && item.args.dryRun
+    )
+  );
+  expect(preflight.args.backupVolumes).toEqual([]);
+
+  await step.getByRole('button', { name: '开始完整版本部署' }).click();
+  const dialog = page.getByRole('dialog', { name: '确认完整版本部署' });
+  await expect(dialog).toContainText('不备份数据卷');
+  await expect(dialog).toContainText('失败时不会恢复这些卷中的数据');
+  await dialog.getByRole('button', { name: '开始部署' }).click();
+  await expect(step.locator('.execution-result')).toBeVisible();
+
+  const execution = await page.evaluate(() =>
+    window.__deployTestCalls.find(
+      (item) => item.command === 'deploy_local_version' && !item.args.dryRun
+    )
+  );
+  expect(execution.args.backupVolumes).toEqual([]);
   expect(problems).toEqual([]);
 });
 

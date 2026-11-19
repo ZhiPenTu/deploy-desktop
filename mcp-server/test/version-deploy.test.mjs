@@ -9,6 +9,8 @@ import {
   parseTransactionStatus,
   publishedFrontendPort,
   redactDiagnostics,
+  resolveBackupVolumes,
+  selectDeploymentImages,
   resolveStoredEffectiveCompose,
   uniqueImageRefs,
   validateProjectContainerScope,
@@ -58,6 +60,35 @@ test('多端口映射优先使用声明的网页端口，歧义时阻止猜测',
   ] } } };
   assert.equal(publishedFrontendPort(config, 'frontend', 8080), 8080);
   assert.equal(publishedFrontendPort(config, 'frontend', 18080), null);
+});
+test('数据卷备份选择默认全部，允许空选择并拒绝未知名称', () => {
+  const data = { volumes: [{ name: 'database' }, { name: 'cache' }] };
+  assert.deepEqual([...resolveBackupVolumes(data, undefined)], ['database', 'cache']);
+  assert.deepEqual([...resolveBackupVolumes(data, [])], []);
+  assert.deepEqual([...resolveBackupVolumes(data, ['cache'])], ['cache']);
+  assert.throws(() => resolveBackupVolumes(data, ['missing']), (error) => error.code === 'BACKUP_VOLUME_UNKNOWN');
+  assert.throws(() => resolveBackupVolumes(data, ['']), (error) => error.code === 'BACKUP_VOLUME_SELECTION_INVALID');
+});
+
+test('数据卷备份选择会排除未选卷的备份镜像，但保留服务镜像', () => {
+  const images = [
+    { name: 'app', imageRef: 'demo/app:1.0', role: 'app' },
+    { name: 'db-backup', imageRef: 'demo/backup:1.0', role: 'base' },
+    { name: 'cache-backup', imageRef: 'demo/backup:1.0', role: 'base' }
+  ];
+  const volumes = [
+    { name: 'db', image: 'db-backup' },
+    { name: 'cache', image: 'cache-backup' }
+  ];
+  const incoming = { services: { app: { image: 'demo/app:1.0' } } };
+  assert.deepEqual(
+    selectDeploymentImages(images, volumes, new Set(['cache']), incoming).map((image) => image.name),
+    ['app', 'cache-backup']
+  );
+  assert.deepEqual(
+    selectDeploymentImages(images, volumes, new Set(), incoming).map((image) => image.name),
+    ['app']
+  );
 });
 for (const item of mountCases.cases) {
   test(`持久状态保护契约：${item.name}（MCP）`, () => {
