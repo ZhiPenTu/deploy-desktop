@@ -84,6 +84,7 @@ fn ssh_base_command_with_policy(
     strict_host_key: bool,
 ) -> Command {
     let mut cmd = Command::new(find_binary("ssh"));
+    crate::core::process::hide_console(&mut cmd);
     cmd.args([
         "-o",
         "BatchMode=yes",
