@@ -6,7 +6,8 @@ import {
   Key,
   Monitor,
   Promotion,
-  Setting
+  Setting,
+  Van
 } from '@element-plus/icons-vue';
 
 /**
@@ -26,6 +27,7 @@ export const pages = {
   logs: { title: '日志诊断', group: '运行', hidden: true },
   artifacts: { title: '制品中心', group: '资源', icon: Box },
   images: { title: '镜像与离线包', group: '资源', icon: Files },
+  usb: { title: 'USB 中转', group: '资源', icon: Van },
   mcp: { title: 'MCP 服务', group: '高级', icon: Connection },
   settings: { title: '设置', group: '高级', icon: Setting }
 };
@@ -40,6 +42,7 @@ export const pageOrder = [
   'logs',
   'artifacts',
   'images',
+  'usb',
   'mcp',
   'settings'
 ];

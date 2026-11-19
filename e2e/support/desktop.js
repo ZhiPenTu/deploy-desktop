@@ -28,7 +28,12 @@ export async function useDesktopBackend(
     deploymentTransaction = null,
     containers = [],
     bundle = null,
-    remoteImageBundle = null
+    remoteImageBundle = null,
+    usbMedia = null,
+    usbLocalBundles = [],
+    usbExportResult = null,
+    usbVerification = { valid: true, message: '校验通过' },
+    usbImageImport = null
   } = {}
 ) {
   await page.addInitScript(({
@@ -55,7 +60,12 @@ export async function useDesktopBackend(
     initialDeploymentTransaction,
     initialContainers,
     initialBundle,
-    initialRemoteImageBundle
+    initialRemoteImageBundle,
+    initialUsbMedia,
+    initialUsbLocalBundles,
+    initialUsbExportResult,
+    initialUsbVerification,
+    initialUsbImageImport
   }) => {
     const state = {
       hosts: structuredClone(initialHosts),
@@ -82,6 +92,11 @@ export async function useDesktopBackend(
       containers: structuredClone(initialContainers),
       boundBundle: structuredClone(initialBundle),
       remoteImageBundle: structuredClone(initialRemoteImageBundle),
+      usbMedia: structuredClone(initialUsbMedia),
+      usbLocalBundles: structuredClone(initialUsbLocalBundles),
+      usbExportResult: structuredClone(initialUsbExportResult),
+      usbVerification: structuredClone(initialUsbVerification),
+      usbImageImport: structuredClone(initialUsbImageImport),
       activeHostId: ''
     };
     const callbacks = new Map();
@@ -298,6 +313,27 @@ export async function useDesktopBackend(
               totalBytes: state.packages.reduce((sum, item) => sum + item.sizeBytes, 0),
               files: state.packages.map((item) => ({ ...item }))
             };
+          case 'scan_usb_media':
+            return state.usbMedia
+              ? structuredClone(state.usbMedia)
+              : {
+                  selectedDir: args.mediaDir,
+                  rootDir: `${args.mediaDir}/部署舱介质`,
+                  exists: false,
+                  writable: true,
+                  entries: [],
+                  totalBytes: 0
+                };
+          case 'list_local_artifact_bundles':
+            return structuredClone(state.usbLocalBundles);
+          case 'export_usb_media':
+            if (!state.usbExportResult) throw '当前操作暂不可用，请在桌面应用中重试。';
+            return structuredClone(state.usbExportResult);
+          case 'verify_usb_entry':
+            return structuredClone(state.usbVerification);
+          case 'import_usb_image':
+            if (!state.usbImageImport) throw '当前操作暂不可用，请在桌面应用中重试。';
+            return structuredClone(state.usbImageImport);
           case 'log_client_event':
             return null;
           case 'register_deployment_image_bindings':
@@ -331,7 +367,12 @@ export async function useDesktopBackend(
     initialDeploymentTransaction: deploymentTransaction,
     initialContainers: containers,
     initialBundle: bundle,
-    initialRemoteImageBundle: remoteImageBundle
+    initialRemoteImageBundle: remoteImageBundle,
+    initialUsbMedia: usbMedia,
+    initialUsbLocalBundles: usbLocalBundles,
+    initialUsbExportResult: usbExportResult,
+    initialUsbVerification: usbVerification,
+    initialUsbImageImport: usbImageImport
   });
 }
 

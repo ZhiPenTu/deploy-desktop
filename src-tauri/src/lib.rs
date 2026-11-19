@@ -27,6 +27,7 @@ use commands::{
     remote_ssh::*,
     remote_update::*,
     updater::*,
+    usb_media::*,
     version_deploy::*,
 };
 
@@ -153,6 +154,11 @@ pub fn run() {
             clear_runtime_logs,
             open_runtime_log_dir,
             log_client_event,
+            scan_usb_media,
+            list_local_artifact_bundles,
+            verify_usb_entry,
+            export_usb_media,
+            import_usb_image,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

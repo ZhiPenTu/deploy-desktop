@@ -24,4 +24,5 @@ pub mod registry_sources;
 pub mod remote_ssh;
 pub mod remote_update;
 pub mod updater;
+pub mod usb_media;
 pub mod version_deploy;

@@ -10,6 +10,7 @@ const pages = [
   { nav: '部署向导', crumb: '部署向导', content: '当前没有可用项目' },
   { nav: '制品中心', crumb: '制品中心', content: '还没有可用的制品源' },
   { nav: '镜像与离线包', crumb: '镜像与离线包', content: '本机 Docker 镜像' },
+  { nav: 'USB 中转', crumb: 'USB 中转', content: '尚未选择 USB 介质目录' },
   { nav: 'MCP 服务', crumb: 'MCP 服务', content: '能力分类' },
   { nav: '设置', crumb: '设置', content: '还没有配置云效制品源' }
 ];

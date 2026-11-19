@@ -137,3 +137,11 @@ export {
   setRuntimeLogDir,
   reportClientEvent as reportRuntimeEvent
 } from './commands/logs.js';
+
+export {
+  scanUsbMedia,
+  listLocalArtifactBundles,
+  verifyUsbEntry,
+  exportUsbMedia,
+  importUsbImage
+} from './commands/usb.js';

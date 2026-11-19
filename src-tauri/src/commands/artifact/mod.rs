@@ -22,6 +22,16 @@ use model::*;
 use store::*;
 use yunxiao::*;
 
+/// 交付包缓存目录用制品源标识命名；USB 中转等页面据此展示可读的来源名称。
+/// 配置损坏时只失去名称展示，不影响交付包本身。
+pub(crate) fn artifact_source_names(app: &AppHandle) -> Vec<(String, String)> {
+    load_sources(app)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|source| (source.id, source.name))
+        .collect()
+}
+
 #[tauri::command]
 pub fn list_artifact_sources(app: AppHandle) -> Result<Vec<ArtifactSource>, String> {
     let _ = migrate_legacy_tokens(&app);

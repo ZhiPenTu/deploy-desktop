@@ -602,7 +602,7 @@ fn read_settings(app: &AppHandle) -> ImageLibrarySettingsFile {
     }
 }
 
-pub(super) fn effective_offline_dir(app: &AppHandle) -> PathBuf {
+pub(crate) fn effective_offline_dir(app: &AppHandle) -> PathBuf {
     let settings = read_settings(app);
     let saved = settings.offline_dir.trim();
     if saved.is_empty() {
@@ -1209,6 +1209,33 @@ fn update_manifest_for_exports(dir: &Path, exports: &[(String, String)]) -> Resu
         filtered.push(json!({"file": file, "images": [reference]}));
     }
     object.insert("files".to_string(), Value::Array(filtered));
+    write_manifest(dir, &root)
+}
+
+/// 登记从外部（例如 USB 介质）导入的离线包，供部署向导匹配镜像与文件。
+pub(crate) fn record_offline_package(
+    dir: &Path,
+    file: &str,
+    images: &[String],
+) -> Result<(), String> {
+    let mut root = read_manifest(dir);
+    if !root.is_object() {
+        root = json!({});
+    }
+    let object = root
+        .as_object_mut()
+        .ok_or_else(|| String::from("镜像清单格式无效，请检查离线包目录"))?;
+    object.entry("schemaVersion").or_insert(json!(1));
+    let mut files: Vec<Value> = object
+        .get("files")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    files.retain(|entry| entry.get("file").and_then(Value::as_str) != Some(file));
+    if !images.is_empty() {
+        files.push(json!({ "file": file, "images": images }));
+    }
+    object.insert("files".to_string(), Value::Array(files));
     write_manifest(dir, &root)
 }
 

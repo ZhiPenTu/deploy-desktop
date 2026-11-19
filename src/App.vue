@@ -69,6 +69,12 @@
           @go-settings="openSettings"
         />
 
+        <UsbMedia
+          v-else-if="currentTab === 'usb'"
+          @go-wizard="openWizardWithBundle"
+          @go-images="navigateTab('images')"
+        />
+
         <McpService v-else-if="currentTab === 'mcp'" />
 
         <Settings
@@ -110,6 +116,7 @@ import InstallWizard from './features/deployment/views/InstallWizard.vue';
 import EnvCheck from './features/monitoring/views/EnvCheck.vue';
 import Dashboard from './features/monitoring/views/Dashboard.vue';
 import ImageManager from './features/images/views/ImageManager.vue';
+import UsbMedia from './features/usb/views/UsbMedia.vue';
 import ArtifactCenter from './features/artifacts/views/ArtifactCenter.vue';
 import Settings from './features/settings/views/Settings.vue';
 import DockerStartupDialog from './features/settings/components/DockerStartupDialog.vue';
