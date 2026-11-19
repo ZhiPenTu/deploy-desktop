@@ -1,6 +1,9 @@
 name: 构建 Linux 兼容包
 
 on:
+  push:
+    branches:
+      - codex/linux-legacy-build
   workflow_dispatch:
 
 permissions:
