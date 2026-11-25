@@ -46,7 +46,7 @@
       </div>
       <div class="summary-item">
         <span class="summary-label">失败处理</span>
-        <strong>{{ recoverySummary }}</strong>
+        <strong>自动恢复上一版本</strong>
       </div>
       <div class="summary-item">
         <span class="summary-label">备份空间</span>
@@ -63,51 +63,23 @@
           <span v-if="!services.length" class="field-hint">未读取到服务清单</span>
         </div>
       </el-form-item>
-      <el-form-item label="数据卷备份">
-        <div class="volume-panel">
-          <div class="volume-toolbar">
-            <el-checkbox
-              :model-value="allVolumesSelected"
-              :indeterminate="someVolumesSelected"
-              :disabled="busy"
-              @change="toggleAllVolumes"
-            >
-              全部备份
-            </el-checkbox>
-            <span class="field-hint">取消勾选的数据卷不会建立回滚副本。</span>
-          </div>
-          <el-checkbox-group
-            v-if="dataVolumes.length"
-            :model-value="backupVolumeNames"
-            :disabled="busy"
-            class="volume-list"
-            @update:model-value="updateBackupVolumes"
-          >
-            <el-checkbox
-              v-for="volume in dataVolumes"
-              :key="volume.name"
-              :value="volume.name"
-              class="volume-option"
-            >
-              <span class="volume-name">{{ volume.name }}</span>
-              <span class="volume-meta">{{ volume.service || '数据服务' }}</span>
-            </el-checkbox>
-          </el-checkbox-group>
-          <span v-else class="field-hint">交付包未声明数据卷</span>
-        </div>
-      </el-form-item>
-      <el-form-item label="保留目录">
+      <el-form-item label="保留数据">
         <div class="tag-row">
+          <el-tag v-for="volume in dataVolumes" :key="volume.name" type="success">
+            {{ volume.name }}
+          </el-tag>
           <el-tag v-for="path in dataPaths" :key="path.path" type="success">
             {{ path.path }}
           </el-tag>
-          <span v-if="!dataPaths.length" class="field-hint">交付包未声明保留目录</span>
+          <span v-if="!dataVolumes.length && !dataPaths.length" class="field-hint">
+            交付包未声明数据卷
+          </span>
         </div>
       </el-form-item>
     </el-form>
     <el-alert
-      :title="recoveryTitle"
-      :type="backupIncomplete ? 'warning' : 'info'"
+      title="部署失败时会停止新版本、恢复部署前的受管文件与数据库数据，并重新启动上一版本。其他数据卷原样保留。失败期间的新写入会一并撤回。"
+      type="info"
       :closable="false"
       show-icon
     />
@@ -143,7 +115,7 @@
         · 已用时 {{ elapsedText }}
       </p>
       <p class="field-hint">
-        数据卷备份与恢复可能持续较长时间，请保持页面打开。连接中断不会终止目标机上的部署事务。
+        数据库备份与恢复可能持续较长时间，请保持页面打开。连接中断不会终止目标机上的部署事务。
       </p>
     </div>
     <div v-if="result" class="execution-result">
@@ -188,13 +160,13 @@
     >
       <p>请提供事务编号、快照路径和执行详情，保留全部备份，不要清空数据或再次部署。</p>
       <ol>
-        <li>确认目标服务均已停止，核对文件与数据卷备份的完整性。</li>
-        <li>按快照清单恢复部署文件，再按数据卷清单恢复部署前的数据。</li>
+        <li>确认目标服务均已停止，核对文件与数据库备份的完整性。</li>
+        <li>按快照清单恢复部署文件，再按数据库卷清单恢复部署前的数据。</li>
         <li>使用上一版本的配置与镜像启动服务，检查健康状态及网页访问后再恢复业务。</li>
       </ol>
     </el-alert>
     <div class="step-footer">
-      <el-button :disabled="busy" @click="emit('previous')"> 返回清单比对 </el-button>
+      <el-button :disabled="busy" @click="emit('previous')"> 上一步 </el-button>
       <div class="input-row wrap">
         <el-button
           v-if="transactionBlocked && !transactionNeedsManual"
@@ -206,12 +178,9 @@
           恢复上一版本
         </el-button>
         <template v-else>
-          <el-button :loading="preflighting" :disabled="!canExecute || locked" @click="emit('preflight')">
-            执行预检
-          </el-button>
           <el-button
             type="primary"
-            :loading="executing"
+            :loading="executing || preflighting"
             :disabled="!canExecute || locked"
             @click="emit('execute')"
           >
@@ -220,6 +189,7 @@
         </template>
       </div>
     </div>
+    <p class="field-hint footer-hint">开始部署前会自动完成只读预检；预检不通过时不会停止服务或写入文件。</p>
   </div>
 </template>
 
@@ -234,7 +204,6 @@ const props = defineProps({
   plan: { type: Object, default: null },
   review: { type: Object, default: null },
   transaction: { type: Object, default: null },
-  backupVolumes: { type: Array, default: () => [] },
   busy: { type: Boolean, default: false },
   canExecute: { type: Boolean, default: false },
   artifactSelectionIssue: { type: String, default: '' },
@@ -253,14 +222,7 @@ const props = defineProps({
   diagnostics: { type: String, default: '' }
 });
 
-const emit = defineEmits([
-  'previous',
-  'preflight',
-  'execute',
-  'go-dashboard',
-  'recover',
-  'update:backup-volumes'
-]);
+const emit = defineEmits(['previous', 'preflight', 'execute', 'go-dashboard', 'recover']);
 
 const services = computed(() =>
   (props.plan?.services?.length
@@ -276,43 +238,6 @@ const services = computed(() =>
 );
 const dataVolumes = computed(() => props.plan?.dataVolumes || []);
 const dataPaths = computed(() => props.plan?.dataPaths || []);
-const backupVolumeNames = computed(() =>
-  Array.isArray(props.backupVolumes) ? props.backupVolumes : []
-);
-const allVolumesSelected = computed(
-  () =>
-    dataVolumes.value.length > 0 &&
-    dataVolumes.value.every((volume) => backupVolumeNames.value.includes(volume.name))
-);
-const someVolumesSelected = computed(
-  () => backupVolumeNames.value.length > 0 && !allVolumesSelected.value
-);
-const backupIncomplete = computed(
-  () => dataVolumes.value.length > 0 && backupVolumeNames.value.length < dataVolumes.value.length
-);
-const recoverySummary = computed(() => {
-  if (!backupIncomplete.value) return '自动恢复上一版本';
-  if (!backupVolumeNames.value.length) return '仅恢复文件与服务';
-  return '恢复文件与已备份数据';
-});
-const recoveryTitle = computed(() => {
-  if (!backupIncomplete.value) {
-    return '部署失败时会停止新版本、恢复部署前的受管文件与已备份数据卷，并重新启动上一版本。失败期间的新写入会一并撤回。';
-  }
-  if (!backupVolumeNames.value.length) {
-    return '未选择数据卷备份：部署失败时只恢复受管文件和服务，数据卷中的数据不会恢复。';
-  }
-  return '部署失败时会恢复受管文件和已勾选的数据卷；未勾选的数据卷不会恢复。';
-});
-function toggleAllVolumes(value) {
-  emit(
-    'update:backup-volumes',
-    value ? dataVolumes.value.map((volume) => volume.name) : []
-  );
-}
-function updateBackupVolumes(value) {
-  emit('update:backup-volumes', Array.isArray(value) ? value : []);
-}
 const transactionBlocked = computed(
   () =>
     Boolean(props.transaction) &&
@@ -360,6 +285,10 @@ h3 {
   line-height: 1.6;
   margin-bottom: 22px;
 }
+.footer-hint {
+  margin: 10px 0 0;
+  text-align: right;
+}
 .deployment-summary {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
@@ -389,39 +318,6 @@ h3 {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-}
-.volume-panel {
-  width: 100%;
-}
-.volume-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-.volume-list {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 8px;
-  width: 100%;
-  margin-top: 8px;
-}
-.volume-option {
-  height: auto;
-  margin-right: 0;
-  padding: 9px 11px;
-  background: var(--panel-subtle);
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-sm);
-}
-.volume-name {
-  color: var(--text-main);
-  font-weight: 600;
-}
-.volume-meta {
-  margin-left: 8px;
-  color: var(--text-muted);
-  font-size: 12px;
 }
 .field-hint {
   width: 100%;

@@ -42,7 +42,7 @@ const DIGEST_TRANSFER_HINT =
   '离线包中的镜像无法与仓库摘要核对，请从镜像仓库拉取；局域网目标可选择本机拉取后传入';
 
 export function useDeploymentWizard(config, emit) {
-  const steps = ['选择项目', '检测环境', '选择制品', '解压制品', '清单比对', '部署版本'];
+  const steps = ['选择项目', '检测环境', '选择制品', '解压制品', '部署版本'];
 
   const activeStep = ref(0);
 
@@ -112,13 +112,16 @@ export function useDeploymentWizard(config, emit) {
   const imageNextBlockedReason = computed(() => {
     if (checkingReview.value) return '正在核对目标环境，请稍候';
     if (importingImages.value) return '正在准备镜像，请稍候';
-    if (!review.value) return '请先完成清单比对';
+    if (!review.value) return '正在核对部署条件';
     if (review.value.ready) return '';
-    if (imagePending.value.length) {
-      return `仍有 ${imagePending.value.length} 个镜像未就绪，请先在上方处理`;
-    }
     if (!review.value.dockerRunning) return '目标 Docker 未运行，请返回环境检测启动 Docker';
     if (!review.value.composeAvailable) return '目标缺少 Docker Compose，请先准备运行环境';
+    const blockingImages = (review.value.images || []).filter((image) =>
+      ['missing', 'invalid'].includes(image.status)
+    );
+    if (blockingImages.length) {
+      return `仍有 ${blockingImages.length} 个镜像未就绪，请先在核对详情中处理`;
+    }
     return review.value.issues?.[0] || '目标环境尚未就绪';
   });
 
@@ -184,34 +187,6 @@ export function useDeploymentWizard(config, emit) {
     operationError = ref(''),
     diagnostics = ref(''),
     result = ref(null);
-
-  const volumeBackupSelection = ref({});
-  const volumeNames = computed(() =>
-    (bundlePlan.value?.dataVolumes || []).map((volume) => volume.name)
-  );
-  watch(
-    volumeNames,
-    (names) => {
-      const next = {};
-      for (const name of names) {
-        next[name] = volumeBackupSelection.value[name] ?? true;
-      }
-      volumeBackupSelection.value = next;
-    },
-    { immediate: true }
-  );
-  const backupVolumes = computed(() =>
-    volumeNames.value.filter((name) => volumeBackupSelection.value[name])
-  );
-
-  function setBackupVolumes(names) {
-    const selected = new Set((Array.isArray(names) ? names : []).map(String));
-    const next = {};
-    for (const name of volumeNames.value) next[name] = selected.has(name);
-    volumeBackupSelection.value = next;
-    preflightPassed.value = false;
-    preflightMessage.value = '';
-  }
 
   const hostAccess = useHostAccess({ config, targetLabel, desktopGuard });
   const { testingSsh, settingKey, sshMessage, sshOk, testConnection, setupAccess } = hostAccess;
@@ -386,7 +361,6 @@ export function useDeploymentWizard(config, emit) {
     envData.value = null;
     envError.value = '';
     hostAccess.reset();
-    volumeBackupSelection.value = {};
     if (activeStep.value > 0) activeStep.value = 0;
   });
 
@@ -411,16 +385,12 @@ export function useDeploymentWizard(config, emit) {
     else if (activeStep.value === 3 && preparedBundle.value) {
       activeStep.value = 4;
       await loadReview();
-    } else if (activeStep.value === 4 && review.value?.ready) {
-      activeStep.value = 5;
-      await inspectTransaction();
     }
   }
 
   async function previousStep() {
     if (busy.value || activeStep.value === 0) return;
     activeStep.value -= 1;
-    if (activeStep.value === 4) await loadReview();
   }
 
   async function loadReview() {
@@ -453,7 +423,7 @@ export function useDeploymentWizard(config, emit) {
       if (pendingImages(checked.images || []).length) reviewTab.value = 'images';
       await inspectTransaction();
     } catch (error) {
-      if (current === revision && !disposed) reviewError.value = failureText(error, '清单比对');
+      if (current === revision && !disposed) reviewError.value = failureText(error, '核对部署条件');
     } finally {
       if (current === revision && !disposed) checkingReview.value = false;
     }
@@ -706,16 +676,8 @@ export function useDeploymentWizard(config, emit) {
     }
     const action = '完整版本部署';
     const serviceCount = bundlePlan.value?.services?.length || review.value?.services?.length || 0;
-    const selectedNames = new Set(backupVolumes.value);
-    const backupNames = volumeNames.value.filter((name) => selectedNames.has(name));
-    const skippedNames = volumeNames.value.filter((name) => !selectedNames.has(name));
-    const backupScope = backupNames.length
-      ? `备份数据卷：${backupNames.join('、')}`
-      : '不备份数据卷';
-    const skippedScope = skippedNames.length
-      ? `；不备份：${skippedNames.join('、')}，失败时不会恢复这些卷中的数据`
-      : '';
-    const scope = `部署全部 ${serviceCount} 个服务；${backupScope}${skippedScope}；失败时恢复受管文件与已备份数据，并重新启动上一版本`;
+    const volumeNames = (bundlePlan.value?.dataVolumes || []).map((volume) => volume.name);
+    const scope = `部署全部 ${serviceCount} 个服务，停止全部服务后冷备数据库数据并启动新版本；保留的数据卷：${volumeNames.join('、') || '无'}；失败时自动恢复上一版本`;
     executing.value = true;
     try {
       try {
@@ -758,6 +720,8 @@ export function useDeploymentWizard(config, emit) {
             ? `上一版本 ${response.previousVersion || '部署前版本'} 已恢复运行。${reason}`
             : response.recoveryFailed
             ? `自动恢复未完成，备份与事务现场已保留。${reason}`
+            : response.status?.hadDeployment
+            ? `已恢复部署文件与数据库数据，但未能自动启动上一版本。${reason}`
             : reason
         };
         operationError.value = '';
@@ -778,7 +742,7 @@ export function useDeploymentWizard(config, emit) {
         throw new Error(
           `部署后的制品文件尚未就绪：${unavailableFiles
             .map((artifact) => artifact.label || artifact.key)
-            .join('、')}。请返回清单比对检查。`
+            .join('、')}。请展开核对详情检查。`
         );
       }
       const ready = servicesAreReady(verified);
@@ -815,7 +779,7 @@ export function useDeploymentWizard(config, emit) {
     if (busy.value || !config.installDir?.trim()) return;
     try {
       await ElMessageBox.confirm(
-        `目标：${targetLabel.value}；目录：${config.installDir}。将从部署事务快照恢复上一版本、受管文件和已备份数据卷，恢复期间服务会停机。是否继续？`,
+        `目标：${targetLabel.value}；目录：${config.installDir}。将从部署事务快照恢复上一版本和业务数据，恢复期间服务会停机。是否继续？`,
         '恢复上一版本',
         {
           type: 'warning',
@@ -848,6 +812,8 @@ export function useDeploymentWizard(config, emit) {
           ? '本次事务已结束，无需恢复服务、文件或数据卷。'
           : response.recoveryFailed
           ? '恢复未完成，备份与事务现场已保留，请展开执行详情并联系工程师处理。'
+          : response.status?.hadDeployment
+          ? '已恢复部署文件与数据库数据，但未能自动启动上一版本，请按执行详情中的原因处理后手动启动。'
           : '首次部署的服务与数据卷已清理。'
       };
       if (response.error) operationError.value = safeText(response.error);
@@ -868,12 +834,11 @@ export function useDeploymentWizard(config, emit) {
       remote: isRemote.value,
       bundle: preparedBundle.value,
       label: targetLabel.value,
-      imageDir: imageMediaDir.value,
-      backupVolumes: backupVolumes.value
+      imageDir: imageMediaDir.value
     });
   }
 
   const { progressStep, progressPercent, progressMessage, elapsedText } = executionFeedback;
 
-  return { steps, activeStep, selectedHost, isRemote, targetLabel, hostReady, testingSsh, settingKey, sshMessage, sshOk, envData, envError, checkingEnv, installingDocker, artifactPicker, candidate, preparedBundle, artifactBusy, review, reviewError, checkingReview, reviewTab, imageMediaDir, imageSource, imagePullGroups, imagePending, imagePullable, pendingDigestImages, imageCounts, imageBlockedCount, imageNextBlockedReason, imageRegistryLoadError, imagePhase, imageProgress, imageDiagnostics, imageResult, importingImages, bundlePlan, backupVolumes, setBackupVolumes, transaction, recoveringTransaction, executing, preflighting, preflightPassed, preflightMessage, phase, operationError, diagnostics, result, busy, environmentReady, canExecute, artifactSelectionIssue, artifactChosen, artifactPrepared, testConnection, setupAccess, checkEnvironment, installDocker, nextStep, previousStep, loadReview, pickImageDirectory, prepareImages, setImagePullSelection, runPreflight, executeDeployment, restorePreviousVersion, progressStep, progressPercent, progressMessage, elapsedText };
+  return { steps, activeStep, selectedHost, isRemote, targetLabel, hostReady, testingSsh, settingKey, sshMessage, sshOk, envData, envError, checkingEnv, installingDocker, artifactPicker, candidate, preparedBundle, artifactBusy, review, reviewError, checkingReview, reviewTab, imageMediaDir, imageSource, imagePullGroups, imagePending, imagePullable, pendingDigestImages, imageCounts, imageBlockedCount, imageNextBlockedReason, imageRegistryLoadError, imagePhase, imageProgress, imageDiagnostics, imageResult, importingImages, bundlePlan, transaction, recoveringTransaction, executing, preflighting, preflightPassed, preflightMessage, phase, operationError, diagnostics, result, busy, environmentReady, canExecute, artifactSelectionIssue, artifactChosen, artifactPrepared, testConnection, setupAccess, checkEnvironment, installDocker, nextStep, previousStep, loadReview, pickImageDirectory, prepareImages, setImagePullSelection, runPreflight, executeDeployment, restorePreviousVersion, progressStep, progressPercent, progressMessage, elapsedText };
 }

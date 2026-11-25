@@ -14,10 +14,9 @@ export async function invokeVersionDeployment(context, dryRun) {
         context.keyPath,
         context.bundleDir,
         context.installDir,
-        dryRun,
-        context.backupVolumes
+        dryRun
       )
-    : await deployLocalVersion(context.bundleDir, context.installDir, dryRun, context.backupVolumes);
+    : await deployLocalVersion(context.bundleDir, context.installDir, dryRun);
   if (dryRun) {
     return requireSuccessfulResult(response, '完整版本部署预检未通过');
   }

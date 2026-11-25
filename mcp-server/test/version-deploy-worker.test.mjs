@@ -30,6 +30,14 @@ if [ "\${1:-}" = ps ]; then
   exit 0
 fi
 if [ "\${1:-}" = inspect ]; then
+  if [ -f "\${MOCK_EXITED_FILE:-/nonexistent}" ]; then
+    case " $* " in
+      *'.State.Status'*) printf 'exited\\n' ;;
+      *'.State.Health'*) printf 'none\\n' ;;
+      *) printf 'exited|none\\n' ;;
+    esac
+    exit 0
+  fi
   case " $* " in
     *'.State.Status'*) printf 'running\\n' ;;
     *'.State.Health'*) printf 'healthy\\n' ;;
@@ -94,6 +102,7 @@ if [ "\${1:-}" = compose ]; then
     *' ps -a -q '*) printf 'mock-container\\n' ;;
     *' exec -T '*|*' logs '*) ;;
     *' down '*)
+      rm -f "\${MOCK_EXITED_FILE:-/nonexistent}"
       if [ "\${MOCK_FAIL_OLD_DOWN:-no}" = yes ] && [ "\${compose_file##*/}" = compose.old.yml ]; then
         printf 'old version stop failed\\n' >&2
         exit 1
@@ -109,6 +118,9 @@ if [ "\${1:-}" = compose ]; then
       fi
       if [ "\${compose_file##*/}" = compose.new.yml ] && [ "\${MOCK_MUTATE_VOLUME_ON_UP:-no}" = yes ]; then
         printf 'new-volume' > "$MOCK_VOLUME_DIR/value.txt"
+      fi
+      if [ "\${MOCK_EXIT_AFTER_UP:-no}" = yes ] && [ "\${compose_file##*/}" = compose.new.yml ]; then
+        touch "\${MOCK_EXITED_FILE}"
       fi
       if [ "\${MOCK_FAIL_NEW_UP:-no}" = yes ] && [ -n "$compose_file" ] && [ "\${compose_file##*/}" = compose.new.yml ]; then
         printf 'new version failed\\n' >&2
@@ -204,7 +216,8 @@ async function runWorker(context, {
   projectName = '',
   projectWorkingDir = '',
   volumeOwner = 'mock-project',
-  mutateVolumeOnUp = false
+  mutateVolumeOnUp = false,
+  exitAfterUp = false
 } = {}) {
   const args = [
     mode,
@@ -237,7 +250,9 @@ async function runWorker(context, {
       MOCK_FAIL_RESTORE: failRestore ? 'yes' : 'no',
       MOCK_PROJECT_WORKING_DIR: projectWorkingDir,
       MOCK_VOLUME_OWNER: volumeOwner,
-      MOCK_MUTATE_VOLUME_ON_UP: mutateVolumeOnUp ? 'yes' : 'no'
+      MOCK_MUTATE_VOLUME_ON_UP: mutateVolumeOnUp ? 'yes' : 'no',
+      MOCK_EXITED_FILE: path.join(context.root, 'exited.flag'),
+      MOCK_EXIT_AFTER_UP: exitAfterUp ? 'yes' : 'no'
     },
     timeoutMs: 30000
   };
@@ -278,26 +293,18 @@ test('远端 worker 成功提交完整版本并删除快照', async (t) => {
   await assert.rejects(fs.stat(path.join(context.txn, 'snapshot')));
 });
 
-test('远端 worker 在新版本启动失败后恢复旧文件和旧数据卷', async (t) => {
+test('远端 worker 不检查也不需要非数据库卷的备份镜像', async (t) => {
   const context = await fixture(t);
-  const result = await runWorker(context, { failNewUp: true });
-  assertWorkerSucceeded(result);
-  assert.equal(await fs.readFile(path.join(context.deploy, 'app.txt'), 'utf8'), 'old-file');
-  await assert.rejects(fs.stat(path.join(context.deploy, 'new.txt')));
-  await assert.rejects(fs.stat(path.join(context.deploy, 'compose.new.yml')));
-  assert.equal(await fs.readFile(path.join(context.volume, 'value.txt'), 'utf8'), 'old-volume');
-  const dockerLog = await fs.readFile(path.join(context.root, 'docker.log'), 'utf8');
-  const oldUp = dockerLog.split('\n').find((line) =>
-    line.includes('compose.old.yml') && line.includes(' up -d ')
+  await fs.writeFile(
+    path.join(context.txn, 'incoming', 'volume-specs.tsv'),
+    'data\tmock-volume\tmissing:image\tyes\tno\n'
   );
-  assert.ok(oldUp?.includes(`${context.txn}/old-image-override.compose.json`));
-  assert.ok(!oldUp?.includes(`${context.txn}/image-override.compose.json`));
-  const status = await fs.readFile(path.join(context.txn, 'status.env'), 'utf8');
-  assert.match(status, /phase=recovered/);
-  assert.match(status, /state=recovered/);
+  const result = await runWorker(context);
+  assertWorkerSucceeded(result);
+  assert.equal(await fs.readFile(path.join(context.volume, 'value.txt'), 'utf8'), 'old-volume');
 });
 
-test('远端 worker 跳过未选择的数据卷备份，回滚不覆盖该卷', async (t) => {
+test('远端 worker 跳过非数据库卷备份，回滚不覆盖该卷', async (t) => {
   const context = await fixture(t);
   await fs.writeFile(
     path.join(context.txn, 'incoming', 'volume-specs.tsv'),
@@ -316,6 +323,36 @@ test('远端 worker 跳过未选择的数据卷备份，回滚不覆盖该卷', 
   const dockerLog = await fs.readFile(path.join(context.root, 'docker.log'), 'utf8');
   assert.ok(!dockerLog.includes('tar -czf'));
   const status = await fs.readFile(path.join(context.txn, 'status.env'), 'utf8');
+  assert.match(status, /state=recovered/);
+});
+
+test('远端 worker 容器退出后立即失败并恢复旧版本', async (t) => {
+  const context = await fixture(t);
+  const result = await runWorker(context, { exitAfterUp: true });
+  assertWorkerSucceeded(result);
+  assert.match(result.stderr, /容器已退出/);
+  assert.equal(await fs.readFile(path.join(context.deploy, 'app.txt'), 'utf8'), 'old-file');
+  assert.equal(await fs.readFile(path.join(context.volume, 'value.txt'), 'utf8'), 'old-volume');
+  const status = await fs.readFile(path.join(context.txn, 'status.env'), 'utf8');
+  assert.match(status, /phase=recovered/);
+});
+
+test('远端 worker 在新版本启动失败后恢复旧文件和旧数据卷', async (t) => {
+  const context = await fixture(t);
+  const result = await runWorker(context, { failNewUp: true });
+  assertWorkerSucceeded(result);
+  assert.equal(await fs.readFile(path.join(context.deploy, 'app.txt'), 'utf8'), 'old-file');
+  await assert.rejects(fs.stat(path.join(context.deploy, 'new.txt')));
+  await assert.rejects(fs.stat(path.join(context.deploy, 'compose.new.yml')));
+  assert.equal(await fs.readFile(path.join(context.volume, 'value.txt'), 'utf8'), 'old-volume');
+  const dockerLog = await fs.readFile(path.join(context.root, 'docker.log'), 'utf8');
+  const oldUp = dockerLog.split('\n').find((line) =>
+    line.includes('compose.old.yml') && line.includes(' up -d ')
+  );
+  assert.ok(oldUp?.includes(`${context.txn}/old-image-override.compose.json`));
+  assert.ok(!oldUp?.includes(`${context.txn}/image-override.compose.json`));
+  const status = await fs.readFile(path.join(context.txn, 'status.env'), 'utf8');
+  assert.match(status, /phase=recovered/);
   assert.match(status, /state=recovered/);
 });
 

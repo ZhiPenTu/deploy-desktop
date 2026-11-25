@@ -9,8 +9,7 @@ import { invokeVersionDeployment } from '../src/features/deployment/services/ope
 const input = () => ({
   connection: { remoteHost: 'host.example.com', remotePort: 2222, remoteUser: 'deploy', remoteKey: '/key', installDir: '/srv/app' },
   remote: true, bundle: { dir: '/bundle', version: '1.0.0' },
-  label: 'demo',
-  backupVolumes: ['db-data']
+  label: 'demo'
 });
 
 afterEach(() => {
@@ -33,10 +32,8 @@ test('confirmation snapshots detach mutable host and bundle inputs', () => {
   const context = createDeploymentContext(options);
   options.connection.remoteHost = 'changed.example.com';
   options.bundle.dir = '/other';
-  options.backupVolumes.push('cache-data');
   assert.equal(context.host, 'host.example.com');
   assert.equal(context.bundleDir, '/bundle');
-  assert.deepEqual(context.backupVolumes, ['db-data']);
   assert.ok(Object.isFrozen(context));
   assert.equal(contextTarget(context).host, 'host.example.com');
   assert.equal(contextTarget({ remote: false }), null);
@@ -71,13 +68,8 @@ test('version deployment preserves target and dry-run, rejects failed preflight 
   assert.equal(calls[0].command,'deploy_remote_version');
   assert.equal(calls[0].args.host,remote.host);
   assert.equal(calls[0].args.dryRun,true);
-  assert.deepEqual(calls[0].args.backupVolumes,['db-data']);
   assert.equal(calls[1].command,'deploy_local_version');
   assert.equal(calls[1].args.dryRun,false);
-  assert.deepEqual(calls[1].args.backupVolumes,['db-data']);
-  const noBackup=createDeploymentContext({...input(),remote:false,backupVolumes:[]});
-  await invokeVersionDeployment(noBackup,false);
-  assert.deepEqual(calls[2].args.backupVolumes,[]);
   mockIPC(()=>({success:true,output:'ok'}));
   assert.equal((await invokeVersionDeployment(remote,true)).success,true);
 });
@@ -215,6 +207,43 @@ test('compose failures name the actual cause instead of a generic docker hint', 
   );
   assert.match(fallback, /执行详情|运行日志/);
   assert.doesNotMatch(fallback, /Docker 和 Compose 正常运行/);
+});
+
+test('common docker failures surface the concrete cause', () => {
+  const conflict = failureText(
+    'Compose 操作失败：Error response from daemon: Conflict. The container name "/tt-net-manager-kafka" is already in use by container "abc". You have to remove (or rename) that container to be able to reuse that name.',
+    '预检'
+  );
+  assert.match(conflict, /同名容器/);
+  assert.doesNotMatch(conflict, /Docker 未能完成操作/);
+
+  const port = failureText(
+    'Error response from daemon: Ports are not available: exposing port TCP 0.0.0.0:8080 -> 0.0.0.0:0: listen tcp 0.0.0.0:8080: bind: address already in use',
+    '预检'
+  );
+  assert.match(port, /端口已被占用/);
+
+  const image = failureText('Error response from daemon: No such image: demo/server:1', '预检');
+  assert.match(image, /缺少所需镜像/);
+
+  const platform = failureText('Error response from daemon: exec format error', '预检');
+  assert.match(platform, /镜像架构与目标主机不一致/);
+
+  const daemon = failureText(
+    'Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?',
+    '预检'
+  );
+  assert.match(daemon, /Docker 已启动/);
+});
+
+test('backend sentences are kept instead of a generic retry hint', () => {
+  const external = failureText(
+    '预检失败：上一版本使用的 Compose 清单位于部署目录外：/srv/app.yml；本次会直接使用该文件停止旧版本并在失败时恢复，请保持该文件可用',
+    '预检'
+  );
+  assert.match(external, /位于部署目录外/);
+  assert.doesNotMatch(external, /预检失败：预检失败/);
+  assert.doesNotMatch(external, /Docker 未能完成操作/);
 });
 
 test('diagnostic lines stay out of the main failure message', () => {

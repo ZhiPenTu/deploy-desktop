@@ -21,7 +21,7 @@
     },
     {
       "name": "undeclared-old-volume",
-      "valid": false,
+      "valid": true,
       "config": {"services": {"old-db": {"volumes": [{"type": "volume", "source": "legacy-data"}]}}}
     },
     {
@@ -70,13 +70,21 @@
     },
     {
       "name": "preserve-prefix-is-not-directory",
-      "valid": false,
+      "valid": true,
       "config": {"services": {"app": {"volumes": [{"type": "bind", "source": "/srv/app/deploy/backups-other"}]}}}
     },
     {
       "name": "inherited-volumes",
-      "valid": false,
+      "valid": true,
       "config": {"services": {"app": {"volumes_from": ["other"]}}}
+    },
+    {
+      "name": "application-external-volume",
+      "valid": true,
+      "config": {
+        "services": {"cache": {"volumes": [{"type": "volume", "source": "cache-data"}]}},
+        "volumes": {"cache-data": {"name": "shared-cache", "external": true}}
+      }
     },
     {
       "name": "transient-tmpfs",

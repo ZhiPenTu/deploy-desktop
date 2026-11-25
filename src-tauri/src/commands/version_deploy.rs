@@ -6,8 +6,8 @@
 
 use super::bundle::{
     default_components, sha256_path, write_deployed_record, ArtifactKind, ArtifactRoot, Bundle,
-    DeployedComposeFile, DeployedImage, DeployedRecord, ImageSpec, ResolvedArtifact,
-    DEPLOYED_RECORD_DIR, DEPLOYED_RECORD_FILE,
+    DatabaseSpec, DataVolumeSpec, DeployedComposeFile, DeployedImage, DeployedRecord, ImageSpec,
+    ResolvedArtifact, DEPLOYED_RECORD_DIR, DEPLOYED_RECORD_FILE,
 };
 use super::deployment_tx::{
     self, DeploymentLock, DeploymentTransaction, ImageSnapshot, VolumeSnapshot, PHASE_APPLYING,
@@ -65,6 +65,7 @@ struct FullDeployPlan {
     incoming_config: Value,
     old_images: Vec<ImageSnapshot>,
     volumes: Vec<VolumePlan>,
+    warnings: Vec<String>,
     services: Vec<String>,
     old_services: Vec<String>,
     frontend_service: String,
@@ -90,10 +91,9 @@ pub async fn deploy_local_version(
     bundle_dir: String,
     install_dir: String,
     dry_run: bool,
-    backup_volumes: Option<Vec<String>>,
 ) -> Result<VersionDeployResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        run_full_deploy(&window, &bundle_dir, &install_dir, dry_run, backup_volumes.as_deref())
+        run_full_deploy(Some(&window), &bundle_dir, &install_dir, dry_run)
     })
     .await
     .map_err(|error| format!("完整版本部署任务执行失败：{error}"))?
@@ -109,7 +109,6 @@ pub async fn deploy_remote_version(
     bundle_dir: String,
     install_dir: String,
     dry_run: bool,
-    backup_volumes: Option<Vec<String>>,
 ) -> Result<VersionDeployResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
         super::remote_update::deploy_remote_full(
@@ -121,7 +120,6 @@ pub async fn deploy_remote_version(
             bundle_dir,
             install_dir,
             dry_run,
-            backup_volumes.as_deref(),
         )
     })
     .await
@@ -199,29 +197,36 @@ pub async fn recover_deployment_transaction(
         .await
         .map_err(|error| format!("恢复部署事务失败：{error}"))?;
     }
-    tauri::async_runtime::spawn_blocking(move || recover_local(&window, &install_dir))
+    tauri::async_runtime::spawn_blocking(move || recover_local(Some(&window), &install_dir))
         .await
         .map_err(|error| format!("恢复部署事务失败：{error}"))?
 }
 
-fn progress(window: &tauri::Window, step: &str, percent: usize, status: &str, message: &str) {
-    let _ = window.emit(
-        "remote-update-progress",
-        super::remote_update::RemoteUpdateProgress {
-            step: step.to_string(),
-            percent,
-            status: status.to_string(),
-            message: message.to_string(),
-        },
-    );
+fn progress(
+    window: Option<&tauri::Window>,
+    step: &str,
+    percent: usize,
+    status: &str,
+    message: &str,
+) {
+    if let Some(window) = window {
+        let _ = window.emit(
+            "remote-update-progress",
+            super::remote_update::RemoteUpdateProgress {
+                step: step.to_string(),
+                percent,
+                status: status.to_string(),
+                message: message.to_string(),
+            },
+        );
+    }
 }
 
 fn run_full_deploy(
-    window: &tauri::Window,
+    window: Option<&tauri::Window>,
     bundle_dir: &str,
     install_dir: &str,
     dry_run: bool,
-    backup_volumes: Option<&[String]>,
 ) -> Result<VersionDeployResult, String> {
     let started = Instant::now();
     progress(
@@ -246,7 +251,7 @@ fn run_full_deploy(
         deployment_tx::ensure_no_incomplete_transaction(&install_root)?;
         Some(lock)
     };
-    let plan = build_plan(bundle_dir, install_dir, backup_volumes)?;
+    let plan = build_plan(bundle_dir, install_dir)?;
     let _project_lock = if dry_run || plan.project_name.trim().is_empty() {
         None
     } else {
@@ -334,17 +339,27 @@ fn run_full_deploy(
             );
             let recovery = recover_from_transaction(&plan.install_root, &mut transaction);
             match recovery {
-                Ok(()) => {
+                Ok(outcome) => {
+                    let recovered = plan.had_deployment && outcome.started_previous;
+                    let degraded = plan.had_deployment && !outcome.started_previous;
                     progress(
                         window,
-                        "已恢复上一版本",
+                        if degraded {
+                            "已恢复数据，旧版本未启动"
+                        } else {
+                            "已恢复上一版本"
+                        },
                         100,
                         "warning",
-                        "新版本部署失败，上一版本已恢复运行",
+                        if degraded {
+                            "新版本部署失败，部署文件与数据库数据已恢复；上一版本未能自动启动"
+                        } else {
+                            "新版本部署失败，上一版本已恢复运行"
+                        },
                     );
                     Ok(VersionDeployResult {
                         success: false,
-                        recovered: plan.had_deployment,
+                        recovered,
                         recovery_failed: false,
                         stage: stage.clone(),
                         version: plan.bundle.version().to_string(),
@@ -352,7 +367,12 @@ fn run_full_deploy(
                         transaction_id: transaction.id.clone(),
                         snapshot_dir: transaction.snapshot_dir.clone(),
                         error: Some(error.clone()),
-                        output: if plan.had_deployment {
+                        output: if degraded {
+                            format!(
+                                "新版本部署失败，已恢复部署文件与数据库数据，但未能自动启动上一版本\n原因：{}\n失败阶段：{stage}\n部署错误：{error}",
+                                outcome.note.unwrap_or_else(|| "上一版本无法启动".to_string())
+                            )
+                        } else if plan.had_deployment {
                             format!(
                                 "新版本部署失败，已恢复上一版本 {}\n失败阶段：{stage}\n原因：{error}",
                                 if plan.previous_version.is_empty() {
@@ -406,7 +426,7 @@ fn run_full_deploy(
 }
 
 fn execute_new_version(
-    window: &tauri::Window,
+    window: Option<&tauri::Window>,
     plan: &FullDeployPlan,
     transaction: &mut DeploymentTransaction,
 ) -> Result<String, (String, String)> {
@@ -447,25 +467,17 @@ fn execute_new_version(
         transaction.snapshot_dir
     ));
 
-    let backup_count = plan
-        .volumes
-        .iter()
-        .filter(|volume| volume.backup && volume.exists)
-        .count();
-    let backup_message = if backup_count == 0 {
-        "未选择需要备份的数据卷".to_string()
-    } else {
-        format!("冷备 {backup_count} 个数据卷")
-    };
-    progress(window, "备份数据卷", 24, "running", &backup_message);
+    progress(
+        window,
+        "备份数据卷",
+        24,
+        "running",
+        "冷备数据库数据",
+    );
     transaction
         .set_phase(&plan.install_root, PHASE_SNAPSHOTTING_DATA)
         .map_err(|error| (PHASE_SNAPSHOTTING_DATA.to_string(), error))?;
-    for volume in &plan.volumes {
-        if !volume.backup && volume.exists {
-            output.push_str(&format!("数据卷 {}：按要求不备份\n", volume.logical_name));
-            continue;
-        }
+    for volume in plan.volumes.iter().filter(|volume| volume.backup) {
         if !volume.exists {
             transaction.volumes.push(VolumeSnapshot {
                 logical_name: volume.logical_name.clone(),
@@ -640,7 +652,10 @@ fn project_id() -> String {
         .unwrap_or_default()
 }
 
-fn recover_local(window: &tauri::Window, install_dir: &str) -> Result<VersionDeployResult, String> {
+fn recover_local(
+    window: Option<&tauri::Window>,
+    install_dir: &str,
+) -> Result<VersionDeployResult, String> {
     let started = Instant::now();
     let install = resolve_install_root(install_dir, true)?;
     let _lock = DeploymentLock::acquire(&install)?;
@@ -683,8 +698,12 @@ fn recover_local(window: &tauri::Window, install_dir: &str) -> Result<VersionDep
     let recovery = recover_from_transaction(&install, &mut transaction);
     let duration_secs = started.elapsed().as_secs();
     match recovery {
-        Ok(()) => {
-            let recovered = transaction.had_deployment && transaction.deployment_started;
+        Ok(outcome) => {
+            let recovered =
+                transaction.had_deployment && transaction.deployment_started && outcome.started_previous;
+            let degraded = transaction.had_deployment
+                && transaction.deployment_started
+                && !outcome.started_previous;
             Ok(VersionDeployResult {
                 success: false,
                 recovered,
@@ -708,6 +727,12 @@ fn recover_local(window: &tauri::Window, install_dir: &str) -> Result<VersionDep
                         } else {
                             &transaction.previous_version
                         },
+                        transaction.id
+                    )
+                } else if degraded {
+                    format!(
+                        "已恢复部署文件与数据库数据，但未能自动启动上一版本\n原因：{}\n事务：{}",
+                        outcome.note.unwrap_or_else(|| "上一版本无法启动".to_string()),
                         transaction.id
                     )
                 } else {
@@ -743,30 +768,25 @@ fn recover_local(window: &tauri::Window, install_dir: &str) -> Result<VersionDep
     }
 }
 
+struct RecoveryOutcome {
+    started_previous: bool,
+    note: Option<String>,
+}
+
 fn recover_from_transaction(
     install: &Path,
     transaction: &mut DeploymentTransaction,
-) -> Result<(), String> {
+) -> Result<RecoveryOutcome, String> {
     let deploy_dir = PathBuf::from(&transaction.deploy_dir);
     let new_compose = transaction_compose_path(install, &transaction.new_compose);
     let mut previous = None;
+    let mut note = None;
     if transaction.deployment_started {
         deployment_tx::verify_recovery_snapshot(transaction)?;
         if transaction.startup_attempted && !new_compose.is_file() {
             return Err(
                 "失败版本的 Compose 清单缺失，无法确认服务已停止；请检查后人工恢复".to_string(),
             );
-        }
-        for image in &transaction.old_images {
-            if !super::deployment_image_bindings::valid_image_id(&image.image_id) {
-                return Err(format!(
-                    "上一版本部署记录中的镜像 {} 标识无效，无法安全恢复",
-                    image.reference
-                ));
-            }
-            if inspect_image(&image.image_id)?.is_none() {
-                return Err(format!("上一版本镜像 {} 已不存在，无法安全恢复", image.reference));
-            }
         }
         if transaction.startup_attempted {
             for volume in transaction.volumes.iter().filter(|volume| volume.existed) {
@@ -785,24 +805,29 @@ fn recover_from_transaction(
                 deployment_tx::check_backup_tools_local(&volume.image)?;
             }
         }
-        if transaction.had_deployment && !transaction.previous_compose.is_empty() {
-            let old_compose = transaction_compose_path(install, &transaction.previous_compose);
-            if !old_compose.is_file() {
-                return Err(format!(
-                    "上一版本 Compose 清单缺失，无法安全恢复：{}",
-                    old_compose.display()
-                ));
+        if transaction.had_deployment {
+            if transaction.previous_compose.is_empty() {
+                note = Some("部署事务未记录上一版本的 Compose 清单".to_string());
+            } else {
+                // 上一版本能否自动启动只影响“恢复后是否继续提供旧服务”。数据库与
+                // 文件恢复不依赖旧镜像，因此这里失败时降级处理，不中断回滚。
+                match previous_restart_plan(install, &deploy_dir, transaction) {
+                    Ok(plan) => previous = Some(plan),
+                    Err(reason) => {
+                        log::warn!(target: "deploy", "无法自动启动上一版本：{reason}");
+                        note = Some(reason);
+                    }
+                }
             }
-            let old_config = compose_config(install, &deploy_dir, &old_compose, false)?;
-            let old_override =
-                image_override_document(&old_config, &transaction.old_images)?;
-            previous = Some((old_compose, old_override, old_config));
         }
     }
     transaction.recover(install)?;
     if !transaction.deployment_started {
         transaction.recovered(install)?;
-        return Ok(());
+        return Ok(RecoveryOutcome {
+            started_previous: false,
+            note: None,
+        });
     }
     if transaction.startup_attempted {
         compose_checked(
@@ -831,6 +856,7 @@ fn recover_from_transaction(
             Path::new(&volume.file),
         )?;
     }
+    let started_previous = previous.is_some();
     if let Some((old_compose, old_override, old_config)) = previous {
         compose_checked(
             install,
@@ -864,7 +890,38 @@ fn recover_from_transaction(
         }
     }
     transaction.recovered(install)?;
-    Ok(())
+    Ok(RecoveryOutcome {
+        started_previous,
+        note,
+    })
+}
+
+fn previous_restart_plan(
+    install: &Path,
+    deploy_dir: &Path,
+    transaction: &DeploymentTransaction,
+) -> Result<(PathBuf, Option<String>, Value), String> {
+    for image in &transaction.old_images {
+        if !super::deployment_image_bindings::valid_image_id(&image.image_id) {
+            return Err(format!(
+                "上一版本部署记录中的镜像 {} 标识无效",
+                image.reference
+            ));
+        }
+        if inspect_image(&image.image_id)?.is_none() {
+            return Err(format!("上一版本镜像 {} 已不存在", image.reference));
+        }
+    }
+    let old_compose = transaction_compose_path(install, &transaction.previous_compose);
+    if !old_compose.is_file() {
+        return Err(format!(
+            "上一版本 Compose 清单缺失：{}",
+            old_compose.display()
+        ));
+    }
+    let old_config = compose_config(install, deploy_dir, &old_compose, false)?;
+    let old_override = image_override_document(&old_config, &transaction.old_images)?;
+    Ok((old_compose, old_override, old_config))
 }
 
 fn remove_volume_if_present(actual_name: &str, project_name: &str) -> Result<(), String> {
@@ -1066,11 +1123,7 @@ fn transaction_compose_path(install: &Path, stored: &str) -> PathBuf {
     install.join(stored)
 }
 
-fn build_plan(
-    bundle_dir: &str,
-    install_dir: &str,
-    backup_volumes: Option<&[String]>,
-) -> Result<FullDeployPlan, String> {
+fn build_plan(bundle_dir: &str, install_dir: &str) -> Result<FullDeployPlan, String> {
     let bundle_root =
         fs::canonicalize(bundle_dir.trim()).map_err(|_| "无法访问交付包目录".to_string())?;
     let install_root = resolve_install_root(install_dir, false)?;
@@ -1118,12 +1171,25 @@ fn build_plan(
         return Err("目标目录的旧部署记录与当前产品或记录版本不匹配，已停止部署".to_string());
     }
     let old_compose = find_old_compose(&install_root, &deploy_dir, record.as_ref())?;
-    let old_compose_rel = old_compose
-        .as_ref()
-        .map(|path| deployment_tx::relative_install_path(&install_root, path))
-        .transpose()?
-        .unwrap_or_default();
+    let (old_compose_rel, old_compose_managed) = match &old_compose {
+        Some(path) => match deployment_tx::relative_install_path(&install_root, path) {
+            Ok(relative) => (relative, true),
+            // 手工或用其他工具启动的旧版本可能引用部署目录外的清单。该文件仍然可以
+            // 用于停止旧版本和失败恢复，因此不再阻断部署，只是不纳入文件快照。
+            Err(_) => (path.to_string_lossy().to_string(), false),
+        },
+        None => (String::new(), false),
+    };
     let had_deployment = old_compose.is_some();
+    let mut warnings = Vec::new();
+    if let (Some(path), false) = (&old_compose, old_compose_managed) {
+        let warning = format!(
+            "上一版本使用的 Compose 清单位于部署目录外：{}；本次会直接使用该文件停止旧版本并在失败时恢复，请保持该文件可用",
+            path.display()
+        );
+        log::warn!(target: "deploy", "{warning}");
+        warnings.push(warning);
+    }
     let previous_version = record
         .as_ref()
         .map(|item| item.version.clone())
@@ -1186,16 +1252,17 @@ fn build_plan(
     image_snapshots(&install_root, &incoming_config)?;
     let old_images = current_config
         .as_ref()
-        .map(|config| previous_image_snapshots(&install_root, config, record.as_ref()))
+        .map(|config| {
+            previous_image_snapshots(&install_root, config, record.as_ref(), &mut warnings)
+        })
         .transpose()?
         .unwrap_or_default();
-    let backup_selection = resolve_backup_volumes(&bundle, backup_volumes)?;
     let volumes = volume_plans(
         &install_root,
         &bundle,
         &incoming_config,
         current_config.as_ref(),
-        &backup_selection,
+        &mut warnings,
     )?;
     let mut managed_paths: BTreeSet<String> = artifacts
         .iter()
@@ -1229,7 +1296,7 @@ fn build_plan(
     let deployed_rel = format!("{DEPLOYED_RECORD_DIR}/{DEPLOYED_RECORD_FILE}");
     managed_paths.insert(deployed_rel.clone());
     new_paths.insert(deployed_rel);
-    if !old_compose_rel.is_empty() {
+    if old_compose_managed && !old_compose_rel.is_empty() {
         managed_paths.insert(old_compose_rel.clone());
         if old_compose_rel != new_compose_rel {
             retired_paths.insert(old_compose_rel.clone());
@@ -1336,6 +1403,7 @@ fn build_plan(
         incoming_config,
         old_images,
         volumes,
+        warnings,
         services,
         old_services,
         frontend_service,
@@ -1364,30 +1432,22 @@ fn dry_run_output(plan: &FullDeployPlan) -> String {
         .filter(|volume| volume.backup)
         .map(|volume| format!("{}（{}）", volume.logical_name, volume.actual_name))
         .collect();
-    let skipped: Vec<String> = plan
-        .volumes
-        .iter()
-        .filter(|volume| !volume.backup)
-        .map(|volume| format!("{}（{}）", volume.logical_name, volume.actual_name))
-        .collect();
-    let skipped_text = if skipped.is_empty() {
-        String::new()
-    } else {
-        format!("不备份：{}；", skipped.join("、"))
-    };
-    format!(
-        "预检通过：版本 {}；部署目录 {}；{} 个服务；备份数据卷：{}；{}预计备份空间约 {:.1} GB。未停止服务，也未修改目标。",
+    let mut output = format!(
+        "预检通过：版本 {}；部署目录 {}；{} 个服务；{}；预计备份空间约 {:.1} GB。未停止服务，也未修改目标。",
         plan.bundle.version(),
         plan.install_root.display(),
         plan.services.len(),
         if selected.is_empty() {
-            "不备份数据卷".to_string()
+            "无需冷备数据库卷".to_string()
         } else {
-            selected.join("、")
+            format!("冷备数据库卷：{}", selected.join("、"))
         },
-        skipped_text,
         plan.required_backup_bytes as f64 / 1024.0 / 1024.0 / 1024.0
-    )
+    );
+    for warning in &plan.warnings {
+        output.push_str(&format!("\n提示：{warning}。"));
+    }
+    output
 }
 
 fn result_without_transaction(
@@ -1415,53 +1475,12 @@ fn result_without_transaction(
     }
 }
 
-pub(crate) fn resolve_backup_volumes(
-    bundle: &Bundle,
-    requested: Option<&[String]>,
-) -> Result<BTreeSet<String>, String> {
-    let data = bundle
-        .descriptor
-        .runtime
-        .data
-        .as_ref()
-        .ok_or_else(|| "交付包缺少数据卷声明".to_string())?;
-    let declared: BTreeSet<String> = data
-        .volumes
-        .iter()
-        .map(|volume| volume.name.clone())
-        .collect();
-    select_backup_names(&declared, requested)
-}
-
-fn select_backup_names(
-    declared: &BTreeSet<String>,
-    requested: Option<&[String]>,
-) -> Result<BTreeSet<String>, String> {
-    let Some(requested) = requested else {
-        return Ok(declared.clone());
-    };
-    let mut selected = BTreeSet::new();
-    for raw in requested {
-        let name = raw.trim();
-        if name.is_empty() {
-            return Err("数据卷名称不能为空".to_string());
-        }
-        if !declared.contains(name) {
-            return Err(format!(
-                "数据卷 {name} 未在交付包声明，无法选择备份"
-            ));
-        }
-        selected.insert(name.to_string());
-    }
-    Ok(selected)
-}
-
 fn volume_plans(
     install: &Path,
     bundle: &Bundle,
     incoming: &Value,
     current: Option<&Value>,
-    selected: &BTreeSet<String>,
+    warnings: &mut Vec<String>,
 ) -> Result<Vec<VolumePlan>, String> {
     let data = bundle
         .descriptor
@@ -1473,10 +1492,12 @@ fn volume_plans(
     let bindings = super::deployment_image_bindings::local_bindings(install)?;
     let mut verified_backup_images = BTreeSet::new();
     for volume in &data.volumes {
-        let backup = selected.contains(&volume.name);
-        let actual = resolved_volume_name(incoming, &volume.name)?;
+        // 只有数据库卷需要冷备。其余数据卷由 Docker 保留，回滚时重启上一版本即可。
+        let backup = volume_backup_required(bundle, &volume.service);
+        let actual = resolved_volume_name(incoming, &volume.name, backup)?;
         ensure_volume_mounted_by(incoming, &volume.service, &volume.name)?;
-        let image = if backup {
+        let mut image = String::new();
+        if backup {
             let reference = bundle
                 .descriptor
                 .images
@@ -1489,7 +1510,7 @@ fn volume_plans(
                 .find(|binding| image_reference_matches(&binding.reference, &reference))
                 .map(|binding| binding.image_id.as_str())
                 .unwrap_or(&reference);
-            let image = inspect_local_image(identity)?
+            image = inspect_local_image(identity)?
                 .ok_or_else(|| format!("目标 Docker 缺少数据卷备份镜像 {reference}"))?
                 .image_id;
             if verified_backup_images.insert(image.clone()) {
@@ -1500,14 +1521,11 @@ fn volume_plans(
                 }
                 deployment_tx::check_backup_tools_local(&image)?;
             }
-            image
-        } else {
-            String::new()
-        };
+        }
         let exists = volume_exists(&actual)?;
         // 首次部署允许复用归属一致的数据卷；不存在时由本次部署直接创建。
         // 事务按部署前的真实状态记录，失败回滚只清理本次新建的卷。
-        if exists {
+        if backup && exists {
             let owner = docker_checked(
                 &["volume", "inspect", "--format", "{{index .Labels \"com.docker.compose.project\"}}|{{index .Labels \"com.docker.compose.volume\"}}", &actual],
                 "检查数据卷归属", Duration::from_secs(30),
@@ -1518,13 +1536,22 @@ fn volume_plans(
                 volume.name
             );
             if owner.trim() != expected {
-                return Err(format!(
-                    "数据卷 {actual} 的 Compose 项目或逻辑卷标签不一致，已阻止部署"
-                ));
+                // 手工创建或由旧项目启动的卷可能缺少归属标签。卷名已与交付包声明一致，
+                // 继续复用并在部署前冷备即可保证数据不丢失。
+                let label = if owner.trim().is_empty() {
+                    "未设置"
+                } else {
+                    owner.trim()
+                };
+                let warning = format!(
+                    "数据卷 {actual} 的 Compose 归属标签为「{label}」，与当前项目「{expected}」不同；将按同名卷继续部署，并在部署前冷备"
+                );
+                log::warn!(target: "deploy", "{warning}");
+                warnings.push(warning);
             }
         }
         if let Some(current) = current {
-            if resolved_volume_name(current, &volume.name)? != actual {
+            if resolved_volume_name(current, &volume.name, backup)? != actual {
                 return Err(format!(
                     "新旧版本的数据卷 {} 实际名称不一致，已停止部署",
                     volume.name
@@ -1545,40 +1572,62 @@ fn volume_plans(
             backup,
         });
     }
-    for service in active_service_configs(incoming) {
-        if let Some(items) = service.get("volumes").and_then(Value::as_array) {
-            for item in items {
-                if item.get("type").and_then(Value::as_str) == Some("volume") {
-                    let source = item
-                        .get("source")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
-                    if !result.iter().any(|volume| volume.logical_name == source) {
-                        return Err(format!(
-                            "服务使用了未声明的数据卷 {source}，无法保证部署失败后恢复数据"
-                        ));
-                    }
-                }
-            }
-        }
-    }
     Ok(result)
 }
 
-fn resolved_volume_name(config: &Value, logical: &str) -> Result<String, String> {
+/// 交付包声明了数据库服务且确实有归属它的数据卷时，只冷备这些卷；
+/// 无法确认数据库卷时保持原有行为，冷备全部声明的数据卷。
+pub(crate) fn volume_backup_required(bundle: &Bundle, service: &str) -> bool {
+    backup_service_required(
+        bundle.descriptor.runtime.database.as_ref(),
+        bundle
+            .descriptor
+            .runtime
+            .data
+            .as_ref()
+            .map(|data| data.volumes.as_slice())
+            .unwrap_or(&[]),
+        service,
+    )
+}
+
+fn backup_service_required(
+    database: Option<&DatabaseSpec>,
+    volumes: &[DataVolumeSpec],
+    service: &str,
+) -> bool {
+    let Some(database) = database else {
+        return true;
+    };
+    if !volumes
+        .iter()
+        .any(|volume| volume.service == database.service_key)
+    {
+        return true;
+    }
+    service == database.service_key
+}
+
+fn resolved_volume_name(
+    config: &Value,
+    logical: &str,
+    allow_external: bool,
+) -> Result<String, String> {
     let volume = config
         .get("volumes")
         .and_then(|value| value.get(logical))
         .and_then(Value::as_object)
         .ok_or_else(|| format!("Compose 未声明数据卷 {logical}"))?;
-    if volume.get("external").and_then(Value::as_bool) == Some(true) {
+    let external = volume.get("external").and_then(Value::as_bool) == Some(true);
+    if external && !allow_external {
         return Err(format!("数据卷 {logical} 为 external，无法安全备份与恢复"));
     }
-    volume
-        .get("name")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .ok_or_else(|| format!("无法解析数据卷 {logical} 的实际名称"))
+    match volume.get("name").and_then(Value::as_str) {
+        Some(name) => Ok(name.to_string()),
+        // external 卷未写 name 时，Compose 直接使用逻辑名称。
+        None if external => Ok(logical.to_string()),
+        None => Err(format!("无法解析数据卷 {logical} 的实际名称")),
+    }
 }
 
 pub(crate) fn validate_deployment_mounts(
@@ -1593,48 +1642,46 @@ pub(crate) fn validate_deployment_mounts(
         .data
         .as_ref()
         .ok_or_else(|| "交付包缺少持久数据声明".to_string())?;
-    let volumes = data
+    // 只有需要冷备的数据库卷要求命名卷、非 external、无外部存储选项。
+    let backups = data
         .volumes
+        .iter()
+        .filter(|volume| volume_backup_required(bundle, &volume.service))
+        .collect::<Vec<_>>();
+    let volumes = backups
         .iter()
         .map(|volume| volume.name.clone())
         .collect::<Vec<_>>();
-    let data_services = bundle
-        .descriptor
-        .runtime
-        .services
-        .iter()
-        .filter(|service| service.role == Some(super::bundle::ServiceRole::Data))
-        .map(|service| service.key.clone())
-        .collect::<Vec<_>>();
-    let preserve = data
-        .paths
-        .iter()
-        .map(|path| format!("{install}/{}", path.path))
-        .collect::<Vec<_>>();
+    let mut data_services = Vec::new();
+    for volume in &backups {
+        if !data_services.contains(&volume.service) {
+            data_services.push(volume.service.clone());
+        }
+    }
     let managed = managed
         .iter()
         .map(|path| format!("{install}/{path}"))
         .collect::<Vec<_>>();
-    validate_mount_contract(config, &volumes, &data_services, &preserve, &managed)
+    validate_mount_contract(config, &volumes, &data_services, &managed)
 }
 
 pub(crate) fn validate_mount_contract(
     config: &Value,
     volumes: &[String],
     data_services: &[String],
-    preserve: &[String],
     managed: &[String],
 ) -> Result<(), String> {
     let Some(services) = config.get("services").and_then(Value::as_object) else {
         return Err("Compose 缺少服务清单".to_string());
     };
     for (name, service) in services {
-        if service
-            .get("volumes_from")
-            .and_then(Value::as_array)
-            .is_some_and(|sources| !sources.is_empty())
+        if data_services.iter().any(|service| service == name)
+            && service
+                .get("volumes_from")
+                .and_then(Value::as_array)
+                .is_some_and(|sources| !sources.is_empty())
         {
-            return Err(format!("服务 {name} 使用继承数据卷，无法确认数据保护范围"));
+            return Err(format!("数据库服务 {name} 使用继承数据卷，无法确认备份范围"));
         }
         for mount in service
             .get("volumes")
@@ -1652,12 +1699,16 @@ pub(crate) fn validate_mount_contract(
                 .unwrap_or_default()
             {
                 "volume" => {
-                    if source.is_empty() || !volumes.iter().any(|volume| volume == source) {
+                    let backed_up = volumes.iter().any(|volume| volume == source);
+                    if !backed_up {
+                        if !data_services.iter().any(|service| service == name) {
+                            continue;
+                        }
                         return Err(format!(
-                            "服务 {name} 使用匿名卷或未声明数据卷 {source}，无法安全恢复"
+                            "数据库服务 {name} 必须使用交付包声明的命名数据卷"
                         ));
                     }
-                    resolved_volume_name(config, source)?;
+                    resolved_volume_name(config, source, false)?;
                     if config
                         .pointer(&format!("/volumes/{source}/driver_opts"))
                         .and_then(Value::as_object)
@@ -1673,19 +1724,22 @@ pub(crate) fn validate_mount_contract(
                         .get("read_only")
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
-                    let preserved = preserve
-                        .iter()
-                        .any(|path| mount_path_contains(path, source));
-                    let snapshotted = managed.iter().any(|path| mount_path_contains(path, source));
-                    if (read_only && (preserved || snapshotted))
-                        || (preserved && !snapshotted && !data_services.contains(name))
-                    {
+                    if read_only {
                         continue;
                     }
-                    return Err(format!("服务 {name} 的宿主挂载 {source} 未纳入可恢复数据范围，请改用声明的数据卷或只读受管文件"));
+                    if data_services.iter().any(|service| service == name) {
+                        return Err(format!(
+                            "数据库服务 {name} 的宿主挂载 {source} 无法自动冷备，请改用交付包声明的数据卷"
+                        ));
+                    }
+                    if managed.iter().any(|path| mount_path_contains(path, source)) {
+                        return Err(format!(
+                            "服务 {name} 的宿主挂载 {source} 指向部署受管文件，部署会覆盖其中的数据"
+                        ));
+                    }
                 }
                 "tmpfs" => {}
-                kind => return Err(format!("服务 {name} 使用不支持的挂载类型 {kind}")),
+                _ => {}
             }
         }
     }
@@ -1831,16 +1885,18 @@ fn find_old_compose(
         .map(|record| record.effective_compose.as_str())
         .filter(|path| !path.is_empty())
     {
+        if path_guard::has_parent_dir(Path::new(stored)) {
+            return Err(
+                "上一版本的生效 Compose 路径包含无效跳转，请确认旧部署配置后再部署".to_string(),
+            );
+        }
         let path = if path_guard::is_absolute(stored) {
             PathBuf::from(stored)
         } else {
             install.join(stored)
         };
-        if !path_guard::path_is_within(deploy_dir, &path) || !path.is_file() {
-            return Err(
-                "上一版本的生效 Compose 清单缺失或位于其他目录，请确认旧部署配置后再部署"
-                    .to_string(),
-            );
+        if !path.is_file() {
+            return Err("上一版本的生效 Compose 清单缺失，请确认旧部署配置后再部署".to_string());
         }
         return Ok(Some(path));
     }
@@ -1859,36 +1915,43 @@ fn find_old_compose(
         "检查上一版本生效清单",
         Duration::from_secs(60),
     )?;
-    for path in active
-        .lines()
-        .flat_map(|line| line.split(','))
-        .map(str::trim)
-        .filter(|path| !path.is_empty())
-    {
-        if !path_guard::path_is_within(deploy_dir, Path::new(path))
-            && !path_guard::path_is_within(&install.join(".deploy-desktop"), Path::new(path))
-        {
-            return Err("上一版本引用部署目录外的 Compose 清单，本期无法安全恢复".to_string());
-        }
-    }
-    let actual: BTreeSet<_> = active
+    let stored: BTreeSet<PathBuf> = active
         .lines()
         .flat_map(|line| line.split(','))
         .map(str::trim)
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
-        .filter(|path| path_guard::path_is_within(deploy_dir, path))
         .collect();
-    if actual.len() > 1 {
+    let (mut inside, outside): (BTreeSet<PathBuf>, BTreeSet<PathBuf>) = stored.into_iter().partition(
+        |path| {
+            path_guard::path_is_within(deploy_dir, path)
+                || path_guard::path_is_within(&install.join(".deploy-desktop"), path)
+        },
+    );
+    if inside.len() > 1 {
         return Err(
             "上一版本合并使用多份 Compose 清单，本期无法安全恢复，请先确认生效配置".to_string(),
         );
     }
-    if let Some(path) = actual.into_iter().next() {
+    if let Some(path) = inside.pop_first() {
         if !path.is_file() {
             return Err("上一版本的实际 Compose 清单不存在，已停止部署".to_string());
         }
         return Ok(Some(path));
+    }
+    // 旧版本由其他工具或手工启动时，生效清单可能位于部署目录外。只要文件仍可读取，
+    // 就可以用它停止旧版本并在失败时恢复，不必强迫用户先迁移目录布局。
+    let mut existing_outside: Vec<PathBuf> =
+        outside.into_iter().filter(|path| path.is_file()).collect();
+    match existing_outside.len() {
+        0 => {}
+        1 => return Ok(existing_outside.pop()),
+        _ => {
+            return Err(
+                "上一版本使用多份部署目录外的 Compose 清单，请先确认生效配置后再部署"
+                    .to_string(),
+            )
+        }
     }
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(record) = record {
@@ -1935,12 +1998,6 @@ fn find_old_compose(
         );
     }
     let selected = existing.into_iter().next();
-    if selected
-        .as_ref()
-        .is_some_and(|path| !path_guard::path_is_within(deploy_dir, path))
-    {
-        return Err("上一版本 Compose 位于其他目录，本期不支持迁移部署目录".to_string());
-    }
     if selected.is_none() && record.is_some() {
         return Err("旧部署记录存在，但找不到上一版本 Compose 清单，已停止部署".to_string());
     }
@@ -2185,11 +2242,12 @@ fn previous_image_snapshots(
     install: &Path,
     config: &Value,
     record: Option<&DeployedRecord>,
+    warnings: &mut Vec<String>,
 ) -> Result<Vec<ImageSnapshot>, String> {
     let recorded = record
         .map(|record| record.images.as_slice())
         .unwrap_or_default();
-    let mut fallback: Option<BTreeMap<String, ImageSnapshot>> = None;
+    let bindings = super::deployment_image_bindings::local_bindings(install)?;
     let mut result = BTreeMap::new();
     for service in active_service_configs(config) {
         let reference = service
@@ -2200,34 +2258,44 @@ fn previous_image_snapshots(
         if result.contains_key(reference) {
             continue;
         }
-        if let Some(image) = recorded
+        let recorded_image = recorded
             .iter()
-            .find(|image| image_reference_matches(&image.reference, reference))
-        {
-            if !super::deployment_image_bindings::valid_image_id(&image.image_id) {
-                return Err(format!("上一版本部署记录中的镜像 {reference} 标识无效"));
+            .find(|image| image_reference_matches(&image.reference, reference));
+        let inspected = match recorded_image {
+            Some(image) if super::deployment_image_bindings::valid_image_id(&image.image_id) => {
+                inspect_image(&image.image_id)?
             }
-            let inspected = inspect_image(&image.image_id)?
-                .ok_or_else(|| format!("上一版本镜像 {reference} 已不存在，无法安全恢复"))?;
-            result.insert(
-                reference.to_string(),
-                ImageSnapshot {
-                    reference: reference.to_string(),
-                    image_id: inspected.image_id,
-                    platform: inspected.platform,
-                },
-            );
-            continue;
+            Some(_) => None,
+            None => {
+                let identity = bindings
+                    .iter()
+                    .find(|binding| binding.reference == reference)
+                    .map(|binding| binding.image_id.as_str())
+                    .unwrap_or(reference);
+                inspect_image(identity)?
+            }
+        };
+        match inspected {
+            Some(inspected) => {
+                result.insert(
+                    reference.to_string(),
+                    ImageSnapshot {
+                        reference: reference.to_string(),
+                        image_id: inspected.image_id,
+                        platform: inspected.platform,
+                    },
+                );
+            }
+            // 旧镜像被清理不应阻止新版本部署。数据卷仍在部署前冷备，失败时先恢复
+            // 数据库数据，只是无法再自动启动上一版本的容器。
+            None => {
+                let warning = format!(
+                    "上一版本镜像 {reference} 已不存在，本次仍会继续部署；如果部署失败，会恢复数据库数据但无法自动启动上一版本"
+                );
+                log::warn!(target: "deploy", "{warning}");
+                warnings.push(warning);
+            }
         }
-        if fallback.is_none() {
-            fallback = Some(image_snapshots(install, config)?);
-        }
-        let image = fallback
-            .as_ref()
-            .and_then(|images| images.get(reference))
-            .cloned()
-            .ok_or_else(|| format!("无法确认上一版本镜像 {reference}"))?;
-        result.insert(reference.to_string(), image);
     }
     Ok(result.into_values().collect())
 }
@@ -2490,6 +2558,7 @@ fn wait_for_services(
     let deadline = Instant::now() + Duration::from_secs(180);
     loop {
         let mut unready = Vec::new();
+        let mut stopped = Vec::new();
         for service in services {
             let ids = compose_checked(
                 install,
@@ -2516,10 +2585,20 @@ fn wait_for_services(
                 )?;
                 let state = String::from_utf8_lossy(&output.stdout);
                 let (status, health) = state.trim().split_once('|').unwrap_or(("missing", "none"));
-                if status != "running" || matches!(health, "unhealthy" | "starting") {
+                if matches!(status, "exited" | "dead") {
+                    stopped.push(service.clone());
+                    unready.push(service.clone());
+                } else if status != "running" || matches!(health, "unhealthy" | "starting") {
                     unready.push(service.clone());
                 }
             }
+        }
+        if !stopped.is_empty() {
+            return Err(format!(
+                "服务 {} 的容器已退出，无法通过就绪检查{}",
+                stopped.join("、"),
+                service_logs(install, deploy_dir, compose, &stopped)
+            ));
         }
         let http_unready =
             unready.is_empty() && frontend.map(|(_, port)| !http_ready(port)).unwrap_or(false);
@@ -2527,19 +2606,7 @@ fn wait_for_services(
             return Ok(());
         }
         if Instant::now() >= deadline {
-            let mut detail = String::new();
-            for service in unready.iter().take(3) {
-                let logs = compose_checked(
-                    install,
-                    deploy_dir,
-                    compose,
-                    &["logs", "--tail", "30", service],
-                    None,
-                    Duration::from_secs(60),
-                )
-                .unwrap_or_default();
-                detail.push_str(&format!("\n{service}: {logs}"));
-            }
+            let detail = service_logs(install, deploy_dir, compose, &unready);
             if http_unready {
                 let (service, port) = frontend.ok_or_else(|| "网页服务端口未声明".to_string())?;
                 return Err(format!(
@@ -2554,6 +2621,28 @@ fn wait_for_services(
         }
         std::thread::sleep(Duration::from_secs(2));
     }
+}
+
+fn service_logs(
+    install: &Path,
+    deploy_dir: &Path,
+    compose: &Path,
+    services: &[String],
+) -> String {
+    let mut detail = String::new();
+    for service in services.iter().take(3) {
+        let logs = compose_checked(
+            install,
+            deploy_dir,
+            compose,
+            &["logs", "--tail", "30", service],
+            None,
+            Duration::from_secs(60),
+        )
+        .unwrap_or_default();
+        detail.push_str(&format!("\n{service}: {logs}"));
+    }
+    detail
 }
 
 fn frontend_probe(service: &str, port: Option<u16>) -> Option<(&str, u16)> {
@@ -2941,6 +3030,15 @@ mod tests {
         );
         record.effective_compose = "stack/old-compose.yml".to_string();
         assert!(find_old_compose(&install, &deploy, Some(&record)).is_err());
+        // 旧清单位于部署目录外但文件仍在时继续可用，不再要求先迁移目录布局。
+        fs::create_dir_all(install.join("stack")).unwrap();
+        fs::write(install.join("stack/old-compose.yml"), "services: {}").unwrap();
+        assert_eq!(
+            find_old_compose(&install, &deploy, Some(&record)).unwrap(),
+            Some(install.join("stack/old-compose.yml"))
+        );
+        record.effective_compose = "../escape.yml".to_string();
+        assert!(find_old_compose(&install, &deploy, Some(&record)).is_err());
         fs::remove_dir_all(install).unwrap();
     }
 
@@ -2978,7 +3076,6 @@ mod tests {
                 &case["config"],
                 &strings("volumes"),
                 &strings("dataServices"),
-                &strings("preserve"),
                 &strings("managed"),
             );
             assert_eq!(
@@ -3048,7 +3145,7 @@ mod tests {
     }
 
     #[test]
-    fn data_volume_resolution_rejects_external_volumes() {
+    fn backup_volumes_reject_external_and_other_volumes_allow_it() {
         let config = serde_json::json!({
             "volumes": {
                 "db-data": {"name": "demo_db-data"},
@@ -3056,32 +3153,49 @@ mod tests {
             }
         });
         assert_eq!(
-            resolved_volume_name(&config, "db-data").unwrap(),
+            resolved_volume_name(&config, "db-data", false).unwrap(),
             "demo_db-data"
         );
-        assert!(resolved_volume_name(&config, "shared")
+        assert_eq!(
+            resolved_volume_name(&config, "shared", true).unwrap(),
+            "shared"
+        );
+        assert!(resolved_volume_name(&config, "shared", false)
             .unwrap_err()
             .contains("external"));
     }
 
     #[test]
-    fn backup_selection_defaults_to_all_and_allows_none() {
-        let declared = ["database", "cache"]
-            .into_iter()
-            .map(str::to_string)
-            .collect::<BTreeSet<_>>();
-        assert_eq!(
-            select_backup_names(&declared, None).unwrap(),
-            declared
-        );
-        assert!(select_backup_names(&declared, Some(&[])).unwrap().is_empty());
-        assert_eq!(
-            select_backup_names(&declared, Some(&["cache".to_string()])).unwrap(),
-            ["cache".to_string()].into_iter().collect()
-        );
-        assert!(select_backup_names(&declared, Some(&["missing".to_string()]))
-            .unwrap_err()
-            .contains("未在交付包声明"));
+    fn only_database_volumes_require_backup() {
+        let volumes = vec![
+            DataVolumeSpec {
+                name: "db-data".to_string(),
+                service: "postgres".to_string(),
+                image: "busybox".to_string(),
+                required: true,
+            },
+            DataVolumeSpec {
+                name: "kafka-data".to_string(),
+                service: "kafka".to_string(),
+                image: "busybox".to_string(),
+                required: true,
+            },
+        ];
+        let database = DatabaseSpec {
+            service_key: "postgres".to_string(),
+            name: "demo".to_string(),
+            client: "psql".to_string(),
+            port: 5432,
+        };
+        assert!(backup_service_required(Some(&database), &volumes, "postgres"));
+        assert!(!backup_service_required(Some(&database), &volumes, "kafka"));
+        assert!(backup_service_required(None, &volumes, "kafka"));
+        let without_database_volume = vec![volumes[1].clone()];
+        assert!(backup_service_required(
+            Some(&database),
+            &without_database_volume,
+            "kafka"
+        ));
     }
 
     #[test]
@@ -3323,5 +3437,386 @@ mod tests {
         let error = ensure_artifact_target_replaceable(&install, &artifact).unwrap_err();
         assert!(error.contains("符号链接"), "{error}");
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[ignore = "需要本机 Docker；运行 cargo test local_full_deploy_smoke -- --ignored --nocapture"]
+    fn local_full_deploy_smoke() {
+        let docker_ready = Command::new("docker")
+            .arg("info")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+        assert!(docker_ready, "本机 Docker 不可用，无法执行部署冒烟测试");
+
+        let suffix = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+                % 1_000_000
+        );
+        let root = std::env::temp_dir().join(format!("deploy-smoke-{suffix}"));
+        let install = root.join("install");
+        let project = format!("deploy-smoke-{suffix}");
+        let port = {
+            let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        fs::create_dir_all(&root).unwrap();
+        let cleanup = SmokeCleanup {
+            project: project.clone(),
+            compose: install.join("deploy/docker-compose.yml"),
+            root: root.clone(),
+        };
+
+        let v1 = write_smoke_bundle(&root.join("bundle-v1"), &project, port, "version-one", false);
+        let v2 = write_smoke_bundle(&root.join("bundle-v2"), &project, port, "version-two", false);
+        let v3 = write_smoke_bundle(&root.join("bundle-v3"), &project, port, "version-three", true);
+
+        let first = run_full_deploy(
+            None,
+            v1.to_string_lossy().as_ref(),
+            install.to_string_lossy().as_ref(),
+            false,
+        )
+        .expect("首次部署应成功");
+        assert!(first.success, "{:?}", first);
+        assert!(
+            !first.output.contains("数据卷 cache-data"),
+            "非数据库卷不应冷备：{}",
+            first.output
+        );
+
+        wait_for_smoke_postgres(&project, &cleanup.compose);
+        let created = compose_exec(
+            &project,
+            &cleanup.compose,
+            "db",
+            &[
+                "psql",
+                "-U",
+                "postgres",
+                "-v",
+                "ON_ERROR_STOP=1",
+                "-c",
+                "CREATE TABLE smoke(value text); INSERT INTO smoke VALUES ('kept');",
+            ],
+        );
+        assert!(created.0, "写入数据库失败：{}", created.2);
+        let cached = compose_exec(
+            &project,
+            &cleanup.compose,
+            "cache",
+            &["sh", "-c", "echo kept > /cache/marker.txt"],
+        );
+        assert!(cached.0, "写入缓存卷失败：{}", cached.2);
+
+        let second = run_full_deploy(
+            None,
+            v2.to_string_lossy().as_ref(),
+            install.to_string_lossy().as_ref(),
+            false,
+        )
+        .expect("升级部署应成功");
+        assert!(second.success, "{:?}", second);
+        assert!(
+            second.output.contains("数据卷 db-data"),
+            "升级时应冷备数据库卷：{}",
+            second.output
+        );
+        assert!(
+            !second.output.contains("数据卷 cache-data"),
+            "非数据库卷不应进入恢复：{}",
+            second.output
+        );
+
+        let value = compose_exec(
+            &project,
+            &cleanup.compose,
+            "db",
+            &["psql", "-U", "postgres", "-tAc", "SELECT value FROM smoke"],
+        );
+        assert!(value.0, "读取数据库失败：{}", value.2);
+        assert_eq!(value.1.trim(), "kept", "数据库数据在升级后应保留");
+        let marker = compose_exec(
+            &project,
+            &cleanup.compose,
+            "cache",
+            &["cat", "/cache/marker.txt"],
+        );
+        assert!(marker.0, "读取缓存卷失败：{}", marker.2);
+        assert_eq!(marker.1.trim(), "kept", "非数据库卷在升级后应保留");
+        assert_eq!(
+            fs::read_to_string(install.join("data/version.txt")).unwrap(),
+            "version-two"
+        );
+        let page = Command::new("curl")
+            .args(["-fsS", &format!("http://127.0.0.1:{port}/")])
+            .output()
+            .expect("执行 curl");
+        assert!(
+            page.status.success() && String::from_utf8_lossy(&page.stdout).contains("version-two"),
+            "网页制品未更新：{}",
+            String::from_utf8_lossy(&page.stdout)
+        );
+
+        let inserted = compose_exec(
+            &project,
+            &cleanup.compose,
+            "db",
+            &[
+                "psql",
+                "-U",
+                "postgres",
+                "-v",
+                "ON_ERROR_STOP=1",
+                "-c",
+                "INSERT INTO smoke VALUES ('before-rollback');",
+            ],
+        );
+        assert!(inserted.0, "写入回滚前数据失败：{}", inserted.2);
+        let failed = run_full_deploy(
+            None,
+            v3.to_string_lossy().as_ref(),
+            install.to_string_lossy().as_ref(),
+            false,
+        )
+        .expect("失败部署应返回恢复结果");
+        assert!(!failed.success, "新版本应启动失败：{failed:?}");
+        assert!(failed.recovered, "新版本失败后应自动恢复：{failed:?}");
+        let rows = compose_exec(
+            &project,
+            &cleanup.compose,
+            "db",
+            &[
+                "psql",
+                "-U",
+                "postgres",
+                "-tAc",
+                "SELECT string_agg(value, ',' ORDER BY value) FROM smoke",
+            ],
+        );
+        assert!(rows.0, "回滚后读取数据库失败：{}", rows.2);
+        assert_eq!(
+            rows.1.trim(),
+            "before-rollback,kept",
+            "回滚后数据库数据应完整保留"
+        );
+        assert_eq!(
+            fs::read_to_string(install.join("data/version.txt")).unwrap(),
+            "version-two",
+            "回滚后应恢复上一版本文件"
+        );
+        let restored_page = Command::new("curl")
+            .args(["-fsS", &format!("http://127.0.0.1:{port}/")])
+            .output()
+            .expect("执行 curl");
+        assert!(
+            restored_page.status.success()
+                && String::from_utf8_lossy(&restored_page.stdout).contains("version-two"),
+            "回滚后网页应恢复上一版本：{}",
+            String::from_utf8_lossy(&restored_page.stdout)
+        );
+        let marker = compose_exec(
+            &project,
+            &cleanup.compose,
+            "cache",
+            &["cat", "/cache/marker.txt"],
+        );
+        assert!(marker.0, "回滚后读取缓存卷失败：{}", marker.2);
+        assert_eq!(marker.1.trim(), "kept", "回滚不应清理非数据库卷");
+    }
+
+    #[test]
+    #[ignore = "诊断真实交付包：设置 DEPLOY_REAL_BUNDLE 与 DEPLOY_REAL_INSTALL"]
+    fn real_bundle_preflight() {
+        let bundle = std::env::var("DEPLOY_REAL_BUNDLE").expect("缺少 DEPLOY_REAL_BUNDLE");
+        let install = std::env::var("DEPLOY_REAL_INSTALL").expect("缺少 DEPLOY_REAL_INSTALL");
+        match build_plan(&bundle, &install) {
+            Ok(plan) => println!(
+                "预检通过：版本={} 服务={} 卷={} 备份空间={} 字节",
+                plan.bundle.version(),
+                plan.services.len(),
+                plan.volumes.len(),
+                plan.required_backup_bytes
+            ),
+            Err(error) => panic!("预检失败：{error}"),
+        }
+    }
+
+    struct SmokeCleanup {
+        project: String,
+        compose: PathBuf,
+        root: PathBuf,
+    }
+
+    impl Drop for SmokeCleanup {
+        fn drop(&mut self) {
+            if self.compose.is_file() {
+                let _ = Command::new("docker")
+                    .args(["compose", "-p", &self.project, "-f"])
+                    .arg(&self.compose)
+                    .args(["down", "-v", "--remove-orphans"])
+                    .output();
+            }
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn compose_exec(
+        project: &str,
+        compose: &Path,
+        service: &str,
+        command: &[&str],
+    ) -> (bool, String, String) {
+        let output = Command::new("docker")
+            .args(["compose", "-p", project, "-f"])
+            .arg(compose)
+            .args(["exec", "-T", service])
+            .args(command)
+            .output()
+            .expect("执行 docker compose exec");
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout).to_string(),
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        )
+    }
+
+    fn wait_for_smoke_postgres(project: &str, compose: &Path) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(90);
+        loop {
+            let ready = compose_exec(project, compose, "db", &["pg_isready", "-U", "postgres"]);
+            if ready.0 {
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("PostgreSQL 未在 90 秒内就绪：{}", ready.2);
+            }
+            std::thread::sleep(Duration::from_secs(2));
+        }
+    }
+
+    fn write_smoke_bundle(
+        root: &Path,
+        project: &str,
+        port: u16,
+        marker: &str,
+        fail_cache: bool,
+    ) -> PathBuf {
+        fs::create_dir_all(root.join("deploy/site")).unwrap();
+        fs::create_dir_all(root.join("app")).unwrap();
+        let cache_command = if fail_cache {
+            "exit 1"
+        } else {
+            "mkdir -p /cache && while true; do sleep 3600; done"
+        };
+        let compose = format!(
+            "name: {project}\n\
+             services:\n\
+             \x20 frontend:\n\
+             \x20   image: nginx:1.27-alpine\n\
+             \x20   ports:\n\
+             \x20     - \"{port}:80\"\n\
+             \x20   volumes:\n\
+             \x20     - type: bind\n\
+             \x20       source: ./site\n\
+             \x20       target: /usr/share/nginx/html\n\
+             \x20       read_only: true\n\
+             \x20 db:\n\
+             \x20   image: postgres:16-alpine\n\
+             \x20   environment:\n\
+             \x20     POSTGRES_PASSWORD: smoke\n\
+             \x20   volumes:\n\
+             \x20     - type: volume\n\
+             \x20       source: db-data\n\
+             \x20       target: /var/lib/postgresql/data\n\
+             \x20 cache:\n\
+             \x20   image: busybox:1.37\n\
+             \x20   command: [\"sh\", \"-c\", \"{cache_command}\"]\n\
+             \x20   volumes:\n\
+             \x20     - type: volume\n\
+             \x20       source: cache-data\n\
+             \x20       target: /cache\n\
+             volumes:\n\
+             \x20 db-data:\n\
+             \x20   name: {project}-db\n\
+             \x20 cache-data:\n\
+             \x20   name: {project}-cache\n"
+        );
+        let index = format!("<html><body><h1>{marker}</h1></body></html>");
+        fs::write(root.join("deploy/docker-compose.yml"), &compose).unwrap();
+        fs::write(root.join("deploy/site/index.html"), &index).unwrap();
+        fs::write(root.join("app/version.txt"), marker).unwrap();
+        let files = [
+            ("deploy/docker-compose.yml", compose.as_bytes()),
+            ("deploy/site/index.html", index.as_bytes()),
+            ("app/version.txt", marker.as_bytes()),
+        ];
+        let files = files
+            .iter()
+            .map(|(path, bytes)| {
+                serde_json::json!({
+                    "path": path,
+                    "size": bytes.len() as u64,
+                    "sha256": crate::commands::bundle::sha256_hex(bytes),
+                })
+            })
+            .collect::<Vec<_>>();
+        let descriptor = serde_json::json!({
+            "apiVersion": "deploy.desktop/bundle/v2",
+            "kind": "DeploymentBundle",
+            "metadata": {
+                "product": "deploy-smoke",
+                "displayName": "本地部署冒烟",
+                "version": marker,
+                "buildNumber": "1"
+            },
+            "runtime": {
+                "type": "compose",
+                "compose": "deploy/docker-compose.yml",
+                "containerPrefix": project,
+                "services": [
+                    {"key": "frontend", "label": "网页", "role": "app", "port": port, "protocol": "TCP"},
+                    {"key": "db", "label": "数据库", "role": "data", "port": 5432, "protocol": "TCP"},
+                    {"key": "cache", "label": "缓存", "role": "app"}
+                ],
+                "data": {
+                    "volumes": [
+                        {"name": "db-data", "service": "db", "image": "busybox", "required": true},
+                        {"name": "cache-data", "service": "cache", "image": "busybox", "required": true}
+                    ],
+                    "paths": []
+                },
+                "database": {"serviceKey": "db", "name": "smoke", "client": "psql", "port": 5432}
+            },
+            "components": [{
+                "key": "stack",
+                "label": "完整版本",
+                "artifacts": ["compose", "site", "app-file"],
+                "services": ["frontend", "db", "cache"]
+            }],
+            "artifacts": [
+                {"key": "compose", "label": "Compose 清单", "source": "deploy/docker-compose.yml", "root": "deploy", "path": "docker-compose.yml", "type": "file"},
+                {"key": "site", "label": "网页", "source": "deploy/site/index.html", "root": "deploy", "path": "site/index.html", "type": "file"},
+                {"key": "app-file", "label": "版本文件", "source": "app/version.txt", "root": "install", "path": "data/version.txt", "type": "file"}
+            ],
+            "images": [
+                {"name": "nginx", "ref": "nginx:1.27-alpine", "role": "base", "required": true},
+                {"name": "postgres", "ref": "postgres:16-alpine", "role": "base", "required": true},
+                {"name": "busybox", "ref": "busybox:1.37", "role": "base", "required": true}
+            ],
+            "plan": {"steps": [{"key": "deploy", "title": "部署", "hint": "本地冒烟"}]},
+            "files": files
+        });
+        fs::write(
+            root.join("bundle.json"),
+            serde_json::to_vec_pretty(&descriptor).unwrap(),
+        )
+        .unwrap();
+        root.to_path_buf()
     }
 }

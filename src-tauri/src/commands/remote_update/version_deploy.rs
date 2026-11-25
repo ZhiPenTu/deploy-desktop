@@ -327,7 +327,6 @@ pub(crate) fn deploy_remote_full(
     bundle_dir: String,
     install_dir: String,
     dry_run: bool,
-    backup_volumes: Option<&[String]>,
 ) -> Result<VersionDeployResult, String> {
     let started = Instant::now();
     progress(window, "预检完整版本", 3, "running", "核对交付包与目标机");
@@ -362,15 +361,7 @@ pub(crate) fn deploy_remote_full(
             transaction.id, transaction.phase
         ));
     }
-    let plan = remote_preflight(
-        &host,
-        port,
-        &user,
-        key.as_deref(),
-        &bundle,
-        &install,
-        backup_volumes,
-    )?;
+    let plan = remote_preflight(&host, port, &user, key.as_deref(), &bundle, &install)?;
     if dry_run {
         progress(
             window,
@@ -379,23 +370,6 @@ pub(crate) fn deploy_remote_full(
             "success",
             "未上传部署文件，也未停止目标服务",
         );
-        let selected: Vec<String> = plan
-            .volumes
-            .iter()
-            .filter(|volume| volume.backup)
-            .map(|volume| volume.logical.clone())
-            .collect();
-        let skipped: Vec<String> = plan
-            .volumes
-            .iter()
-            .filter(|volume| !volume.backup)
-            .map(|volume| volume.logical.clone())
-            .collect();
-        let skipped_text = if skipped.is_empty() {
-            String::new()
-        } else {
-            format!("不备份：{}；", skipped.join("、"))
-        };
         return Ok(VersionDeployResult {
             success: true,
             recovered: false,
@@ -407,16 +381,15 @@ pub(crate) fn deploy_remote_full(
             snapshot_dir: String::new(),
             error: None,
             output: format!(
-                "预检通过：目标 {}；版本 {}；{} 个服务；备份数据卷：{}；{}预计备份空间约 {:.1} GB。未上传部署文件，也未停止服务。",
+                "预检通过：目标 {}；版本 {}；{} 个服务；数据卷：{}；预计备份空间约 {:.1} GB。未上传部署文件，也未停止服务。",
                 install,
                 bundle.version(),
                 plan.services.len(),
-                if selected.is_empty() {
-                    "不备份数据卷".to_string()
-                } else {
-                    selected.join("、")
-                },
-                skipped_text,
+                plan.volumes
+                    .iter()
+                    .map(|volume| volume.logical.clone())
+                    .collect::<Vec<_>>()
+                    .join("、"),
                 plan.required_backup_bytes as f64 / 1024.0 / 1024.0 / 1024.0
             ),
             duration_secs: started.elapsed().as_secs(),
@@ -899,7 +872,6 @@ fn remote_preflight(
     key: Option<&str>,
     bundle: &Bundle,
     install: &str,
-    backup_volumes: Option<&[String]>,
 ) -> Result<RemotePlan, String> {
     let deploy_dir = remote_join(install, &bundle.deploy_source_rel());
     let record = remote_read_record(host, port, user, key, install)?;
@@ -1111,15 +1083,8 @@ fi
     let image_refs = unique_image_refs(&incoming);
     let old_image_refs = current.as_ref().map(unique_image_refs).unwrap_or_default();
     let recorded_old_images = recorded_old_image_map(record.as_ref())?;
-    let backup_selection =
-        crate::commands::version_deploy::resolve_backup_volumes(bundle, backup_volumes)?;
-    let mut volume_plans = remote_volume_plans(
-        bundle,
-        &incoming,
-        current.as_ref(),
-        has_deployment,
-        &backup_selection,
-    )?;
+    let mut volume_plans =
+        remote_volume_plans(bundle, &incoming, current.as_ref(), has_deployment)?;
     let mut resources = remote_preflight_resources(
         host,
         port,
@@ -1143,6 +1108,7 @@ fi
     )?;
     let mut required = volume_plans
         .iter()
+        .filter(|volume| volume.backup)
         .map(|volume| volume.bytes)
         .sum::<u64>()
         .saturating_add(
@@ -1716,39 +1682,40 @@ fn remote_preflight_resources(
         .iter()
         .enumerate()
         .map(|(index, volume)| {
-            let backup = if volume.backup { "yes" } else { "no" };
-            let image = if volume.backup {
-                identity(&volume.image)
-            } else {
-                String::new()
-            };
+            if !volume.backup {
+                return format!(
+                    r#"if docker volume inspect -- {actual} >/dev/null 2>&1; then
+  exists=yes
+else
+  exists=no
+fi
+echo "VOLUME|{index}|$exists|0"
+"#,
+                    actual = shell_quote(&volume.actual),
+                    index = index
+                );
+            }
             format!(
                 r#"if docker volume inspect -- {actual} >/dev/null 2>&1; then
   exists=yes
   owner=$(docker volume inspect --format '{{{{index .Labels "com.docker.compose.project"}}}}|{{{{index .Labels "com.docker.compose.volume"}}}}' -- {actual})
   [ "$owner" = {owner} ] || {{ echo '数据卷 Compose 归属标签不一致，已阻止部署' >&2; exit 6; }}
-  if [ "{backup}" = yes ]; then
-    bytes=$(docker run --rm --network none -v {actual}:/data:ro --entrypoint /bin/sh {image} -c "du -sk /data 2>/dev/null | awk '{{print \$1}}'" 2>/dev/null | tr -d '\r')
-    bytes=$(( ${{bytes:-0}} * 1024 ))
-  else
-    bytes=0
-  fi
+  bytes=$(docker run --rm --network none -v {actual}:/data:ro --entrypoint /bin/sh {image} -c "du -sk /data 2>/dev/null | awk '{{print \$1}}'" 2>/dev/null | tr -d '\r')
+  bytes=$(( ${{bytes:-0}} * 1024 ))
 else
   exists=no
   bytes=0
 fi
-if [ "{backup}" = yes ]; then
-  if ! docker run --rm --network none --entrypoint /bin/sh {image} -c 'command -v tar >/dev/null && command -v gzip >/dev/null' >/dev/null 2>&1; then
-    echo '备份镜像 {image} 缺少 tar 或 gzip' >&2
-    exit 6
-  fi
+if ! docker run --rm --network none --entrypoint /bin/sh {image} -c 'command -v tar >/dev/null && command -v gzip >/dev/null' >/dev/null 2>&1; then
+  echo '备份镜像 {image} 缺少 tar 或 gzip' >&2
+  exit 6
 fi
 echo "VOLUME|{index}|$exists|$bytes"
 "#,
                 actual = shell_quote(&volume.actual),
-                image = shell_quote(&image),
+                image = shell_quote(&identity(&volume.image)),
                 owner = shell_quote(&format!("{project_name}|{}", volume.logical)),
-                backup = backup
+                index = index
             )
         })
         .collect::<Vec<_>>()
@@ -1951,7 +1918,6 @@ fn remote_volume_plans(
     incoming: &Value,
     current: Option<&Value>,
     had_deployment: bool,
-    selected: &BTreeSet<String>,
 ) -> Result<Vec<RemoteVolumePlan>, String> {
     let data = bundle
         .descriptor
@@ -1961,8 +1927,8 @@ fn remote_volume_plans(
         .ok_or_else(|| "交付包缺少数据卷声明".to_string())?;
     let mut result = Vec::new();
     for volume in &data.volumes {
-        let backup = selected.contains(&volume.name);
-        let actual = volume_name(incoming, &volume.name)?;
+        let backup = crate::commands::version_deploy::volume_backup_required(bundle, &volume.service);
+        let actual = volume_name(incoming, &volume.name, backup)?;
         if !volume_mounted_by(incoming, &volume.service, &volume.name) {
             return Err(format!(
                 "数据卷 {} 未挂载到声明的服务 {}，请修正交付包",
@@ -1970,7 +1936,7 @@ fn remote_volume_plans(
             ));
         }
         if let Some(current) = current {
-            if volume_name(current, &volume.name)? != actual {
+            if volume_name(current, &volume.name, backup)? != actual {
                 return Err(format!("新旧版本数据卷 {} 的实际名称不一致", volume.name));
             }
         }
@@ -1994,22 +1960,6 @@ fn remote_volume_plans(
             backup,
         });
     }
-    for service in active_service_configs(incoming) {
-        if let Some(items) = service.get("volumes").and_then(Value::as_array) {
-            for item in items {
-                if item.get("type").and_then(Value::as_str) != Some("volume") {
-                    continue;
-                }
-                let source = item
-                    .get("source")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                if !result.iter().any(|volume| volume.logical == source) {
-                    return Err(format!("服务使用了未声明的数据卷 {source}"));
-                }
-            }
-        }
-    }
     let _ = had_deployment;
     Ok(result)
 }
@@ -2029,20 +1979,21 @@ fn volume_mounted_by(config: &Value, service: &str, logical: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn volume_name(config: &Value, logical: &str) -> Result<String, String> {
+fn volume_name(config: &Value, logical: &str, allow_external: bool) -> Result<String, String> {
     let volume = config
         .get("volumes")
         .and_then(|value| value.get(logical))
         .and_then(Value::as_object)
         .ok_or_else(|| format!("Compose 未声明数据卷 {logical}"))?;
-    if volume.get("external").and_then(Value::as_bool) == Some(true) {
+    let external = volume.get("external").and_then(Value::as_bool) == Some(true);
+    if external && !allow_external {
         return Err(format!("数据卷 {logical} 为 external，无法自动备份"));
     }
-    volume
-        .get("name")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .ok_or_else(|| format!("无法解析数据卷 {logical} 的实际名称"))
+    match volume.get("name").and_then(Value::as_str) {
+        Some(name) => Ok(name.to_string()),
+        None if external => Ok(logical.to_string()),
+        None => Err(format!("无法解析数据卷 {logical} 的实际名称")),
+    }
 }
 
 fn unique_image_refs(config: &Value) -> Vec<String> {

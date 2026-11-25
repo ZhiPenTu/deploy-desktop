@@ -92,6 +92,7 @@ pub struct DeploymentReview {
     pub missing_images: Vec<String>,
     pub unready_images: Vec<String>,
     pub issues: Vec<String>,
+    pub warnings: Vec<String>,
     pub ready: bool,
     pub can_first_deploy: bool,
     pub can_incremental_update: bool,
@@ -125,11 +126,12 @@ pub async fn inspect_deployment_review(
     match &review {
         Ok(value) => log::info!(
             target: "review",
-            "部署核对完成：就绪={} 可首次部署={} 可增量更新={} 待处理 {} 项",
+            "部署核对完成：就绪={} 可首次部署={} 可增量更新={} 阻断 {} 项 提示 {} 项",
             value.ready,
             value.can_first_deploy,
             value.can_incremental_update,
-            value.issues.len()
+            value.issues.len(),
+            value.warnings.len()
         ),
         Err(error) => log::error!(target: "review", "部署核对失败：{error}"),
     }
@@ -1346,6 +1348,7 @@ fn compare_with_artifacts(
         serde_yaml::Value::Null
     };
     let mut issues = Vec::new();
+    let mut warnings = Vec::new();
     if !target.docker_running {
         issues.push("目标主机的 Docker 不可用，请先完成环境检测并启动 Docker".to_string());
     }
@@ -1539,14 +1542,16 @@ fn compare_with_artifacts(
             "目标 Docker 缺少 {missing_count} 个镜像，可在下方拉取或导入。"
         ));
     }
+    // 镜像已存在但架构不一致或状态读取失败时，由部署前预检再次核对；
+    // 启动失败会触发自动恢复，因此不再阻止进入部署。
     if mismatch_count > 0 {
-        issues.push(format!(
-            "{mismatch_count} 个镜像与目标架构不匹配，可在下方重新拉取适配版本。"
+        warnings.push(format!(
+            "{mismatch_count} 个镜像与目标架构不匹配，仍可尝试部署，启动失败会自动恢复上一版本。"
         ));
     }
     if failed_count > 0 {
-        issues.push(format!(
-            "{failed_count} 个镜像状态无法读取，请重新检查；若 Docker 未运行，请先启动 Docker。"
+        warnings.push(format!(
+            "{failed_count} 个镜像状态无法读取，部署前预检会再次核对。"
         ));
     }
     if invalid_count > 0 {
@@ -1644,6 +1649,7 @@ fn compare_with_artifacts(
         missing_images,
         unready_images,
         issues,
+        warnings,
         ready,
         can_first_deploy: ready && !has_deployment,
         can_incremental_update: ready && has_deployment && supported_update_layout,
@@ -1764,6 +1770,28 @@ fn normalize_directory(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore]
+    fn real_bundle_review() {
+        let bundle = std::env::var("DEPLOY_REAL_BUNDLE").expect("缺少 DEPLOY_REAL_BUNDLE");
+        let install = std::env::var("DEPLOY_REAL_INSTALL").expect("缺少 DEPLOY_REAL_INSTALL");
+        match review_blocking(bundle, install, None, None, None, None, None) {
+            Ok(review) => println!(
+                "核对通过：就绪={} 阻断={:?} 提示={:?} 镜像检查={} Docker={} Compose={} 服务={} 镜像={} 制品={}",
+                review.ready,
+                review.issues,
+                review.warnings,
+                review.image_check,
+                review.docker_running,
+                review.compose_available,
+                review.services.len(),
+                review.images.len(),
+                review.artifacts.len()
+            ),
+            Err(error) => panic!("核对失败：{error}"),
+        }
+    }
 
     fn snapshot(compose: &str, statuses: &[(usize, &str)]) -> TargetSnapshot {
         let mut target = TargetSnapshot {
@@ -1908,8 +1936,9 @@ mod tests {
             snapshot("", &[]),
         )
         .unwrap();
-        assert!(!unknown.ready);
+        assert!(unknown.ready);
         assert_eq!(unknown.images[0].status, "check_failed");
+        assert!(!unknown.warnings.is_empty());
     }
 
     #[test]
@@ -1969,6 +1998,8 @@ mod tests {
         assert_eq!(review.images[1].status, "platform_mismatch");
         assert!(review.images[1].pullable);
         assert!(review.images[1].detail.contains("该摘要不含目标架构"));
+        assert!(review.ready);
+        assert!(!review.warnings.is_empty());
     }
 
     #[test]

@@ -17,13 +17,12 @@ import { progressReporter } from './runtime.mjs';
 export function registerUpdatesTools(register) {
   register('deploy_version_remote', {
     title: '部署完整版本',
-    description: '停止目标服务，备份受管文件与数据卷，部署交付包声明的全部组件并验证就绪；失败时自动恢复上一版本。实际部署需 confirm=true。',
+    description: '停止目标服务，备份受管文件与数据库数据，部署交付包声明的全部组件并验证就绪；失败时自动恢复上一版本。实际部署需 confirm=true。',
     inputSchema: {
       ...remoteFields,
       host: hostSchema,
       bundleDir: z.string().min(1).describe('交付包目录，需包含 bundle.json'),
       installDir: z.string().optional(),
-      backupVolumes: z.array(z.string()).optional().describe('需要冷备的数据卷名称；省略时备份全部，传空数组表示不备份'),
       dryRun: z.boolean().optional().default(false),
       confirm: z.boolean().optional()
     },
@@ -38,7 +37,6 @@ export function registerUpdatesTools(register) {
     return deployVersionRemote(profile, host, {
       bundleDir: args.bundleDir,
       installDir: args.installDir,
-      backupVolumes: args.backupVolumes,
       dryRun: args.dryRun,
       onProgress: (percent, message) => progress(percent, 100, message)
     });
@@ -104,8 +102,7 @@ export function registerUpdatesTools(register) {
       bundleDir: z.string().min(1).describe('交付包目录，需包含 bundle.json'),
       installDir: z.string().optional(),
       components: z.array(z.string()).optional().describe('兼容参数；传入时必须是交付包全部组件'),
-      backup: z.boolean().optional().describe('兼容参数；完整版本部署默认备份全部数据卷，可通过 backupVolumes 缩小范围，backup=false 会被拒绝'),
-      backupVolumes: z.array(z.string()).optional().describe('需要冷备的数据卷名称；省略时备份全部，传空数组表示不备份'),
+      backup: z.boolean().optional().describe('兼容参数；完整版本部署始终冷备数据库数据，backup=false 会被拒绝'),
       dryRun: z.boolean().optional().default(false),
       confirm: z.boolean().optional()
     },
@@ -127,7 +124,6 @@ export function registerUpdatesTools(register) {
     return deployVersionRemote(profile, host, {
       bundleDir: args.bundleDir,
       installDir: args.installDir,
-      backupVolumes: args.backupVolumes,
       dryRun: args.dryRun,
       onProgress: (percent, message) => progress(percent, 100, message)
     });

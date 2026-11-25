@@ -12,7 +12,7 @@
           <el-icon v-if="activeStep > index"><Check /></el-icon>
           <span v-else>{{ index + 1 }}</span>
         </span>
-        <span>{{ step }}</span>
+        <span class="step-label">{{ step }}</span>
       </li>
     </ol>
   </div>
@@ -38,7 +38,7 @@ defineProps({
   justify-content: space-between;
   list-style: none;
   gap: 12px;
-  overflow-x: auto;
+  overflow: visible;
   margin: 0;
   padding: 0;
 }
@@ -46,9 +46,14 @@ defineProps({
   display: flex;
   align-items: center;
   gap: 10px;
+  min-width: 0;
   color: var(--text-muted);
   white-space: nowrap;
   font-size: 12.5px;
+}
+.step-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .step:not(:last-child)::after {
   content: '';
@@ -97,6 +102,18 @@ defineProps({
   }
   .stepper {
     gap: 8px;
+  }
+}
+@media (max-width: 760px) {
+  .step-label {
+    display: none;
+  }
+  .step {
+    gap: 0;
+  }
+  .step:not(:last-child)::after {
+    width: 12px;
+    margin-left: 6px;
   }
 }
 </style>

@@ -9,7 +9,6 @@ import {
   parseTransactionStatus,
   publishedFrontendPort,
   redactDiagnostics,
-  resolveBackupVolumes,
   selectDeploymentImages,
   resolveStoredEffectiveCompose,
   uniqueImageRefs,
@@ -61,16 +60,7 @@ test('多端口映射优先使用声明的网页端口，歧义时阻止猜测',
   assert.equal(publishedFrontendPort(config, 'frontend', 8080), 8080);
   assert.equal(publishedFrontendPort(config, 'frontend', 18080), null);
 });
-test('数据卷备份选择默认全部，允许空选择并拒绝未知名称', () => {
-  const data = { volumes: [{ name: 'database' }, { name: 'cache' }] };
-  assert.deepEqual([...resolveBackupVolumes(data, undefined)], ['database', 'cache']);
-  assert.deepEqual([...resolveBackupVolumes(data, [])], []);
-  assert.deepEqual([...resolveBackupVolumes(data, ['cache'])], ['cache']);
-  assert.throws(() => resolveBackupVolumes(data, ['missing']), (error) => error.code === 'BACKUP_VOLUME_UNKNOWN');
-  assert.throws(() => resolveBackupVolumes(data, ['']), (error) => error.code === 'BACKUP_VOLUME_SELECTION_INVALID');
-});
-
-test('数据卷备份选择会排除未选卷的备份镜像，但保留服务镜像', () => {
+test('只核对实际使用的备份镜像，但保留服务镜像', () => {
   const images = [
     { name: 'app', imageRef: 'demo/app:1.0', role: 'app' },
     { name: 'db-backup', imageRef: 'demo/backup:1.0', role: 'base' },

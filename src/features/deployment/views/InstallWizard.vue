@@ -77,84 +77,95 @@
           :disabled="busy || (activeStep === 2 ? !candidate : !preparedBundle)"
           @click="nextStep"
         >
-          {{ activeStep === 2 ? '下一步：解压制品' : '下一步：清单比对' }}
+          {{ activeStep === 2 ? '下一步：解压制品' : '下一步：核对并部署' }}
           <el-icon class="el-icon--right"><ArrowRight /></el-icon>
         </el-button>
       </div>
     </div>
 
-    <ReviewStep
-      v-if="activeStep === 4"
-      :target-label="targetLabel"
-      :checking-review="checkingReview"
-      :busy="busy"
-      :review-error="reviewError"
-      :review="review"
-      :version="preparedBundle?.version || ''"
-      :bundle-dir="preparedBundle?.dir || ''"
-      :is-remote="isRemote"
-      :image-media-dir="imageMediaDir"
-      v-model:image-source="imageSource"
-      :image-pull-groups="imagePullGroups"
-      :image-counts="imageCounts"
-      :image-pending-count="imagePending.length"
-      :image-digest-refs="pendingDigestImages.map((image) => image.imageRef)"
-      :image-blocked-count="imageBlockedCount"
-      :image-next-blocked-reason="imageNextBlockedReason"
-      :image-registry-load-error="imageRegistryLoadError"
-      :image-phase="imagePhase"
-      :image-progress="imageProgress"
-      :image-diagnostics="imageDiagnostics"
-      :image-result="imageResult"
-      :importing-images="importingImages"
-      :review-tab="reviewTab"
-      @recheck="loadReview"
-      @update:review-tab="reviewTab = $event"
-      @update:image-media-dir="imageMediaDir = $event"
-      @update:image-pull-source="setImagePullSelection($event.registry, { sourceId: $event.sourceId })"
-      @update:image-pull-credential="setImagePullSelection($event.registry, { credential: $event.credential })"
-      @pick-image-directory="pickImageDirectory"
-      @prepare-images="prepareImages"
-      @previous="previousStep"
-      @next="nextStep"
-    />
-    <ExecuteStep
-      v-if="activeStep === 5"
-      :target-label="targetLabel"
-      :install-dir="config.installDir"
-      :version="preparedBundle?.version || ''"
-      :plan="bundlePlan"
-      :review="review"
-      :transaction="transaction"
-      :backup-volumes="backupVolumes"
-      :busy="busy"
-      :can-execute="canExecute"
-      :artifact-selection-issue="artifactSelectionIssue"
-      :preflighting="preflighting"
-      :preflight-passed="preflightPassed"
-      :preflight-message="preflightMessage"
-      :executing="executing"
-      :recovering-transaction="recoveringTransaction"
-      :phase="phase"
-      :operation-error="operationError"
-      :progress-percent="progressPercent"
-      :progress-step="progressStep"
-      :progress-message="progressMessage"
-      :elapsed-text="elapsedText"
-      :result="result"
-      :diagnostics="diagnostics"
-      @previous="previousStep"
-      @preflight="runPreflight"
-      @execute="executeDeployment"
-      @update:backup-volumes="setBackupVolumes"
-      @recover="restorePreviousVersion"
-      @go-dashboard="emit('go-dashboard')"
-    />
+    <div v-if="activeStep === 4" class="deploy-step">
+      <div class="review-summary">
+        <div class="review-summary-main">
+          <strong>{{ reviewSummaryTitle }}</strong>
+          <span class="field-hint">{{ reviewSummaryDetail }}</span>
+          <span v-if="imageResult" class="review-result">{{ imageResult }}</span>
+        </div>
+        <el-tag v-if="review?.ready" type="success">可以部署</el-tag>
+        <el-tag v-else-if="review" type="warning">需要处理</el-tag>
+        <el-button v-if="!reviewBlocked" link @click="reviewExpanded = !reviewExpanded">
+          {{ reviewExpanded ? '收起详情' : '展开详情' }}
+        </el-button>
+      </div>
+      <ReviewStep
+        v-if="reviewVisible"
+        embedded
+        :target-label="targetLabel"
+        :checking-review="checkingReview"
+        :busy="busy"
+        :review-error="reviewError"
+        :review="review"
+        :version="preparedBundle?.version || ''"
+        :bundle-dir="preparedBundle?.dir || ''"
+        :is-remote="isRemote"
+        :image-media-dir="imageMediaDir"
+        v-model:image-source="imageSource"
+        :image-pull-groups="imagePullGroups"
+        :image-counts="imageCounts"
+        :image-pending-count="imagePending.length"
+        :image-digest-refs="pendingDigestImages.map((image) => image.imageRef)"
+        :image-blocked-count="imageBlockedCount"
+        :image-next-blocked-reason="imageNextBlockedReason"
+        :image-registry-load-error="imageRegistryLoadError"
+        :image-phase="imagePhase"
+        :image-progress="imageProgress"
+        :image-diagnostics="imageDiagnostics"
+        :image-result="imageResult"
+        :importing-images="importingImages"
+        :review-tab="reviewTab"
+        @recheck="loadReview"
+        @update:review-tab="reviewTab = $event"
+        @update:image-media-dir="imageMediaDir = $event"
+        @update:image-pull-source="setImagePullSelection($event.registry, { sourceId: $event.sourceId })"
+        @update:image-pull-credential="setImagePullSelection($event.registry, { credential: $event.credential })"
+        @pick-image-directory="pickImageDirectory"
+        @prepare-images="prepareImages"
+        @next="reviewExpanded = false"
+      />
+      <ExecuteStep
+        :target-label="targetLabel"
+        :install-dir="config.installDir"
+        :version="preparedBundle?.version || ''"
+        :plan="bundlePlan"
+        :review="review"
+        :transaction="transaction"
+        :busy="busy"
+        :can-execute="canExecute"
+        :artifact-selection-issue="artifactSelectionIssue"
+        :preflighting="preflighting"
+        :preflight-passed="preflightPassed"
+        :preflight-message="preflightMessage"
+        :executing="executing"
+        :recovering-transaction="recoveringTransaction"
+        :phase="phase"
+        :operation-error="operationError"
+        :progress-percent="progressPercent"
+        :progress-step="progressStep"
+        :progress-message="progressMessage"
+        :elapsed-text="elapsedText"
+        :result="result"
+        :diagnostics="diagnostics"
+        @previous="previousStep"
+        @preflight="runPreflight"
+        @execute="executeDeployment"
+        @recover="restorePreviousVersion"
+        @go-dashboard="emit('go-dashboard')"
+      />
+    </div>
   </div>
 </template>
 
 <script setup>
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 import { ArrowRight } from '@element-plus/icons-vue';
 import DeploymentStepper from '../components/DeploymentStepper.vue';
@@ -211,8 +222,6 @@ const {
   preparedBundle,
   artifactBusy,
   bundlePlan,
-  backupVolumes,
-  setBackupVolumes,
   review,
   reviewError,
   checkingReview,
@@ -265,11 +274,79 @@ const {
   progressMessage,
   elapsedText
 } = useDeploymentWizard(config, emit);
+
+const reviewExpanded = ref(false);
+const readyImageCount = computed(
+  () => (review.value?.images || []).filter((image) => image.status === 'ready').length
+);
+const reviewImageTotal = computed(() => (review.value?.images || []).length);
+const reviewArtifactTotal = computed(() => (review.value?.artifacts || []).length);
+const reviewBlocked = computed(
+  () => Boolean(reviewError.value) || !review.value?.ready
+);
+const reviewVisible = computed(() => reviewExpanded.value || reviewBlocked.value);
+const reviewSummaryTitle = computed(() => {
+  if (checkingReview.value) return '正在核对部署条件';
+  if (reviewError.value) return '核对未完成';
+  if (!review.value) return '等待核对';
+  return review.value.ready ? '可以开始部署' : '需要先处理阻断项';
+});
+const reviewSummaryDetail = computed(() => {
+  if (checkingReview.value) return '正在检查镜像、制品文件与目标环境';
+  if (reviewError.value) return reviewError.value;
+  if (!review.value) return '';
+  if (!review.value.ready) return imageNextBlockedReason.value || '目标环境尚未就绪';
+  const parts = [
+    `${readyImageCount.value} / ${reviewImageTotal.value} 个镜像已就绪`,
+    reviewArtifactTotal.value
+      ? `${reviewArtifactTotal.value} 个制品文件将写入`
+      : '无需写入制品文件'
+  ];
+  const warnings = review.value.warnings || [];
+  if (warnings.length === 1) parts.push(warnings[0]);
+  else if (warnings.length) parts.push(`${warnings.length} 条提示，展开详情查看`);
+  return parts.join('，');
+});
+
+watch(imageResult, (value) => {
+  if (value) reviewExpanded.value = true;
+});
+watch(preparedBundle, () => {
+  reviewExpanded.value = false;
+});
 </script>
 
 <style scoped>
 .wizard-container {
   display: block;
+}
+.deploy-step {
+  display: grid;
+  gap: 16px;
+}
+.review-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 14px 18px;
+  background: var(--panel-bg);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card);
+}
+.review-summary-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.review-summary .field-hint {
+  margin: 0;
+}
+.review-result {
+  color: var(--success-color);
+  font-size: 12.5px;
 }
 .step-card {
   padding: 26px 28px;

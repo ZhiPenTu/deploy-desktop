@@ -155,9 +155,10 @@ wait_services() {
   local services=$2
   local port=${3:-}
   [ -n "$file" ] && [ -f "$DEPLOY/$file" ] || return 0
-  local attempt unready id state health
+  local attempt unready stopped id state health
   for attempt in $(seq 1 90); do
     unready=
+    stopped=
     for service in $services; do
       ids=$(COMPOSE_TIMEOUT=60 compose "$file" ps -a -q "$service" 2>/dev/null || true)
       if [ -z "$ids" ]; then
@@ -167,11 +168,21 @@ wait_services() {
       for id in $ids; do
         state=$(timeout 60 docker inspect --format '{{.State.Status}}' "$id" 2>/dev/null || echo missing)
         health=$(timeout 60 docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$id" 2>/dev/null || echo missing)
-        if [ "$state" != running ] || { [ "$health" != healthy ] && [ "$health" != none ]; }; then
+        if [ "$state" = exited ] || [ "$state" = dead ]; then
+          stopped="$stopped $service"
+          unready="$unready $service"
+        elif [ "$state" != running ] || { [ "$health" != healthy ] && [ "$health" != none ]; }; then
           unready="$unready $service"
         fi
       done
     done
+    if [ -n "$stopped" ]; then
+      echo "服务$stopped 的容器已退出，无法通过就绪检查" >&2
+      for service in $stopped; do
+        COMPOSE_TIMEOUT=60 compose "$file" logs --tail 40 "$service" >&2 || true
+      done
+      return 4
+    fi
     if [ -z "$unready" ]; then
       if [ -n "$FRONTEND_SERVICE" ] && [ -n "$port" ] && [[ " $services " = *" $FRONTEND_SERVICE "* ]]; then
         if ! http_ready "$port"; then
@@ -305,7 +316,7 @@ restore_files() {
 check_volume_tools() {
   while IFS=$'\t' read -r logical actual image existed backup; do
     [ -n "$logical" ] || continue
-    [ "${backup:-yes}" = yes ] || continue
+    [ "$backup" != no ] || continue
     [ -n "$image" ] || { echo "数据卷 $logical 缺少备份镜像" >&2; return 6; }
     if ! timeout 300 docker run --rm --network none --entrypoint /bin/sh "$image" -c 'command -v tar >/dev/null && command -v gzip >/dev/null' >/dev/null 2>&1; then
       echo "备份镜像 $image 缺少 tar 或 gzip" >&2
@@ -320,7 +331,7 @@ snapshot_volumes() {
   [ -f "$INCOMING/volume-specs.tsv" ] || return 0
   while IFS=$'\t' read -r logical actual image existed backup; do
     [ -n "$logical" ] || continue
-    [ "${backup:-yes}" = yes ] || continue
+    [ "$backup" != no ] || continue
     if [ "$existed" != yes ]; then
       continue
     fi

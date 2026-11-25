@@ -209,13 +209,12 @@ deploy_inspect       { target: "remote", host: "lan-01" }
 
 ```text
 deploy_version_remote { host: "lan-01", bundleDir: "/data/update", dryRun: true }
-deploy_version_remote { host: "lan-01", bundleDir: "/data/update", backupVolumes: ["oceanbase-data", "redis-data"], confirm: true }
-deploy_version_remote { host: "lan-01", bundleDir: "/data/update", backupVolumes: [], confirm: true }
+deploy_version_remote { host: "lan-01", bundleDir: "/data/update", confirm: true }
 deploy_transaction_status { host: "lan-01" }
 deploy_transaction_recover { host: "lan-01", confirm: true }
 ```
 
-完整版本部署会停止全部服务，备份受管文件与勾选的数据卷，再写入全部组件并验证服务就绪。`backupVolumes` 省略时默认备份全部数据卷，传入名称数组时只备份选中的卷，传空数组表示不备份数据卷；未备份的数据卷在失败恢复时不会覆盖。失败时自动恢复上一版本；恢复失败会保留事务快照并阻止下次部署，直到人工处理。部署预检会读取交付包附带的镜像锁 `deploy/images.lock.json`，逐个核对目标机的镜像：镜像是否已导入、实际架构是否与目标机一致、镜像内容（config digest）是否与镜像锁中该架构的记录一致。任一项不通过都会在 `dryRun` 阶段直接失败（错误码 `IMAGE_PRECHECK_FAILED`），不会开始上传或重启。`deploy_update_remote` 仅作为兼容别名，传入不完整组件或 `backup=false` 会被拒绝。
+完整版本部署会停止全部服务，备份受管文件与数据库数据，再写入全部组件并验证服务就绪。消息队列、缓存等其他数据卷由 Docker 保留，不进入备份和恢复。失败时自动恢复上一版本；恢复失败会保留事务快照并阻止下次部署，直到人工处理。部署预检会读取交付包附带的镜像锁 `deploy/images.lock.json`，逐个核对目标机的镜像：镜像是否已导入、实际架构是否与目标机一致、镜像内容（config digest）是否与镜像锁中该架构的记录一致。任一项不通过都会在 `dryRun` 阶段直接失败（错误码 `IMAGE_PRECHECK_FAILED`），不会开始上传或重启。`deploy_update_remote` 仅作为兼容别名，传入不完整组件或 `backup=false` 会被拒绝。
 
 ### 6. 应用更新检查
 

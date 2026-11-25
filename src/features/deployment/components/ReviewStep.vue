@@ -4,7 +4,11 @@
       <div>
         <h3>核对目标环境</h3>
         <p class="desc">
-          检查目标机器是否已有部署、所需镜像和制品文件；缺什么就在这里补齐，再进入部署。
+          {{
+            embedded
+              ? '部署前核对目标环境。有阻断项时先处理，其余信息仅作确认。'
+              : '检查目标机器是否已有部署、所需镜像和制品文件；缺什么就在这里补齐，再进入部署。'
+          }}
         </p>
       </div>
       <el-button :loading="checkingReview" :disabled="busy" @click="emit('recheck')">
@@ -12,7 +16,13 @@
       </el-button>
     </div>
     <el-alert v-if="reviewError" :title="reviewError" type="error" :closable="false" show-icon />
-    <el-alert v-if="imageResult" :title="imageResult" type="success" :closable="false" show-icon />
+    <el-alert
+      v-if="imageResult && !embedded"
+      :title="imageResult"
+      type="success"
+      :closable="false"
+      show-icon
+    />
     <el-collapse v-if="imageDiagnostics" class="image-diagnostics">
       <el-collapse-item title="查看镜像处理详情" name="images">
         <pre>{{ imageDiagnostics }}</pre>
@@ -40,6 +50,15 @@
         type="info"
         :closable="false"
         show-icon
+      />
+      <el-alert
+        v-for="warning in review.warnings || []"
+        :key="warning"
+        :title="safeText(warning)"
+        type="info"
+        :closable="false"
+        show-icon
+        class="review-warning"
       />
       <el-tabs :model-value="reviewTab" @update:model-value="(value) => emit('update:review-tab', value)">
         <el-tab-pane label="服务清单比对" name="services">
@@ -364,6 +383,7 @@ import { formatSize } from '../../../shared/format.js';
 import { safeText } from '../domain/errors.js';
 
 const props = defineProps({
+  embedded: { type: Boolean, default: false },
   targetLabel: { type: String, default: '' },
   checkingReview: { type: Boolean, default: false },
   busy: { type: Boolean, default: false },
@@ -583,6 +603,9 @@ h4 {
   margin: 0 0 12px;
 }
 .artifact-alert {
+  margin-bottom: 12px;
+}
+.review-warning {
   margin-bottom: 12px;
 }
 .digest-alert {

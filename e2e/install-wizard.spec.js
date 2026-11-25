@@ -89,6 +89,13 @@ async function openWizard(page) {
   await page.locator('.nav-menu .nav-item', { hasText: '部署向导' }).click();
 }
 
+async function expectStepperFits(page) {
+  const overflow = await page
+    .locator('.stepper')
+    .evaluate((element) => element.scrollWidth - element.clientWidth);
+  expect(overflow).toBeLessThanOrEqual(0);
+}
+
 test('部署向导展示完整步骤条并标记当前步骤', async ({ page }) => {
   const problems = [];
   page.on('pageerror', (error) => problems.push(`未捕获异常：${error.message}`));
@@ -96,17 +103,17 @@ test('部署向导展示完整步骤条并标记当前步骤', async ({ page }) 
   await openWizard(page);
 
   const steps = page.locator('.steps-header .stepper .step');
-  await expect(steps).toHaveCount(6);
+  await expect(steps).toHaveCount(5);
   await expect(steps).toHaveText([
     '1选择项目',
     '2检测环境',
     '3选择制品',
     '4解压制品',
-    '5清单比对',
-    '6部署版本'
+    '5部署版本'
   ]);
   await expect(page.locator('.stepper [aria-current="step"]')).toHaveText('1选择项目');
   await expect(page.locator('.steps-header')).toBeVisible();
+  await expectStepperFits(page);
 
   const empty = page.locator('.project-empty');
   await expect(empty).toContainText('当前没有可用项目');
@@ -350,6 +357,7 @@ const demoDeploymentReview = {
   missingImages: ['demo/api:1.4.0'],
   unreadyImages: ['demo/api:1.4.0'],
   issues: [],
+  warnings: [],
   ready: false,
   canFirstDeploy: false,
   canIncrementalUpdate: false
@@ -364,7 +372,13 @@ async function openReviewStep(page) {
   await page.getByRole('button', { name: '下一步：解压制品' }).click();
   await page.getByRole('button', { name: '校验交付包' }).click();
   await expect(page.locator('.prepare-panel .el-alert')).toContainText('交付包已准备就绪');
-  await page.getByRole('button', { name: '下一步：清单比对' }).click();
+  await page.getByRole('button', { name: '下一步：核对并部署' }).click();
+  await expect(page.locator('.stepper [aria-current="step"]')).toHaveText('5部署版本');
+  await expect(page.locator('.review-summary strong')).toHaveText(
+    /可以开始部署|需要先处理阻断项|核对未完成/
+  );
+  const expandReview = page.getByRole('button', { name: '展开详情' });
+  if (await expandReview.isVisible()) await expandReview.click();
 }
 
 async function setupImageTransfer(page, options = {}) {
@@ -455,9 +469,13 @@ async function setupLocalImagePull(page, options = {}) {
   const initialReview = options.platformMismatch
     ? {
         ...demoDeploymentReview,
+        ready: true,
+        canIncrementalUpdate: true,
         targetPlatform: 'linux/arm64',
         missingImages: [],
         unreadyImages: ['demo/api:1.4.0'],
+        issues: [],
+        warnings: ['1 个镜像与目标架构不匹配，仍可尝试部署，启动失败会自动恢复上一版本。'],
         images: demoDeploymentReview.images.map((image) =>
           image.imageRef === 'demo/api:1.4.0'
             ? {
@@ -501,6 +519,7 @@ async function setupLocalImagePull(page, options = {}) {
           ...initialReview,
           ready,
           canIncrementalUpdate: ready,
+          warnings: ready ? [] : initialReview.warnings,
           missingImages: ready ? [] : initialReview.missingImages,
           unreadyImages: ready ? [] : initialReview.unreadyImages,
           images: initialReview.images.map((image) => image.imageRef === 'demo/api:1.4.0' && ready
@@ -532,7 +551,7 @@ test('局域网目标可从本机拉取并传入镜像，核对通过后才能�
   expect(page.url()).toContain('127.0.0.1:4173');
   await expect(page.locator('vite-error-overlay')).toHaveCount(0);
   await expect(page.getByRole('radio', { name: '本机拉取后传入', exact: true })).toBeChecked();
-  await expect(page.getByRole('button', { name: '下一步：部署版本' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: '开始完整版本部署' })).toBeDisabled();
   await page.screenshot({ path: '/tmp/deploy-missing-images-desktop.png', fullPage: true, animations: 'disabled' });
   await page.getByRole('button', { name: '本机拉取并传入' }).click();
   const dialog = page.getByRole('dialog', { name: '确认本机拉取并传入' });
@@ -548,7 +567,7 @@ test('局域网目标可从本机拉取并传入镜像，核对通过后才能�
   await expect(
     page.getByText('本机镜像已按目标架构传入并导入，目标镜像核对通过。', { exact: true })
   ).toBeVisible();
-  await expect(page.getByRole('button', { name: '下一步：部署版本' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: '开始完整版本部署' })).toBeEnabled();
   await expect(page.locator('.image-preparation')).toContainText('镜像已就绪');
   const calls = await page.evaluate(() => window.__deployTestCalls);
   const writes = calls.filter((item) =>
@@ -579,7 +598,7 @@ test('摘要镜像传入后核对内容再登记，通过后才允许继续', as
     imageId: `sha256:${'b'.repeat(64)}`,
     platform: 'linux/amd64'
   }]);
-  await expect(page.getByRole('button', { name: '下一步：部署版本' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: '开始完整版本部署' })).toBeEnabled();
 });
 
 test('摘要镜像内容核对失败时不显示传入成功', async ({ page }) => {
@@ -589,7 +608,7 @@ test('摘要镜像内容核对失败时不显示传入成功', async ({ page }) 
     .getByRole('button', { name: '拉取并传入', exact: true }).click();
   await expect(page.locator('.step-card .el-alert--error')).toBeVisible();
   await expect(page.getByText('本机镜像已按目标架构传入并导入，目标镜像核对通过。', { exact: true })).toBeHidden();
-  await expect(page.getByRole('button', { name: '下一步：部署版本' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: '开始完整版本部署' })).toBeDisabled();
 });
 
 test('本机可按清单从镜像仓库拉取待处理镜像并重新核对', async ({ page }) => {
@@ -612,7 +631,7 @@ test('本机可按清单从镜像仓库拉取待处理镜像并重新核对', as
   await dialog.getByRole('button', { name: '开始拉取', exact: true }).click();
 
   await expect(page.getByText('待处理镜像已拉取，目标镜像核对通过。', { exact: true })).toBeVisible();
-  await expect(page.getByRole('button', { name: '下一步：部署版本' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: '开始完整版本部署' })).toBeEnabled();
   const calls = await page.evaluate(() => window.__deployTestCalls);
   const pull = calls.find((item) => item.command === 'pull_deployment_images');
   expect(pull.args).toMatchObject({
@@ -640,7 +659,7 @@ test('镜像拉取失败时保留缺失状态并允许重试', async ({ page }) 
   await expect(page.locator('.step-card .el-alert--error')).toBeVisible();
   await expect(page.locator('.step-card .el-alert--error')).toContainText('拉取镜像失败');
   await expect(page.locator('.step-card .el-alert--error')).not.toContainText('Error:');
-  await expect(page.getByRole('button', { name: '下一步：部署版本' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: '开始完整版本部署' })).toBeDisabled();
   await expect(page.getByRole('button', { name: '拉取 1 个镜像' })).toBeEnabled();
   await expect(page.getByText('待处理镜像已拉取，目标镜像核对通过。', { exact: true })).toBeHidden();
   await page.getByText('查看镜像处理详情', { exact: true }).click();
@@ -656,14 +675,15 @@ test('架构不匹配会说明原因并提供重新拉取按钮', async ({ page 
   await expect(rows.nth(1)).toContainText('架构不匹配');
   await expect(rows.nth(1)).toContainText('现有镜像为 linux/amd64，目标为 linux/arm64');
   await expect(review.getByText('未确认', { exact: true })).toHaveCount(0);
-  await expect(review.getByRole('button', { name: '下一步：部署版本' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: '开始完整版本部署' })).toBeEnabled();
+  await expect(review.getByText('架构不匹配').first()).toBeVisible();
 
   await review.getByRole('button', { name: '拉取 1 个镜像' }).click();
   await page.getByRole('dialog', { name: '确认拉取镜像' })
     .getByRole('button', { name: '开始拉取', exact: true })
     .click();
   await expect(page.getByText('待处理镜像已拉取，目标镜像核对通过。', { exact: true })).toBeVisible();
-  await expect(review.getByRole('button', { name: '下一步：部署版本' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: '开始完整版本部署' })).toBeEnabled();
 });
 
 test('拉取成功但复核仍缺失时不显示成功', async ({ page }) => {
@@ -676,7 +696,7 @@ test('拉取成功但复核仍缺失时不显示成功', async ({ page }) => {
   await expect(page.locator('.step-card .el-alert--error')).toContainText(
     '仍有 1 个镜像未就绪'
   );
-  await expect(page.getByRole('button', { name: '下一步：部署版本' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: '开始完整版本部署' })).toBeDisabled();
   await expect(page.getByText('待处理镜像已拉取，目标镜像核对通过。', { exact: true })).toBeHidden();
 });
 
@@ -832,7 +852,7 @@ for (const [label, options, imports] of [
     await page.getByRole('button', { name: '本机拉取并传入' }).click();
     await page.getByRole('dialog').getByRole('button', { name: '拉取并传入', exact: true }).click();
     await expect(page.locator('.step-card .el-alert--error')).toBeVisible();
-    await expect(page.getByRole('button', { name: '下一步：部署版本' })).toBeDisabled();
+    await expect(page.getByRole('button', { name: '开始完整版本部署' })).toBeDisabled();
     await expect(page.getByRole('button', { name: '本机拉取并传入' })).toBeEnabled();
     await expect(
       page.getByText('本机镜像已按目标架构传入并导入，目标镜像核对通过。', { exact: true })
@@ -848,6 +868,7 @@ for (const [label, options, imports] of [
 test('离线镜像包只传输缺失项对应文件，并在窄窗口中正常操作', async ({ page }) => {
   await page.setViewportSize({ width: 800, height: 1000 });
   await setupImageTransfer(page, { offline: true });
+  await expectStepperFits(page);
   await page.locator('.image-preparation').getByText('离线镜像包', { exact: true }).click();
   await page.getByRole('textbox', { name: '镜像介质目录' }).fill('/media/offline');
   await page.screenshot({ path: '/tmp/deploy-missing-images-narrow.png', fullPage: true, animations: 'disabled' });
@@ -877,7 +898,7 @@ test('导出期间展示阶段状态并阻止重复操作', async ({ page }) => 
   ).toBeVisible();
 });
 
-test('清单比对步骤展示服务、镜像与配置差异', async ({ page }) => {
+test('部署版本页展示服务、镜像与配置差异', async ({ page }) => {
   const problems = [];
   page.on('pageerror', (error) => problems.push(`未捕获异常：${error.message}`));
 
@@ -894,7 +915,7 @@ test('清单比对步骤展示服务、镜像与配置差异', async ({ page }) 
 
   await openReviewStep(page);
 
-  await expect(page.locator('.stepper [aria-current="step"]')).toHaveText('5清单比对');
+  await expect(page.locator('.stepper [aria-current="step"]')).toHaveText('5部署版本');
   const review = page
     .locator('.step-card')
     .filter({ has: page.getByRole('heading', { name: '核对目标环境' }) });
@@ -934,8 +955,8 @@ test('清单比对步骤展示服务、镜像与配置差异', async ({ page }) 
   await expect(review.locator('.image-preparation')).toContainText('准备待处理镜像');
   await expect(review.getByRole('radio', { name: '从镜像仓库拉取', exact: true })).toBeChecked();
   await expect(review.getByRole('button', { name: '拉取 1 个镜像' })).toBeVisible();
-  await expect(review.getByRole('button', { name: '下一步：部署版本' })).toBeDisabled();
-  await expect(review.locator('.next-blocked')).toContainText('仍有 1 个镜像未就绪');
+  await expect(page.getByRole('button', { name: '开始完整版本部署' })).toBeDisabled();
+  await expect(page.locator('.review-summary')).toContainText('需要先处理阻断项');
 
   await review.getByRole('button', { name: '查看配置对比' }).click();
   const dialog = page.locator('.config-diff-dialog');
@@ -945,14 +966,18 @@ test('清单比对步骤展示服务、镜像与配置差异', async ({ page }) 
   await dialog.getByRole('button', { name: '关闭' }).click();
   await expect(dialog).toBeHidden();
 
-  await review.getByRole('button', { name: '上一步' }).click();
+  await page
+    .locator('.step-card')
+    .filter({ has: page.getByRole('heading', { name: '部署完整版本' }) })
+    .getByRole('button', { name: '上一步' })
+    .click();
   await expect(page.locator('.stepper [aria-current="step"]')).toHaveText('4解压制品');
   await expect(page.locator('.step-card').first().locator('h3')).toHaveText('解压并校验制品');
 
   expect(problems).toEqual([]);
 });
 
-test('清单比对步骤在镜像齐全时显示就绪状态并允许继续', async ({ page }) => {
+test('部署版本页在镜像齐全时显示就绪状态并允许部署', async ({ page }) => {
   const problems = [];
   page.on('pageerror', (error) => problems.push(`未捕获异常：${error.message}`));
 
@@ -971,6 +996,8 @@ test('清单比对步骤在镜像齐全时显示就绪状态并允许继续', as
       unreadyImages: [],
       ready: true,
       canIncrementalUpdate: true,
+      issues: [],
+      warnings: [],
       images: demoDeploymentReview.images.map((item) => ({
         ...item,
         status: 'ready',
@@ -1017,6 +1044,8 @@ test('制品文件缺失时提供写入入口，路径异常时阻止继续', as
     canIncrementalUpdate: true,
     missingImages: [],
     unreadyImages: [],
+    issues: [],
+    warnings: [],
     images: demoDeploymentReview.images.map((item) => ({
       ...item,
       status: 'ready',
@@ -1056,10 +1085,13 @@ test('制品文件缺失时提供写入入口，路径异常时阻止继续', as
   const writeButton = page.getByRole('button', { name: '下一步：部署完整版本' });
   await expect(writeButton).toBeEnabled();
   await writeButton.click();
-  await expect(page.locator('.stepper [aria-current="step"]')).toHaveText('6部署版本');
+  await expect(page.locator('.stepper [aria-current="step"]')).toHaveText('5部署版本');
+  await expect(page.locator('.step-card').filter({
+    has: page.getByRole('heading', { name: '核对目标环境' })
+  })).toHaveCount(0);
   await expect(page.getByRole('button', { name: '开始完整版本部署' })).toBeEnabled();
   await expect(page.locator('.deployment-actions')).toHaveCount(0);
-  await expect(page.getByRole('checkbox')).toHaveCount(2);
+  await expect(page.getByRole('checkbox')).toHaveCount(0);
   await expect(page.getByText('部署失败时会停止新版本', { exact: false })).toBeVisible();
 
   const invalidReview = {
@@ -1080,10 +1112,17 @@ test('制品文件缺失时提供写入入口，路径异常时阻止继续', as
       return invoke(command, args);
     };
   }, invalidReview);
-  await page.getByRole('button', { name: '返回清单比对' }).click();
+  await page.getByRole('button', { name: '展开详情' }).click();
+  await page
+    .locator('.step-card')
+    .filter({ has: page.getByRole('heading', { name: '核对目标环境' }) })
+    .getByRole('button', { name: '重新检查', exact: true })
+    .first()
+    .click();
   await page.getByRole('tab', { name: '制品文件' }).click();
   await expect(page.getByRole('tabpanel').locator('.el-table__row').first()).toContainText('路径异常');
-  await expect(page.getByRole('button', { name: '下一步：部署版本' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: '开始完整版本部署' })).toBeDisabled();
+  await expect(page.locator('.review-summary')).toContainText('需要先处理阻断项');
   await expect(page.locator('.next-blocked')).toContainText('制品文件无法核对或路径异常');
   await expect(
     page.getByRole('tabpanel', { name: '制品文件' }).getByRole('button', { name: '重新检查', exact: true })
@@ -1105,6 +1144,8 @@ test('部署版本步骤展示完整部署范围与恢复说明', async ({ page 
     bundlePlan: demoBundlePlan,
     deploymentReview: {
       ...demoDeploymentReview,
+      issues: [],
+      warnings: [],
       ready: true,
       canIncrementalUpdate: true,
       missingImages: [],
@@ -1124,9 +1165,8 @@ test('部署版本步骤展示完整部署范围与恢复说明', async ({ page 
   const review = page
     .locator('.step-card')
     .filter({ has: page.getByRole('heading', { name: '核对目标环境' }) });
-  await review.getByRole('button', { name: '下一步：部署版本' }).click();
 
-  await expect(page.locator('.stepper [aria-current="step"]')).toHaveText('6部署版本');
+  await expect(page.locator('.stepper [aria-current="step"]')).toHaveText('5部署版本');
   const step = page
     .locator('.step-card')
     .filter({ has: page.getByRole('heading', { name: '部署完整版本' }) });
@@ -1140,79 +1180,16 @@ test('部署版本步骤展示完整部署范围与恢复说明', async ({ page 
   await expect(step.getByText('接口服务', { exact: true })).toBeVisible();
   await expect(step.getByText('demo-data', { exact: true })).toBeVisible();
   await expect(step.getByText('deploy/backups', { exact: true })).toBeVisible();
-  await expect(step.getByRole('checkbox')).toHaveCount(2);
+  await expect(step.getByRole('checkbox')).toHaveCount(0);
   await expect(step.getByText('更新前备份')).toHaveCount(0);
 
-  await expect(step.getByRole('button', { name: '执行预检' })).toBeEnabled();
+  await expect(step.getByRole('button', { name: '执行预检' })).toHaveCount(0);
   await expect(step.getByRole('button', { name: '开始完整版本部署' })).toBeEnabled();
   await expect(step.getByRole('button', { name: '查看集群监控' })).toHaveCount(0);
 
-  await step.getByRole('button', { name: '返回清单比对' }).click();
-  await expect(page.locator('.stepper [aria-current="step"]')).toHaveText('5清单比对');
+  await step.getByRole('button', { name: '上一步' }).click();
+  await expect(page.locator('.stepper [aria-current="step"]')).toHaveText('4解压制品');
 
-  expect(problems).toEqual([]);
-});
-
-test('可按需取消数据卷备份，预检和执行都使用同一选择', async ({ page }) => {
-  const problems = [];
-  page.on('pageerror', (error) => problems.push(`未捕获异常：${error.message}`));
-
-  await useDesktopBackend(page, {
-    hosts: [localHost],
-    projects: [localProject],
-    activeProjectId: localProject.id,
-    localEnv,
-    dialogPath: demoPreparedBundle.dir,
-    preparedBundle: demoPreparedBundle,
-    bundlePlan: demoBundlePlan,
-    deploymentReview: {
-      ...demoDeploymentReview,
-      ready: true,
-      missingImages: [],
-      unreadyImages: [],
-      images: demoDeploymentReview.images.map((item) => ({
-        ...item,
-        status: 'ready',
-        platform: 'linux/amd64',
-        detail: '目标 Docker 已具备该镜像',
-        pullable: false
-      }))
-    }
-  });
-  await openReviewStep(page);
-  await page.getByRole('button', { name: '下一步：部署版本' }).click();
-
-  const step = page
-    .locator('.step-card')
-    .filter({ has: page.getByRole('heading', { name: '部署完整版本' }) });
-  const volumeOption = step.locator('.volume-option').filter({ hasText: 'demo-data' });
-  await expect(volumeOption.getByRole('checkbox')).toBeChecked();
-  await volumeOption.click();
-  await expect(volumeOption.getByRole('checkbox')).not.toBeChecked();
-  await expect(step.getByText('未选择数据卷备份', { exact: false })).toBeVisible();
-
-  await step.getByRole('button', { name: '执行预检' }).click();
-  await expect(step.getByText('预检通过，可以开始完整版本部署。')).toBeVisible();
-  const preflight = await page.evaluate(() =>
-    window.__deployTestCalls.find(
-      (item) => item.command === 'deploy_local_version' && item.args.dryRun
-    )
-  );
-  expect(preflight.args.backupVolumes).toEqual([]);
-
-  await step.getByRole('button', { name: '开始完整版本部署' }).click();
-  const dialog = page.getByRole('dialog', { name: '确认完整版本部署' });
-  await expect(dialog).toContainText('不备份数据卷');
-  await expect(dialog).toContainText('失败时不会恢复这些卷中的数据');
-  await dialog.getByRole('button', { name: '开始部署' }).click();
-  await expect(step.locator('.execution-result')).toBeVisible();
-
-  const execution = await page.evaluate(() =>
-    window.__deployTestCalls.find(
-      (item) => item.command === 'deploy_local_version' && !item.args.dryRun
-    )
-  );
-  expect(execution.args.backupVolumes).toEqual([]);
   expect(problems).toEqual([]);
 });
 
@@ -1240,6 +1217,8 @@ test('未完成事务阻止新部署，恢复失败时要求人工处理', async
     deploymentTransaction: failedTransaction,
     deploymentReview: {
       ...demoDeploymentReview,
+      issues: [],
+      warnings: [],
       ready: true,
       canIncrementalUpdate: true,
       missingImages: [],
@@ -1255,10 +1234,6 @@ test('未完成事务阻止新部署，恢复失败时要求人工处理', async
   });
 
   await openReviewStep(page);
-  const review = page
-    .locator('.step-card')
-    .filter({ has: page.getByRole('heading', { name: '核对目标环境' }) });
-  await review.getByRole('button', { name: '下一步：部署版本' }).click();
   const step = page
     .locator('.step-card')
     .filter({ has: page.getByRole('heading', { name: '部署完整版本' }) });
@@ -1275,8 +1250,8 @@ test('未完成事务阻止新部署，恢复失败时要求人工处理', async
       return invoke(command, args);
     };
   }, failedTransaction);
-  await step.getByRole('button', { name: '返回清单比对' }).click();
-  await review.getByRole('button', { name: '下一步：部署版本' }).click();
+  await step.getByRole('button', { name: '上一步' }).click();
+  await page.getByRole('button', { name: '下一步：核对并部署' }).click();
   const blocked = page
     .locator('.step-card')
     .filter({ has: page.getByRole('heading', { name: '部署完整版本' }) });
@@ -1293,8 +1268,8 @@ test('未完成事务阻止新部署，恢复失败时要求人工处理', async
       return invoke(command, args);
     };
   });
-  await blocked.getByRole('button', { name: '返回清单比对' }).click();
-  await review.getByRole('button', { name: '下一步：部署版本' }).click();
+  await blocked.getByRole('button', { name: '上一步' }).click();
+  await page.getByRole('button', { name: '下一步：核对并部署' }).click();
   await expect(step.getByRole('button', { name: '开始完整版本部署' })).toBeDisabled();
   await expect(step.locator('.el-alert--error')).toContainText('读取部署事务失败');
   expect(problems).toEqual([]);
@@ -1369,6 +1344,68 @@ test('新版本失败并恢复上一版本时显示恢复结果与事务快照',
   expect(problems).toEqual([]);
 });
 
+test('旧版本无法启动时说明数据已恢复但服务未启动', async ({ page }) => {
+  await useDesktopBackend(page, {
+    hosts: [localHost],
+    projects: [localProject],
+    activeProjectId: localProject.id,
+    localEnv,
+    dialogPath: demoPreparedBundle.dir,
+    preparedBundle: demoPreparedBundle,
+    bundlePlan: demoBundlePlan,
+    deploymentReview: {
+      ...demoDeploymentReview,
+      ready: true,
+      canIncrementalUpdate: true,
+      missingImages: [],
+      unreadyImages: [],
+      images: demoDeploymentReview.images.map((item) => ({
+        ...item,
+        status: 'ready',
+        platform: 'linux/amd64',
+        detail: '目标 Docker 已具备该镜像',
+        pullable: false
+      }))
+    }
+  });
+  await openReviewStep(page);
+  const review = page
+    .locator('.step-card')
+    .filter({ has: page.getByRole('heading', { name: '核对目标环境' }) });
+  await review.getByRole('button', { name: '下一步：部署版本' }).click();
+  await page.evaluate(() => {
+    const invoke = window.__TAURI_INTERNALS__.invoke;
+    window.__TAURI_INTERNALS__.invoke = async (command, args = {}) => {
+      if (command === 'deploy_local_version' && !args.dryRun) {
+        return {
+          success: false,
+          recovered: false,
+          recoveryFailed: false,
+          stage: 'starting',
+          version: 'v1.4.0',
+          previousVersion: 'v1.3.0',
+          transactionId: 'txn-degraded',
+          snapshotDir: '/srv/deploy-demo/.deploy-desktop/transactions/txn-degraded',
+          error: '新版本服务未就绪',
+          output: '已恢复部署文件与数据库数据，但未能自动启动上一版本',
+          durationSecs: 42,
+          status: { hadDeployment: true, deploymentStarted: true, state: 'recovered' }
+        };
+      }
+      return invoke(command, args);
+    };
+  });
+  const step = page
+    .locator('.step-card')
+    .filter({ has: page.getByRole('heading', { name: '部署完整版本' }) });
+  await step.getByRole('button', { name: '开始完整版本部署' }).click();
+  await page.getByRole('dialog', { name: '确认完整版本部署' })
+    .getByRole('button', { name: '开始部署' }).click();
+  await expect(step.locator('.execution-result')).toContainText(
+    '已恢复部署文件与数据库数据，但未能自动启动上一版本'
+  );
+});
+
 for (const scenario of [
   { name: '成功', success: true, recoveryFailed: false, state: 'committed', started: true, title: '完整版本部署完成' },
   { name: '自动恢复失败', success: false, recoveryFailed: true, state: 'recovery_failed', started: true, title: '新版本失败，自动恢复未完成' },
@@ -1385,6 +1422,8 @@ for (const scenario of [
       bundlePlan: demoBundlePlan,
       deploymentReview: {
         ...demoDeploymentReview,
+        issues: [],
+        warnings: [],
         ready: true,
         missingImages: [],
         unreadyImages: [],
